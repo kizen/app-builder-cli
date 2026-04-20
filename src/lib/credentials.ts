@@ -1,16 +1,8 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-
-export const ENVIRONMENTS = ['go', 'fmo', 'staging', 'integration', 'test1'] as const;
-export type Environment = (typeof ENVIRONMENTS)[number];
-
-export interface Credentials {
-  apiKey: string;
-  userId: string;
-  businessId: string;
-  environment: Environment;
-}
+import { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
+export { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
 
 export interface CredentialProfile {
   name: string;

@@ -20,38 +20,11 @@ import {
 import { loadConfig, saveConfig } from '../lib/config.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
+import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
 
 const SOURCE_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
 const SKIP_FILES = new Set(['.DS_Store', '.gitignore']);
-
-const TEXT_EXTENSIONS = new Set([
-  '.ts',
-  '.tsx',
-  '.js',
-  '.jsx',
-  '.mjs',
-  '.cjs',
-  '.json',
-  '.md',
-  '.mdx',
-  '.yml',
-  '.yaml',
-  '.toml',
-  '.css',
-  '.scss',
-  '.html',
-  '.htm',
-  '.xml',
-  '.svg',
-  '.txt',
-  '.sh',
-  '.py',
-  '.env',
-  '.gitignore',
-  '.prettierrc',
-  '.eslintrc',
-]);
 
 function isLocalHost(host: string | undefined): boolean {
   if (host === undefined || host === '') {
@@ -68,8 +41,6 @@ function isLocalHost(host: string | undefined): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
 }
 
-// Mirrors KIZEN_DOMAINS in src/chrome/launcher.ts — kept duplicated until
-// #29 centralizes both (overridable via env var).
 const PROXY_ALLOWED_DOMAINS = ['kizen.com', 'kizen.dev'];
 
 function isAllowedProxyTarget(target: string): boolean {
@@ -202,7 +173,7 @@ export function createRequestHandler(
       const url = req.url ?? '/';
 
       try {
-        // Defeat DNS-rebind: even though we bind to 127.0.0.1, a browser tab on
+        // Even though we bind to 127.0.0.1, a browser tab on
         // a malicious origin can point its DNS at our loopback address. The
         // Host header still carries the original hostname, so rejecting
         // anything that isn't localhost/127.0.0.1 closes the hole.
@@ -213,9 +184,6 @@ export function createRequestHandler(
           return;
         }
 
-        // Belt-and-suspenders: state-changing requests must also come from a
-        // local Origin. Browsers always set Origin on POSTs; same-origin policy
-        // + this check together block cross-origin state changes.
         const isWrite = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE';
 
         if (isWrite && !isLocalOrigin(req.headers.origin)) {

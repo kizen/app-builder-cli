@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Box, Text, useApp } from 'ink';
 import { runBuild } from '../lib/runBuild.js';
 import type { BuildStepName } from '../lib/runBuild.js';
-import { formatBytes } from '../lib/formatBytes.js';
+import { formatBytes } from '../../shared/lib/formatBytes.js';
 import { AppHeader } from './AppHeader.js';
 import { Spinner } from './Spinner.js';
 

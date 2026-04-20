@@ -16,7 +16,10 @@
     "jsx": "react-jsx",
     "noEmit": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "paths": {
+      "@shared/*": ["../shared/*"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules"]

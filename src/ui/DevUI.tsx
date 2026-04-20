@@ -19,7 +19,7 @@ import { runBuild } from '../lib/runBuild.js';
 import type { Credentials } from '../lib/credentials.js';
 import { saveConfig } from '../lib/config.js';
 import { LOG_LIMIT, LOG_DISPLAY, FILE_WATCH_DEBOUNCE_MS } from '../lib/constants.js';
-import { formatBytes } from '../lib/formatBytes.js';
+import { formatBytes } from '../../shared/lib/formatBytes.js';
 import { useLogHistory } from '../hooks/useLogHistory.js';
 import { CredentialSetupUI } from './CredentialSetupUI.js';
 import type { CredentialMode, CredentialSetupResult } from './CredentialSetupUI.js';

@@ -54,13 +54,6 @@ const ASSISTANT_FIELD_TYPES: ReadonlySet<AssistantField['type']> = new Set([
 
 // Drops runtime-only block types (e.g. 'spacer') and normalizes id→key so the
 // DynamicModalContent's SetupAssistantController only sees rows it understands.
-// Other AssistantField fields (typeahead, getFetchUrl, fetchMethod, object_id,
-// when, …) are read by the engine at runtime but not statically declared on
-// FlexBlock, so we spread the whole block through to preserve them. The final
-// `as unknown as AssistantField` is a deliberate, single-point acknowledgement
-// of that cross-module shape relationship — picking fields explicitly would
-// silently drop anything FlexBlock doesn't name (this bit us once: typeaheads
-// stopped taking input because the flag was pruned in translation).
 const toAssistantFields = (blocks: FlexBlock[]): AssistantField[] =>
   blocks.flatMap((b): AssistantField[] => {
     const key = b.key ?? b.id;

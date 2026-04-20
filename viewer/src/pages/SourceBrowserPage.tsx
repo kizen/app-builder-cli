@@ -11,6 +11,8 @@ import {
 } from '@fortawesome/free-solid-svg-icons';
 import { CodeViewer, extensionToLanguage } from '../components/CodeViewer.js';
 import { useLocalStorage } from '../hooks/useLocalStorage.js';
+import { formatBytes } from '@shared/lib/formatBytes.js';
+import { TEXT_EXTENSIONS } from '@shared/lib/fileExtensions.js';
 
 interface TreeEntry {
   name: string;
@@ -25,30 +27,6 @@ interface TreeResponse {
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico']);
 
-const TEXT_EXTENSIONS = new Set([
-  '.ts',
-  '.tsx',
-  '.js',
-  '.jsx',
-  '.mjs',
-  '.cjs',
-  '.json',
-  '.md',
-  '.mdx',
-  '.yml',
-  '.yaml',
-  '.toml',
-  '.css',
-  '.scss',
-  '.html',
-  '.htm',
-  '.xml',
-  '.svg',
-  '.txt',
-  '.sh',
-  '.py',
-  '.env',
-]);
 
 function extnameOf(path: string): string {
   const slash = path.lastIndexOf('/');
@@ -62,17 +40,6 @@ function joinPath(parent: string, name: string): string {
   return parent === '' ? name : `${parent}/${name}`;
 }
 
-function formatBytes(n: number): string {
-  if (n < 1024) {
-    return `${String(n)} B`;
-  }
-
-  if (n < 1024 * 1024) {
-    return `${(n / 1024).toFixed(1)} KB`;
-  }
-
-  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-}
 
 function treeQueryOptions(path: string): {
   queryKey: readonly unknown[];

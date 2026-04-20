@@ -1,14 +1,6 @@
 import { createContext, useContext } from 'react';
-
-export const ENVIRONMENTS = ['go', 'fmo', 'staging', 'integration', 'test1'] as const;
-export type Environment = (typeof ENVIRONMENTS)[number];
-
-export interface Credentials {
-  apiKey: string;
-  userId: string;
-  businessId: string;
-  environment: Environment;
-}
+import { type Credentials } from '@shared/lib/credentials.js';
+export { ENVIRONMENTS, type Environment, type Credentials } from '@shared/lib/credentials.js';
 
 export const CredentialsContext = createContext<Credentials>({
   apiKey: '',

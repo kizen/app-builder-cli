@@ -8,18 +8,7 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { VALID_ICONS } from '../lib/validIcons.js';
 import type { PluginBaseConfig } from '../types.js';
-
-function formatBytes(n: number): string {
-  if (n < 1024) {
-    return `${String(n)} B`;
-  }
-
-  if (n < 1024 * 1024) {
-    return `${(n / 1024).toFixed(1)} KB`;
-  }
-
-  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
-}
+import { formatBytes } from '@shared/lib/formatBytes.js';
 
 export const AppDetailPage: FC = () => {
   const { apiName } = useParams({ strict: false });
