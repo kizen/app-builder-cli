@@ -1,0 +1,394 @@
+import type { RoutablePageConfig } from '@kizenapps/engine';
+import { useAppPage } from '@kizenapps/engine/react';
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  forwardRef,
+  useImperativeHandle,
+  type FC,
+} from 'react';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { VALID_ICONS } from '../lib/validIcons.js';
+import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
+
+const ROUTABLE_IFRAME_ALLOW =
+  'microphone; speaker-selection; autoplay; camera; display-capture; hid';
+
+const RoutablePageView: FC<{ page: RoutablePageConfig; isActive: boolean }> = ({
+  page,
+  isActive,
+}) => {
+  const {
+    scriptUIRef,
+    outputUIRef,
+    scopedCss,
+    sanitizedHtml,
+    interactableScriptRef,
+    iframeURL,
+    pending,
+  } = useAppPage(page);
+
+  return (
+    <div style={{ display: isActive ? 'block' : 'none' }} className="relative h-full w-full">
+      {pending && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
+          loading…
+        </div>
+      )}
+
+      {page.type === 'script' && (
+        <>
+          <div ref={scriptUIRef} className="h-full w-full p-3" />
+          <style>{scopedCss}</style>
+        </>
+      )}
+
+      {page.type === 'html' && (
+        <div ref={interactableScriptRef} className="overflow-auto p-3">
+          {sanitizedHtml && <div dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />}
+          <div ref={outputUIRef} />
+          <style>{scopedCss}</style>
+        </div>
+      )}
+
+      {page.type === 'iframe' && iframeURL && (
+        <iframe
+          src={iframeURL}
+          className="h-full w-full border-0"
+          title={page.name}
+          allow={ROUTABLE_IFRAME_ALLOW}
+        />
+      )}
+    </div>
+  );
+};
+
+export interface BrowserHandle {
+  navigate: (path: string, options?: { replace?: boolean }) => void;
+  openNewTab: (url: string) => void;
+}
+
+interface HomeHistory {
+  entries: string[];
+  index: number;
+}
+interface DynamicTab {
+  id: string;
+  url: string;
+  title: string;
+}
+
+const ROUTE_CHANGE_EVENT = 'integration:route-change';
+
+function findMatchingPage(
+  pages: RoutablePageConfig[],
+  normalized: string,
+): RoutablePageConfig | undefined {
+  return pages.find(
+    (p) => p.api_name === normalized || normalized.endsWith(`${p.plugin_api_name}/${p.api_name}`),
+  );
+}
+
+function tabTitleFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+
+    return parsed.hostname !== ''
+      ? parsed.hostname
+      : (parsed.pathname.split('/').filter(Boolean).pop() ?? url);
+  } catch {
+    return url.split('/').filter(Boolean).pop() ?? url;
+  }
+}
+
+export const RoutablePageBrowser = forwardRef<BrowserHandle, { pages: RoutablePageConfig[] }>(
+  ({ pages }, ref) => {
+    const [activeTab, setActiveTab] = useState<string>('home');
+    const [homeHistory, setHomeHistory] = useState<HomeHistory>({ entries: [''], index: 0 });
+    const [dynamicTabs, setDynamicTabs] = useState<DynamicTab[]>([]);
+    const [navVersions, setNavVersions] = useState<Record<string, number>>({});
+    const tabIdCounter = useRef(0);
+
+    const currentHomePath = homeHistory.entries[homeHistory.index] ?? '';
+    const displayPath = activeTab === 'home' ? currentHomePath : activeTab;
+
+    const isFirstRender = useRef(true);
+
+    useEffect(() => {
+      if (isFirstRender.current) {
+        isFirstRender.current = false;
+
+        return;
+      }
+
+      const pathname = `/${displayPath}`;
+
+      window.dispatchEvent(
+        new CustomEvent(ROUTE_CHANGE_EVENT, {
+          detail: {
+            location: {
+              host: window.location.host,
+              origin: window.location.origin,
+              port: window.location.port,
+              protocol: window.location.protocol,
+              pathname,
+              search: '',
+              hash: '',
+              href: `${window.location.origin}${pathname}`,
+            },
+          },
+        }),
+      );
+    }, [displayPath]);
+
+    const canGoBack = activeTab === 'home' && homeHistory.index > 0;
+    const canGoForward = activeTab === 'home' && homeHistory.index < homeHistory.entries.length - 1;
+
+    const navigate = useCallback(
+      (path: string, options?: { replace?: boolean }) => {
+        const normalized = path.replace(/^\/+/, '');
+        const matchedPage = findMatchingPage(pages, normalized);
+
+        if (matchedPage) {
+          setActiveTab(matchedPage.api_name);
+
+          setNavVersions((prev) => ({
+            ...prev,
+            [matchedPage.api_name]: (prev[matchedPage.api_name] ?? 0) + 1,
+          }));
+        } else {
+          setActiveTab('home');
+
+          setHomeHistory((prev) => {
+            if (!options?.replace && prev.entries[prev.index] === normalized) {
+              return prev;
+            }
+
+            if (options?.replace) {
+              const entries = [...prev.entries];
+
+              entries[prev.index] = normalized;
+
+              return { entries, index: prev.index };
+            }
+
+            const entries = [...prev.entries.slice(0, prev.index + 1), normalized];
+
+            return { entries, index: entries.length - 1 };
+          });
+        }
+      },
+      [pages],
+    );
+
+    const openNewTab = useCallback(
+      (url: string) => {
+        const normalized = url.replace(/^\/+/, '');
+        const matchedPage = findMatchingPage(pages, normalized);
+
+        if (matchedPage) {
+          setActiveTab(matchedPage.api_name);
+
+          setNavVersions((prev) => ({
+            ...prev,
+            [matchedPage.api_name]: (prev[matchedPage.api_name] ?? 0) + 1,
+          }));
+
+          return;
+        }
+
+        tabIdCounter.current += 1;
+
+        const id = `__tab_${String(tabIdCounter.current)}`;
+
+        setDynamicTabs((prev) => [...prev, { id, url, title: tabTitleFromUrl(url) }]);
+
+        setActiveTab(id);
+      },
+      [pages],
+    );
+
+    const closeTab = useCallback(
+      (id: string) => {
+        setDynamicTabs((prev) => prev.filter((t) => t.id !== id));
+
+        if (activeTab === id) {
+          setActiveTab('home');
+        }
+      },
+      [activeTab],
+    );
+
+    useImperativeHandle(ref, () => ({ navigate, openNewTab }), [navigate, openNewTab]);
+
+    const activeDynamicTab = dynamicTabs.find((t) => t.id === activeTab) ?? null;
+
+    return (
+      <div className="mt-1.5 overflow-hidden rounded border border-black/10 bg-white">
+        {/* Browser chrome */}
+        <div className="flex items-center gap-2 border-b border-black/8 bg-neutral-50 px-3 py-1.5">
+          <div className="flex shrink-0 gap-1">
+            <div className="h-3 w-3 rounded-full bg-red-400/60" />
+            <div className="h-3 w-3 rounded-full bg-yellow-400/60" />
+            <div className="h-3 w-3 rounded-full bg-green-400/60" />
+          </div>
+          <button
+            onClick={() => {
+              setHomeHistory((prev) => ({ ...prev, index: prev.index - 1 }));
+            }}
+            disabled={!canGoBack}
+            className={`px-0.5 font-mono text-[15px] leading-none transition-colors ${canGoBack ? 'text-neutral-600 hover:text-neutral-900' : 'cursor-default text-neutral-300'}`}
+          >
+            ‹
+          </button>
+          <button
+            onClick={() => {
+              setHomeHistory((prev) => ({ ...prev, index: prev.index + 1 }));
+            }}
+            disabled={!canGoForward}
+            className={`px-0.5 font-mono text-[15px] leading-none transition-colors ${canGoForward ? 'text-neutral-600 hover:text-neutral-900' : 'cursor-default text-neutral-300'}`}
+          >
+            ›
+          </button>
+          <div className="min-w-0 flex-1 truncate rounded border border-black/8 bg-white px-2 py-0.5 font-mono text-[11px] text-neutral-400">
+            {activeDynamicTab ? activeDynamicTab.url : `app://sandbox/${displayPath}`}
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-black/8 bg-neutral-50">
+          <button
+            onClick={() => {
+              setActiveTab('home');
+            }}
+            className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
+              activeTab === 'home'
+                ? 'bg-white font-medium text-neutral-900'
+                : 'text-neutral-500 hover:bg-black/5'
+            }`}
+          >
+            home
+          </button>
+          {pages.map((page) => (
+            <button
+              key={page.api_name}
+              onClick={() => {
+                setActiveTab(page.api_name);
+              }}
+              className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
+                activeTab === page.api_name
+                  ? 'bg-white font-medium text-neutral-900'
+                  : 'text-neutral-500 hover:bg-black/5'
+              }`}
+            >
+              {page.toolbar_icon &&
+                (ICON_MAP[page.toolbar_icon] ? (
+                  <FontAwesomeIcon
+                    icon={ICON_MAP[page.toolbar_icon]}
+                    className="mr-1 text-[10px] text-neutral-400"
+                  />
+                ) : (
+                  <span
+                    className={`mr-1 rounded px-1 font-mono text-[9px] ${VALID_ICONS.has(page.toolbar_icon) || CUSTOM_ICON_NAMES.has(page.toolbar_icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
+                  >
+                    {page.toolbar_icon}
+                  </span>
+                ))}
+              {page.name}
+            </button>
+          ))}
+          {dynamicTabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`flex items-center border-r border-black/8 ${activeTab === tab.id ? 'bg-white' : 'hover:bg-black/5'}`}
+            >
+              <button
+                onClick={() => {
+                  setActiveTab(tab.id);
+                }}
+                className={`py-1.5 pl-3 pr-1 font-mono text-[11px] transition-colors ${
+                  activeTab === tab.id ? 'font-medium text-neutral-900' : 'text-neutral-500'
+                }`}
+              >
+                {tab.title}
+              </button>
+              <button
+                onClick={() => {
+                  closeTab(tab.id);
+                }}
+                className="px-1.5 py-1.5 font-mono text-[11px] text-neutral-300 transition-colors hover:text-neutral-600"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+
+        {/* Content */}
+        <div className="h-[500px]">
+          {activeTab === 'home' && currentHomePath === '' && (
+            <div className="flex flex-col gap-2 p-6 font-mono text-[11px]">
+              <div className="text-neutral-400">app://sandbox/</div>
+              <div className="mt-1 text-[13px] font-medium text-neutral-700">App Homepage</div>
+              <div className="text-neutral-400">
+                {pages.length > 0
+                  ? 'This is the index page of your app. Navigate to a routable page using the tabs above.'
+                  : 'This app has no routable pages defined. Add a routable_page artifact to your plugin to see it here.'}
+              </div>
+            </div>
+          )}
+          {activeTab === 'home' && currentHomePath !== '' && (
+            <div className="flex flex-col gap-2 p-6 font-mono text-[11px]">
+              <div className="text-neutral-400">app://sandbox/{currentHomePath}</div>
+              <div className="mt-1 text-[13px] font-medium text-neutral-500">Page not found</div>
+              <div className="text-neutral-400">
+                No routable page with api_name{' '}
+                <code className="rounded bg-neutral-100 px-1">{currentHomePath}</code> is defined in
+                this plugin.
+              </div>
+            </div>
+          )}
+          {pages.map((page) => (
+            <RoutablePageView
+              key={`${page.api_name}-${String(navVersions[page.api_name] ?? 0)}`}
+              page={page}
+              isActive={activeTab === page.api_name}
+            />
+          ))}
+          {dynamicTabs.map((tab) => (
+            <div
+              key={tab.id}
+              style={{ display: activeTab === tab.id ? 'block' : 'none' }}
+              className="h-full w-full"
+            >
+              {/^https?:\/\//i.test(tab.url) ? (
+                <iframe
+                  src={tab.url}
+                  className="h-full w-full border-0"
+                  title={tab.title}
+                  allow={ROUTABLE_IFRAME_ALLOW}
+                />
+              ) : (
+                <div className="flex flex-col gap-2 p-6 font-mono text-[11px]">
+                  <div className="text-neutral-400">{tab.url}</div>
+                  <div className="mt-1 text-[13px] font-medium text-neutral-500">
+                    Page not found
+                  </div>
+                  <div className="text-neutral-400">
+                    No routable page with path{' '}
+                    <code className="rounded bg-neutral-100 px-1">{tab.url}</code> is defined in
+                    this plugin.
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  },
+);
+
+RoutablePageBrowser.displayName = 'RoutablePageBrowser';

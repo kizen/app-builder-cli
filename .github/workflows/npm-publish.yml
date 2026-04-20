@@ -1,0 +1,50 @@
+name: NPM Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Required for OIDC
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Stamp prerelease version
+        if: github.ref_type == 'branch'
+        run: pnpm run version:prerelease
+        env:
+          SHORT_SHA: ${{ github.sha }}
+
+      - name: Check version matches tag
+        if: github.ref_type == 'tag'
+        run: pnpm run version:check
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks --tag ${{ github.ref_type == 'tag' && 'latest' || 'next' }} --access public

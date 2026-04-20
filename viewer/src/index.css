@@ -1,0 +1,47 @@
+@import 'tailwindcss';
+@source "./**/*.{tsx,ts,html}";
+
+@theme {
+  --font-mono: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+.fc-kizen .fc-daygrid-more-link {
+  font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 10px;
+  color: rgb(115 115 115); /* neutral-500 */
+}
+
+.fc-kizen .fc-col-header-cell-cushion {
+  font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgb(163 163 163); /* neutral-400 */
+  text-decoration: none;
+}
+
+.fc-kizen .fc-daygrid-day-number {
+  font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  color: rgb(115 115 115); /* neutral-500 */
+  text-decoration: none;
+}
+
+.fc-kizen .fc-day-today .fc-daygrid-day-number {
+  font-weight: 700;
+  color: rgb(23 23 23); /* neutral-900 */
+}
+
+.fc-kizen .fc-popover-title {
+  font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+}
+
+.fc-kizen .fc-timegrid-slot-label-cushion,
+.fc-kizen .fc-timegrid-axis-cushion {
+  font-family: ui-monospace, Menlo, Consolas, 'Liberation Mono', monospace;
+  font-size: 10px;
+  color: rgb(163 163 163); /* neutral-400 */
+  text-transform: uppercase;
+}
