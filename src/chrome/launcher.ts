@@ -462,8 +462,7 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
 
     // macOS dock clicks on --app= windows open a stray new-tab-page window
     // (Chromium excludes app windows from its "is a browser window open?" check).
-    // Mirror Playwright's workaround (microsoft/playwright#26877): activate the
-    // original app window, then close the intruder. setDiscoverTargets replays
+    // activate the original app window, then close the intruder. setDiscoverTargets replays
     // existing targets so mainTargetId gets recaptured after a CDP reconnect.
     await c.Target.setDiscoverTargets({ discover: true });
 
