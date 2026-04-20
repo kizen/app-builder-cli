@@ -3,9 +3,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { Credentials } from './CredentialsContext.js';
 import type { ConsoleEntry } from './components/DevSidebar.js';
 
-export type ProxyLogEntry =
-  | { kind: 'request'; method: string; status: number; fromCache: boolean; url: string }
-  | { kind: 'info'; message: string };
+export type { ProxyLogEntry } from '@shared/lib/proxy.js';
+import { type ProxyLogEntry } from '@shared/lib/proxy.js';
 
 export interface VenvInstallLogLine {
   line: string;

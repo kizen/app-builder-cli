@@ -1,38 +1,8 @@
 import { type FC, useState } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faChevronDown, faChevronRight } from '@fortawesome/free-solid-svg-icons';
-
-export interface HttpRequestEntry {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-  body: string;
-  requestSubmittedAt: string;
-  session: boolean;
-  responseStatusCode: number;
-  responseHeaders: Record<string, string>;
-  responseBody: string;
-  requestErrorType: string | null;
-  duration: number;
-}
-
-export interface HttpRequests {
-  count: number;
-  notLogged: number;
-  requests: HttpRequestEntry[];
-}
-
-export interface ExecutionResult {
-  success: boolean;
-  outputValues: Record<string, unknown>;
-  logs: string[];
-  stdout: string;
-  stderr: string;
-  error?: string;
-  exitCode: number;
-  durationMs: number;
-  httpRequests?: HttpRequests;
-}
+import { type HttpRequestEntry, type HttpRequests, type ExecutionResult } from '@shared/lib/execution.js';
+export type { HttpRequestEntry, HttpRequests, ExecutionResult } from '@shared/lib/execution.js';
 
 const CollapsibleSection: FC<{
   title: string;

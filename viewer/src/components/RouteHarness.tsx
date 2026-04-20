@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FC } from 'react';
+import { useEffect, useRef, useState, type FC, type KeyboardEvent } from 'react';
 
 const ROUTE_CHANGE_EVENT = 'integration:route-change';
 
@@ -70,7 +70,7 @@ export const RouteHarness: FC = () => {
     window.dispatchEvent(new CustomEvent(ROUTE_CHANGE_EVENT, { detail: { location } }));
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent): void => {
+  const handleKeyDown = (e: KeyboardEvent): void => {
     if (e.key === 'Enter') {
       dispatch();
     }

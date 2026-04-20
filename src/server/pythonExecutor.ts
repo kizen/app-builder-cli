@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { writeFile, rm, mkdtemp, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { type ExecutionResult, type HttpRequests, type HttpRequestEntry } from '../../shared/lib/execution.js';
+export { ExecutionResult, HttpRequests, HttpRequestEntry } from '../../shared/lib/execution.js';
 
 const WRAPPER_SCRIPT = `
 import sys, json, os, traceback
@@ -184,37 +186,6 @@ export interface ExecuteStepParams {
   onInstallProgress?: VenvInstallListener;
 }
 
-export interface HttpRequestEntry {
-  method: string;
-  url: string;
-  headers: Record<string, string>;
-  body: string;
-  requestSubmittedAt: string;
-  session: boolean;
-  responseStatusCode: number;
-  responseHeaders: Record<string, string>;
-  responseBody: string;
-  requestErrorType: string | null;
-  duration: number;
-}
-
-export interface HttpRequests {
-  count: number;
-  notLogged: number;
-  requests: HttpRequestEntry[];
-}
-
-export interface ExecuteStepResult {
-  success: boolean;
-  outputValues: Record<string, unknown>;
-  logs: string[];
-  stdout: string;
-  stderr: string;
-  error?: string;
-  exitCode: number;
-  durationMs: number;
-  httpRequests?: HttpRequests;
-}
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
 const VENV_PACKAGES = [
@@ -404,7 +375,7 @@ function parseResult(stdout: string): {
   }
 }
 
-export async function executePythonStep(params: ExecuteStepParams): Promise<ExecuteStepResult> {
+export async function executePythonStep(params: ExecuteStepParams): Promise<ExecutionResult> {
   const timeout = params.timeout ?? DEFAULT_TIMEOUT;
   const pythonBin = await ensureVenv(params.scriptRuntime, params.onInstallProgress);
   const start = Date.now();
@@ -490,7 +461,7 @@ export async function executePythonStep(params: ExecuteStepParams): Promise<Exec
     const { userStdout, result } = parseResult(stdout);
 
     if (result) {
-      const base: ExecuteStepResult = {
+      const base: ExecutionResult = {
         success: result.success,
         outputValues: result.outputValues,
         logs: result.logs,
@@ -512,7 +483,7 @@ export async function executePythonStep(params: ExecuteStepParams): Promise<Exec
     }
 
     // If we couldn't parse the result, the wrapper itself likely failed
-    const base: ExecuteStepResult = {
+    const base: ExecutionResult = {
       success: false,
       outputValues: {},
       logs: [],

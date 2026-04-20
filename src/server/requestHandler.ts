@@ -119,19 +119,8 @@ function isInsideSkippedDir(pluginDir: string, abs: string): boolean {
   return segments.some((segment) => SKIP_DIRS.has(segment));
 }
 
-export type ProxyLogEntry =
-  | { kind: 'request'; method: string; status: number; fromCache: boolean; url: string }
-  | { kind: 'info'; message: string };
-
-export function proxyLogEntryToString(entry: ProxyLogEntry): string {
-  if (entry.kind === 'info') {
-    return entry.message;
-  }
-
-  const cache = entry.fromCache ? ' [cache]' : '';
-
-  return `${entry.method} ${entry.url} → ${String(entry.status)}${cache}`;
-}
+export { ProxyLogEntry, proxyLogEntryToString } from '../../shared/lib/proxy.js';
+import { type ProxyLogEntry } from '../../shared/lib/proxy.js';
 
 export function getViewerPath(): string {
   const filename = fileURLToPath(import.meta.url);

@@ -84,7 +84,6 @@ export const DevUI: FC<DevUIProps> = ({
   const wsClientsRef = useRef<Set<WebSocket>>(new Set());
   const pendingMessagesRef = useRef<string[]>([]);
 
-  // Defined early so launchChromeViewerCb can reference it
   const broadcast = useCallback((msg: object): void => {
     const json = JSON.stringify(msg);
 
