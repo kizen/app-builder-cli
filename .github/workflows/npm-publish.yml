@@ -33,6 +33,8 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        env:
+          FONTAWESOME_TOKEN: ${{ secrets.FONTAWESOME_TOKEN }}
 
       - name: Stamp prerelease version
         if: github.ref_type == 'branch'
