@@ -119,7 +119,8 @@ function isInsideSkippedDir(pluginDir: string, abs: string): boolean {
   return segments.some((segment) => SKIP_DIRS.has(segment));
 }
 
-export { ProxyLogEntry, proxyLogEntryToString } from '../../shared/lib/proxy.js';
+export type { ProxyLogEntry } from '../../shared/lib/proxy.js';
+export { proxyLogEntryToString } from '../../shared/lib/proxy.js';
 import { type ProxyLogEntry } from '../../shared/lib/proxy.js';
 
 export function getViewerPath(): string {

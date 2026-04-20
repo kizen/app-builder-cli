@@ -27,7 +27,6 @@ interface TreeResponse {
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico']);
 
-
 function extnameOf(path: string): string {
   const slash = path.lastIndexOf('/');
   const base = slash >= 0 ? path.slice(slash + 1) : path;
@@ -39,7 +38,6 @@ function extnameOf(path: string): string {
 function joinPath(parent: string, name: string): string {
   return parent === '' ? name : `${parent}/${name}`;
 }
-
 
 function treeQueryOptions(path: string): {
   queryKey: readonly unknown[];

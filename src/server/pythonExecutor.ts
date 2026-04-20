@@ -2,8 +2,12 @@ import { spawn } from 'node:child_process';
 import { writeFile, rm, mkdtemp, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { type ExecutionResult, type HttpRequests, type HttpRequestEntry } from '../../shared/lib/execution.js';
-export { ExecutionResult, HttpRequests, HttpRequestEntry } from '../../shared/lib/execution.js';
+import { type ExecutionResult, type HttpRequests } from '../../shared/lib/execution.js';
+export type {
+  ExecutionResult,
+  HttpRequests,
+  HttpRequestEntry,
+} from '../../shared/lib/execution.js';
 
 const WRAPPER_SCRIPT = `
 import sys, json, os, traceback
@@ -185,7 +189,6 @@ export interface ExecuteStepParams {
   timeout?: number;
   onInstallProgress?: VenvInstallListener;
 }
-
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
 const VENV_PACKAGES = [

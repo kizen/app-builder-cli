@@ -1,7 +1,7 @@
 import { type FC, useState } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faChevronDown, faChevronRight } from '@fortawesome/free-solid-svg-icons';
-import { type HttpRequestEntry, type HttpRequests, type ExecutionResult } from '@shared/lib/execution.js';
+import { type HttpRequestEntry, type ExecutionResult } from '@shared/lib/execution.js';
 export type { HttpRequestEntry, HttpRequests, ExecutionResult } from '@shared/lib/execution.js';
 
 const CollapsibleSection: FC<{
