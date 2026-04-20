@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "bin": {
-    "appbuilder": "./dist/index.js"
+    "appbuilder": "dist/index.js"
   },
   "files": [
     "dist"
