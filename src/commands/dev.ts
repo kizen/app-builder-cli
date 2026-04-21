@@ -42,12 +42,14 @@ export function devCommand(program: Command): void {
     .option('-c, --credentials <path>', 'path to a credentials JSON file')
     .option('-d, --debug', 'Enable CDP lifecycle logs in the TUI')
     .option('-v, --verbose', 'Log every CDP event and handled error (implies --debug)')
+    .option('--no-viewer', "Don't auto-launch the viewer on startup (press [v] to launch manually)")
     .action(
       async (options: {
         port: string;
         credentials?: string;
         debug?: boolean;
         verbose?: boolean;
+        viewer?: boolean;
       }) => {
         const port = parseInt(options.port, 10);
         const pluginDir = process.cwd();
@@ -114,6 +116,7 @@ export function devCommand(program: Command): void {
 
         const verbose = options.verbose === true;
         const debug = verbose || options.debug === true;
+        const autoViewer = options.viewer !== false;
 
         const { waitUntilExit } = render(
           createElement(DevUI, {
@@ -126,6 +129,7 @@ export function devCommand(program: Command): void {
             ...(lastPath !== undefined && { lastPath }),
             debug,
             verbose,
+            autoViewer,
           }),
           { exitOnCtrlC: false },
         );

@@ -41,6 +41,7 @@ interface DevUIProps {
   lastPath?: string;
   debug?: boolean;
   verbose?: boolean;
+  autoViewer?: boolean;
 }
 
 export const DevUI: FC<DevUIProps> = ({
@@ -53,6 +54,7 @@ export const DevUI: FC<DevUIProps> = ({
   lastPath: initialLastPath,
   debug = false,
   verbose = false,
+  autoViewer = true,
 }) => {
   const credentialsRef = useRef<Credentials | null>(initialCredentials);
   const activeProfileRef = useRef<string | undefined>(initialActiveProfile);
@@ -167,14 +169,14 @@ export const DevUI: FC<DevUIProps> = ({
   );
 
   useEffect(() => {
-    if (status !== 'running' || viewerLaunchedRef.current) {
+    if (status !== 'running' || viewerLaunchedRef.current || !autoViewer) {
       return;
     }
 
     viewerLaunchedRef.current = true;
 
     launchChromeViewerCb();
-  }, [status, launchChromeViewerCb]);
+  }, [status, autoViewer, launchChromeViewerCb]);
 
   const handleCredentialsDone = useCallback(
     (result: CredentialSetupResult): void => {
