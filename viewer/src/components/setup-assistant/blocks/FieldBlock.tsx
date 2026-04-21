@@ -53,7 +53,7 @@ export const FieldBlock: FC<{
 
         setFetchedForObject(objectId);
       } catch {
-        setFieldOptions([]);
+        // Keep prior fieldOptions so the UI doesn't flash empty on a transient error.
       } finally {
         setLoading(false);
       }
@@ -107,14 +107,18 @@ export const FieldBlock: FC<{
             errorState?.error ? 'border-red-300' : 'border-black/10'
           } ${fieldDisabled ? 'bg-neutral-50' : 'bg-white'}`}
         >
-          {loading ? (
+          {loading && fieldOptions.length === 0 ? (
             <span className="text-neutral-400 text-[12px]">Loading fields...</span>
           ) : !objectId ? (
             <span className="text-neutral-400 text-[12px]">Select an object first</span>
           ) : fieldOptions.length === 0 ? (
             <span className="text-neutral-400 text-[12px]">No fields available</span>
           ) : (
-            <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
+            <div
+              className={`flex flex-col gap-1 max-h-48 overflow-y-auto transition-opacity ${
+                loading ? 'opacity-60' : ''
+              }`}
+            >
               {fieldOptions.map((opt) => {
                 const isChecked = selectedValues.some((v) => v.value === opt.value);
 
@@ -152,7 +156,7 @@ export const FieldBlock: FC<{
   return (
     <div className="flex flex-col gap-1">
       <FieldLabel field={field} />
-      {loading ? (
+      {loading && fieldOptions.length === 0 ? (
         <div className="w-full rounded border border-black/10 px-2 py-1.5 text-[12px] text-neutral-400 bg-neutral-50">
           Loading fields...
         </div>
@@ -167,11 +171,13 @@ export const FieldBlock: FC<{
             }
           }}
           disabled={fieldDisabled}
-          className={`w-full rounded border px-2 py-1.5 text-[13px] font-mono focus:outline-none focus:ring-1 ${
+          className={`w-full rounded border px-2 py-1.5 text-[13px] font-mono focus:outline-none focus:ring-1 transition-opacity ${
             errorState?.error
               ? 'border-red-300 focus:ring-red-400'
               : 'border-black/10 focus:ring-blue-400'
-          } ${fieldDisabled ? 'bg-neutral-50 text-neutral-400' : 'bg-white'}`}
+          } ${fieldDisabled ? 'bg-neutral-50 text-neutral-400' : 'bg-white'} ${
+            loading ? 'opacity-60' : ''
+          }`}
         >
           <option value="">{!objectId ? 'Select an object first' : 'Choose a field'}</option>
           {fieldOptions.map((opt) => (

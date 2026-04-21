@@ -69,7 +69,7 @@ export const CustomObjectBlock: FC<{
 
         setOptions(opts);
       } catch {
-        setOptions([]);
+        // Keep prior options so the typeahead dropdown doesn't wipe on a transient error.
       } finally {
         setLoading(false);
       }

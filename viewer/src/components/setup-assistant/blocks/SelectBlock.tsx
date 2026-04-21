@@ -160,7 +160,7 @@ export const SelectBlock: FC<{
           setDynamicOptions(apiResult as SelectOption[]);
         }
       } catch {
-        setDynamicOptions([]);
+        // Keep prior options so the UI doesn't flash empty on a transient error.
       } finally {
         setOptionsLoading(false);
       }
@@ -259,12 +259,16 @@ export const SelectBlock: FC<{
             errorState?.error ? 'border-red-300' : 'border-black/10'
           } ${isDisabled ? 'bg-neutral-50' : 'bg-white'}`}
         >
-          {optionsLoading ? (
+          {optionsLoading && options.length === 0 ? (
             <span className="text-neutral-400 text-[12px]">Loading options...</span>
           ) : options.length === 0 ? (
             <span className="text-neutral-400 text-[12px]">No options available</span>
           ) : (
-            <div className="flex flex-col gap-1 max-h-48 overflow-y-auto">
+            <div
+              className={`flex flex-col gap-1 max-h-48 overflow-y-auto transition-opacity ${
+                optionsLoading ? 'opacity-60' : ''
+              }`}
+            >
               {options.map((opt) => {
                 const isChecked = selectedValues.some((v) => v.value === opt.value);
 
@@ -398,7 +402,7 @@ export const SelectBlock: FC<{
   return (
     <div className="flex flex-col gap-1">
       <FieldLabel field={field} />
-      {optionsLoading ? (
+      {optionsLoading && options.length === 0 ? (
         <div className="w-full rounded border border-black/10 px-2 py-1.5 text-[12px] text-neutral-400 bg-neutral-50">
           Loading options...
         </div>
@@ -414,11 +418,13 @@ export const SelectBlock: FC<{
             }
           }}
           disabled={isDisabled}
-          className={`w-full rounded border px-2 py-1.5 text-[13px] font-mono focus:outline-none focus:ring-1 ${
+          className={`w-full rounded border px-2 py-1.5 text-[13px] font-mono focus:outline-none focus:ring-1 transition-opacity ${
             errorState?.error
               ? 'border-red-300 focus:ring-red-400'
               : 'border-black/10 focus:ring-blue-400'
-          } ${isDisabled ? 'bg-neutral-50 text-neutral-400' : 'bg-white'}`}
+          } ${isDisabled ? 'bg-neutral-50 text-neutral-400' : 'bg-white'} ${
+            optionsLoading ? 'opacity-60' : ''
+          }`}
         >
           <option value="">{field.placeholder ?? 'Choose an option'}</option>
           {options.map((opt, i) => (
