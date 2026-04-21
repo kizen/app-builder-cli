@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@kizenapps/engine':
-        specifier: 1.2.0-70fc7c2
-        version: 1.2.0-70fc7c2(@tanstack/react-query@5.99.0(react@19.2.5))(date-fns-tz@3.2.0(date-fns@4.1.0))(date-fns@4.1.0)(dompurify@3.3.3)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
+        specifier: 1.2.0
+        version: 1.2.0(@tanstack/react-query@5.99.0(react@19.2.5))(date-fns-tz@3.2.0(date-fns@4.1.0))(date-fns@4.1.0)(dompurify@3.3.3)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       '@kizenapps/packager':
         specifier: ^0.1.0
         version: 0.1.0
@@ -476,8 +476,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
-  '@kizenapps/engine@1.2.0-70fc7c2':
-    resolution: {integrity: sha512-j3ik5MAaqswat4b7gQqoH1RGMzQZ2oHOxLlqOP6uDhazTjXLpq0DSZNF9MtqQnYU2qjRZiN2bVQazAzFqZIo5Q==}
+  '@kizenapps/engine@1.2.0':
+    resolution: {integrity: sha512-NZY5jtY2BjyScADdU3+tBxJPMfiYXUyAAq0m4IZFLez70zVyGVOme/0VM5GLXJKH3Sw99xA8J0qpZ+7n5zZVnw==}
     hasBin: true
     peerDependencies:
       '@tanstack/react-query': '>=5'
@@ -2437,7 +2437,7 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
-  '@kizenapps/engine@1.2.0-70fc7c2(@tanstack/react-query@5.99.0(react@19.2.5))(date-fns-tz@3.2.0(date-fns@4.1.0))(date-fns@4.1.0)(dompurify@3.3.3)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
+  '@kizenapps/engine@1.2.0(@tanstack/react-query@5.99.0(react@19.2.5))(date-fns-tz@3.2.0(date-fns@4.1.0))(date-fns@4.1.0)(dompurify@3.3.3)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)':
     dependencies:
       '@tanstack/react-query': 5.99.0(react@19.2.5)
       date-fns: 4.1.0
