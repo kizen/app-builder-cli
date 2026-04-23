@@ -126,19 +126,117 @@ function renderFileSection(file: FileContent): string {
   return `<section id="${fileId(file.path)}"><h2 class="fp">${esc(file.path)}</h2><div class="fb">${body}</div></section>`;
 }
 
-function generateHtml(manifest: Record<string, unknown>, files: FileContent[]): string {
-  const filtered = Object.fromEntries(
+const LANG_MAP: Record<string, string> = {
+  '.ts': 'typescript',
+  '.tsx': 'typescript',
+  '.js': 'javascript',
+  '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.json': 'json',
+  '.css': 'css',
+  '.scss': 'scss',
+  '.html': 'html',
+  '.htm': 'html',
+  '.md': 'markdown',
+  '.mdx': 'markdown',
+  '.py': 'python',
+  '.sh': 'bash',
+  '.yml': 'yaml',
+  '.yaml': 'yaml',
+  '.xml': 'xml',
+  '.toml': 'toml',
+};
+
+function mdLang(path: string): string {
+  return LANG_MAP[fileExt(path)] ?? '';
+}
+
+function renderTextTree(node: TreeNode, prefix = ''): string {
+  const sorted = [...node.children.values()].sort((a, b) => {
+    if (a.isFile !== b.isFile) {
+      return a.isFile ? 1 : -1;
+    }
+
+    return a.name.localeCompare(b.name);
+  });
+
+  return sorted
+    .map((child, i) => {
+      const isLast = i === sorted.length - 1;
+      const connector = isLast ? '└── ' : '├── ';
+      const childPrefix = isLast ? '    ' : '│   ';
+
+      if (child.isFile) {
+        return `${prefix}${connector}${child.name}`;
+      }
+
+      return `${prefix}${connector}${child.name}/\n${renderTextTree(child, prefix + childPrefix)}`;
+    })
+    .join('\n');
+}
+
+function filterSourceFiles(files: FileContent[]): FileContent[] {
+  return files.filter((f) => f.path !== 'kizen.json' && f.path !== 'plugin-report.html');
+}
+
+function buildFilteredConfig(manifest: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
     Object.entries(manifest)
       .filter(([k]) => !SENSITIVE_FIELDS.has(k))
       .map(([k, v]) => [k, k === 'services' ? redactServices(v) : v]),
   );
+}
+
+function generateMarkdown(manifest: Record<string, unknown>, files: FileContent[]): string {
+  const filtered = buildFilteredConfig(manifest);
+  const name = typeof manifest.name === 'string' ? manifest.name : 'Plugin';
+  const version = typeof manifest.version === 'string' ? manifest.version : '';
+  const description = typeof manifest.description === 'string' ? manifest.description : '';
+  const sourceFiles = filterSourceFiles(files);
+
+  const lines: string[] = [];
+
+  lines.push(`# ${name}${version ? ` v${version}` : ''}`);
+  if (description) {
+    lines.push('', description);
+  }
+
+  lines.push(
+    '',
+    '## Configuration (`kizen.json`)',
+    '',
+    '```json',
+    JSON.stringify(filtered, null, 2),
+    '```',
+  );
+
+  lines.push('', '## File Tree', '', '```', renderTextTree(buildTree(sourceFiles)), '```');
+
+  lines.push('', '## Files');
+
+  for (const file of sourceFiles) {
+    lines.push('', `### \`${file.path}\``, '');
+
+    if (file.base64Image !== undefined) {
+      lines.push(`[Image file: ${file.path}]`);
+    } else if (file.binaryData !== undefined) {
+      lines.push(`[Binary file: ${String(file.binaryData.length)} bytes]`);
+    } else {
+      lines.push(`\`\`\`${mdLang(file.path)}`, file.content, '```');
+    }
+  }
+
+  return lines.join('\n') + '\n';
+}
+
+function generateHtml(manifest: Record<string, unknown>, files: FileContent[]): string {
+  const filtered = buildFilteredConfig(manifest);
   const name = typeof manifest.name === 'string' ? manifest.name : 'Plugin';
   const version = typeof manifest.version === 'string' ? manifest.version : '';
   const description = typeof manifest.description === 'string' ? manifest.description : '';
 
-  const sourceFiles = files.filter(
-    (f) => f.path !== 'kizen.json' && f.path !== 'plugin-report.html',
-  );
+  const sourceFiles = filterSourceFiles(files);
   const treeHtml = renderTree(buildTree(sourceFiles));
   const fileSections = sourceFiles.map(renderFileSection).join('\n');
 
@@ -233,13 +331,18 @@ export function reportCommand(program: Command): void {
       }
 
       const apiName = typeof manifest.api_name === 'string' ? manifest.api_name : 'plugin';
-      const outputPath = options.output ?? join(EXAMPLES_DIR, `${apiName}.html`);
+      const htmlPath = options.output ?? join(EXAMPLES_DIR, `${apiName}.html`);
+      const mdPath = htmlPath.replace(/\.html$/, '.md');
 
       const files = await readLocalFiles(pluginDir);
-      const html = generateHtml(manifest, files);
 
-      await mkdir(join(outputPath, '..'), { recursive: true });
-      await writeFile(outputPath, html, 'utf-8');
-      console.log(`Plugin report written to: ${outputPath}`);
+      await mkdir(join(htmlPath, '..'), { recursive: true });
+
+      await Promise.all([
+        writeFile(htmlPath, generateHtml(manifest, files), 'utf-8'),
+        writeFile(mdPath, generateMarkdown(manifest, files), 'utf-8'),
+      ]);
+
+      console.log(`Plugin report written to:\n  ${htmlPath}\n  ${mdPath}`);
     });
 }
