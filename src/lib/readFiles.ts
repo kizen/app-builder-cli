@@ -4,6 +4,7 @@ import type { FileContent } from '@kizenapps/packager';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.svg']);
 const BINARY_EXTENSIONS = new Set(['.kzn']);
+const SKIP_FILES = new Set(['.DS_Store']);
 
 export const SKIP_DIRS = new Set(['node_modules', '.git', '.kizenapp', '.github']);
 
@@ -19,7 +20,9 @@ async function walk(dir: string, rootDir: string): Promise<string[]> {
 
       paths.push(...(await walk(join(dir, entry.name), rootDir)));
     } else if (entry.isFile()) {
-      paths.push(join(dir, entry.name));
+      if (!SKIP_FILES.has(entry.name)) {
+        paths.push(join(dir, entry.name));
+      }
     }
   }
 
