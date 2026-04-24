@@ -224,7 +224,7 @@ async function serializeArgAsync(client: CDPClient, arg: CDPRemoteObject): Promi
       const result = await client.Runtime.callFunctionOn({
         objectId: arg.objectId,
         functionDeclaration:
-          'function() { const seen = new WeakSet(); return JSON.stringify(this, function(k,v) { if (typeof v === "object" && v !== null) { if (seen.has(v)) return "[Circular]"; seen.add(v); } return v; }); }',
+          'function() { try { const seen = new WeakSet(); return JSON.stringify(this, function(k,v) { if (typeof v === "bigint") { return String(v) + "n"; } if (typeof v === "object" && v !== null) { if (seen.has(v)) return "[Circular]"; seen.add(v); } return v; }); } catch { return undefined; } }',
         returnByValue: true,
       });
       const val = result.result.value;
