@@ -1,6 +1,6 @@
 import { useParams, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { type FC, useEffect, useMemo, useState } from 'react';
+import { type FC, useEffect, useMemo, useRef, useState } from 'react';
 import { useApi } from '../api.js';
 import { bundleQueryOptions } from '../bundleQuery.js';
 import { Card } from '../components/Card.js';
@@ -24,6 +24,7 @@ export const CodeStepsPage: FC = () => {
 
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<ExecutionResult | null>(null);
+  const resultPanelRef = useRef<HTMLDivElement>(null);
 
   const inputsKey = `kizen-step-inputs:${apiName ?? ''}:${stepApiName ?? ''}`;
   const [inputValues, setInputValues] = useLocalStorage<Record<string, string>>(inputsKey, {});
@@ -95,6 +96,12 @@ export const CodeStepsPage: FC = () => {
   useEffect(() => {
     setResult(null);
   }, [stepApiName]);
+
+  useEffect(() => {
+    if (result && resultPanelRef.current) {
+      resultPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [result]);
 
   if (isLoading) {
     return (
@@ -335,7 +342,11 @@ export const CodeStepsPage: FC = () => {
         onModeChange={setExecutionMode}
       />
 
-      {result && <ExecutionResultPanel result={result} />}
+      {result && (
+        <div ref={resultPanelRef}>
+          <ExecutionResultPanel result={result} />
+        </div>
+      )}
     </div>
   );
 };

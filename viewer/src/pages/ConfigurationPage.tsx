@@ -32,6 +32,11 @@ import { useCredentials } from '../CredentialsContext.js';
 import type { PluginBaseConfig } from '../types.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner } from '@fortawesome/free-solid-svg-icons';
+import {
+  createKizenProxyError,
+  handleKizenNetworkResponse,
+  KizenRequestError,
+} from '@kizenapps/engine/util';
 
 interface SetupAssistantFormProps {
   config: SetupAssistantConfig;
@@ -162,9 +167,21 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
       performFileUpload={() => Promise.resolve({ url: '' })}
       monitoringExceptionHelper={onMonitoringException}
       performRequest={async (method, url, payload, options) => {
-        const data = await apiClient.request(method, url, payload, options);
+        try {
+          const response = await apiClient.request(method, url, payload, options);
 
-        return { data };
+          const processedResponse = handleKizenNetworkResponse({ data: response, status: 200 });
+
+          return processedResponse;
+        } catch (ex: unknown) {
+          if (ex instanceof KizenRequestError) {
+            // If the error is already a KizenRequestError, it means the handling of the network response
+            // threw. In that case, re-throw the error.
+            throw ex;
+          } else {
+            throw createKizenProxyError(500, 'Unknown error occurred during request');
+          }
+        }
       }}
       modal={{
         showing,

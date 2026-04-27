@@ -44,6 +44,24 @@ export const ExecutionResultPanel: FC<{ result: ExecutionResult }> = ({ result }
         {result.exitCode !== 0 && (
           <span className="text-[11px] text-neutral-400">exit code {String(result.exitCode)}</span>
         )}
+        <button
+          onClick={(e) => {
+            let el: HTMLElement | null = e.currentTarget;
+
+            while (el) {
+              if (el.scrollHeight > el.clientHeight) {
+                el.scrollTo({ top: 0, behavior: 'smooth' });
+
+                return;
+              }
+
+              el = el.parentElement;
+            }
+          }}
+          className="ml-auto text-[11px] text-neutral-400 hover:text-neutral-600"
+        >
+          ↑ top
+        </button>
       </div>
 
       {result.error && (
