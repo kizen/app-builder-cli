@@ -47,11 +47,14 @@ export const ExecutionResultPanel: FC<{ result: ExecutionResult }> = ({ result }
         <button
           onClick={(e) => {
             let el: HTMLElement | null = e.currentTarget;
+
             while (el) {
               if (el.scrollHeight > el.clientHeight) {
                 el.scrollTo({ top: 0, behavior: 'smooth' });
+
                 return;
               }
+
               el = el.parentElement;
             }
           }}
