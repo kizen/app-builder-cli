@@ -11,7 +11,7 @@ import type { OnNetworkRequestFn } from '@kizenapps/engine';
 export const BASE_URLS: Record<Environment, string> = {
   go: 'https://app.go.kizen.com/api',
   fmo: 'https://app.fmo.kizen.com/api',
-  staging: 'https://staging.kizen.dev/api',
+  staging: 'https://staging.kizen.com/api',
   integration: 'https://integration.kizen.dev/api',
   test1: 'https://test1.kizen.dev/api',
 };
