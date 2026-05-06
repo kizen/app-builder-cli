@@ -103,7 +103,7 @@ const send = async (
     ...(headers && { headers }),
   });
 
-  // The main app uses Axios, which throws on network errors. To keep error handling
+  // The consuming app uses Axios, which throws on network errors. To keep error handling
   // consistent between the main app and the viewer, we throw on non-2xx statuses here
   // as well, even though `fetch` itself doesn't throw in those cases.
   if (!res.ok) {
