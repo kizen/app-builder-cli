@@ -96,8 +96,7 @@ export const kizenRequestHandler =
       const result = await apiClient.request(method, url, payload, options);
 
       return {
-        ...result,
-        data: result.data as JSONObject,
+        data: result,
       };
     }
   };

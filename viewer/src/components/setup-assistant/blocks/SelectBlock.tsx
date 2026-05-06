@@ -14,6 +14,7 @@ import { kizenRequestHandler, useApi } from '../../../api.js';
 import { SEARCH_DEBOUNCE_MS } from '../../../lib/constants.js';
 import { DropdownPortal } from '../../DropdownPortal.js';
 import { createKizenApiClient } from '../../../lib/kizenApiClient.js';
+import { useToast } from '../../../ToastContext.js';
 
 export const SelectBlock: FC<{
   field: AssistantField;
@@ -33,11 +34,16 @@ export const SelectBlock: FC<{
     errorState,
   } = useFieldBlock(field, disabled);
 
+  const showToast = useToast();
+
   const readyForRequests = !inferencePending && !initialExpressionsPending && expressionsIdle;
 
-  const [dynamicOptions, setDynamicOptions] = useState<SelectOption[]>([]);
+  const [dynamicOptionsCache, setDynamicOptionsCache] = useState<Record<string, SelectOption[]>>(
+    {},
+  );
   const [optionsLoading, setOptionsLoading] = useState(false);
-  const fetchedHashRef = useRef<string | null>(null);
+  const fetchedHashesRef = useRef<Set<string>>(new Set());
+  const contextResultRef = useRef<unknown>(undefined);
 
   // Typeahead state
   const [searchText, setSearchText] = useState('');
@@ -101,17 +107,108 @@ export const SelectBlock: FC<{
     return state;
   }, [state, debouncedSearch, field.typeahead]);
 
-  const fetchHash = useMemo(() => JSON.stringify(stateForFetch), [stateForFetch]);
+  // Strip the field's own key so toggling a multi-select option doesn't refetch
+  const fetchHash = useMemo(() => {
+    const partial = Object.fromEntries(
+      Object.entries(stateForFetch).filter(([k]) => k !== field.key),
+    );
 
-  // Core fetch function — shared between typeahead and non-typeahead paths
+    return JSON.stringify(partial);
+  }, [stateForFetch, field.key]);
+
+  const performHttp = useCallback(
+    async (
+      method: string,
+      url: string,
+      headers: Record<string, string>,
+      body: string | null,
+    ): Promise<unknown> => {
+      if (url.startsWith('/')) {
+        return kizenRequestHandler(apiClient)(method, url, {
+          headers,
+          ...(body != null && { body }),
+        });
+      }
+
+      const res = await fetch(url, { method, headers, ...(body != null && { body }) });
+
+      if (!res.ok) {
+        throw new Error('Error fetching options');
+      }
+
+      return res.json();
+    },
+    [apiClient],
+  );
+
+  // Core fetch — handles optional context fetch, then options fetch, then mapping
   const fetchOptions = useCallback(
-    async (fetchState: Record<string, unknown>): Promise<void> => {
+    async (fetchState: Record<string, unknown>, hash: string): Promise<void> => {
+      if (fetchedHashesRef.current.has(hash)) {
+        return;
+      }
+
+      fetchedHashesRef.current.add(hash);
       setOptionsLoading(true);
 
+      const method = field.fetchMethod ?? 'GET';
+
+      // Phase 1: context fetch (cached per component lifetime)
+      let contextResult = contextResultRef.current;
+
+      if (field.getContextUrl && contextResult === undefined) {
+        try {
+          const contextExpressionState: UnknownJSON = {
+            __kizen_state: { value: { ...fetchState, pluginApiName } },
+          } as UnknownJSON;
+
+          const contextUrl = await runStringExpression(
+            field.getContextUrl,
+            contextExpressionState,
+          );
+
+          if (contextUrl) {
+            let headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            let body: string | null = null;
+
+            if (field.getHeaders) {
+              headers = (await runObjectExpression(
+                field.getHeaders,
+                contextExpressionState,
+              )) as Record<string, string>;
+            }
+
+            if (method === 'POST' && field.getBody) {
+              const bodyObj = await runObjectExpression(field.getBody, contextExpressionState);
+
+              body = JSON.stringify(bodyObj);
+            }
+
+            contextResult = await performHttp(method, contextUrl, headers, body);
+          }
+        } catch (err) {
+          showToast({
+            variant: 'failure',
+            message: `Error fetching options for ${field.label ?? field.key}: ${
+              err instanceof Error ? err.message : 'Unknown error'
+            }`,
+          });
+          fetchedHashesRef.current.delete(hash);
+          setOptionsLoading(false);
+
+          return;
+        }
+      }
+
+      contextResultRef.current = contextResult;
+
+      // Phase 2: options fetch + mapping
       try {
-        const expressionState = {
-          __kizen_state: { value: { ...fetchState, pluginApiName } },
-        };
+        const expressionState: UnknownJSON = {
+          __kizen_state: {
+            value: { ...fetchState, context: contextResult as JSONValue, pluginApiName },
+          },
+        } as UnknownJSON;
 
         let apiResult: unknown;
 
@@ -119,7 +216,6 @@ export const SelectBlock: FC<{
           const url = await runStringExpression(field.getFetchUrl, expressionState);
 
           if (url) {
-            const method = field.fetchMethod ?? 'GET';
             let headers: Record<string, string> = { 'Content-Type': 'application/json' };
             let body: string | null = null;
 
@@ -136,41 +232,37 @@ export const SelectBlock: FC<{
               body = JSON.stringify(bodyObj);
             }
 
-            if (url.startsWith('/')) {
-              const res = await kizenRequestHandler(apiClient)(method, url, {
-                headers,
-                ...(body != null && { body }),
-              });
-
-              apiResult = res;
-            } else {
-              const res = await fetch(url, { method, headers, ...(body != null && { body }) });
-
-              if (res.ok) {
-                apiResult = await res.json();
-              }
-            }
+            apiResult = await performHttp(method, url, headers, body);
           }
         }
 
         if (field.optionMapper) {
           const mapped = await runOptionExpression(field.optionMapper, {
             __kizen_state: {
-              value: { ...fetchState, result: apiResult as JSONValue, pluginApiName },
+              value: {
+                ...fetchState,
+                result: apiResult as JSONValue,
+                context: contextResult as JSONValue,
+                pluginApiName,
+              },
             },
           } as UnknownJSON);
 
-          setDynamicOptions(structuredClone(mapped));
+          setDynamicOptionsCache((prev) => ({ ...prev, [hash]: structuredClone(mapped) }));
         } else if (Array.isArray(apiResult)) {
-          setDynamicOptions(apiResult as SelectOption[]);
+          setDynamicOptionsCache((prev) => ({ ...prev, [hash]: apiResult as SelectOption[] }));
+        } else {
+          throw new Error('API result is not an array');
         }
       } catch {
-        // Keep prior options so the UI doesn't flash empty on a transient error.
+        // Cache empty so the UI shows "no options" instead of stale data,
+        // and won't keep retrying the same hash.
+        setDynamicOptionsCache((prev) => ({ ...prev, [hash]: [] }));
       } finally {
         setOptionsLoading(false);
       }
     },
-    [field, pluginApiName, apiClient],
+    [field, pluginApiName, performHttp, showToast],
   );
 
   // Non-typeahead dynamic fetch: triggered by state changes
@@ -179,12 +271,7 @@ export const SelectBlock: FC<{
       return;
     }
 
-    if (fetchedHashRef.current === fetchHash) {
-      return;
-    }
-
-    fetchedHashRef.current = fetchHash;
-    void fetchOptions(stateForFetch);
+    void fetchOptions(stateForFetch, fetchHash);
   }, [
     isDynamic,
     readyForRequests,
@@ -201,16 +288,11 @@ export const SelectBlock: FC<{
       return;
     }
 
-    if (!isOpen) {
+    if (!isOpen || !debouncedSearch) {
       return;
     }
 
-    if (fetchedHashRef.current === fetchHash) {
-      return;
-    }
-
-    fetchedHashRef.current = fetchHash;
-    void fetchOptions(stateForFetch);
+    void fetchOptions(stateForFetch, fetchHash);
   }, [
     isDynamic,
     readyForRequests,
@@ -218,9 +300,42 @@ export const SelectBlock: FC<{
     stateForFetch,
     field.typeahead,
     isOpen,
+    debouncedSearch,
     shouldHide,
     fetchOptions,
   ]);
+
+  // AutoSelect-driven fetch: kick off a fetch even before the menu opens, so a
+  // single available option can be selected automatically.
+  useEffect(() => {
+    if (
+      !isDynamic ||
+      !field.autoSelect ||
+      field.typeahead ||
+      isDisabled ||
+      shouldHide ||
+      !readyForRequests
+    ) {
+      return;
+    }
+
+    void fetchOptions(stateForFetch, fetchHash);
+  }, [
+    isDynamic,
+    field.autoSelect,
+    field.typeahead,
+    isDisabled,
+    shouldHide,
+    readyForRequests,
+    fetchOptions,
+    stateForFetch,
+    fetchHash,
+  ]);
+
+  const dynamicOptions = useMemo(
+    () => dynamicOptionsCache[fetchHash] ?? [],
+    [dynamicOptionsCache, fetchHash],
+  );
 
   // AutoSelect: when exactly one option is available, select it automatically
   useEffect(() => {
