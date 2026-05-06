@@ -10,9 +10,10 @@ import {
 } from '@kizenapps/engine';
 import { FieldLabel } from '../FieldLabel.js';
 import { useFieldBlock } from '../useFieldBlock.js';
-import { useApi } from '../../../api.js';
+import { kizenRequestHandler, useApi } from '../../../api.js';
 import { SEARCH_DEBOUNCE_MS } from '../../../lib/constants.js';
 import { DropdownPortal } from '../../DropdownPortal.js';
+import { createKizenApiClient } from '../../../lib/kizenApiClient.js';
 
 export const SelectBlock: FC<{
   field: AssistantField;
@@ -50,6 +51,8 @@ export const SelectBlock: FC<{
     ?.value;
 
   const request = useApi();
+
+  const apiClient = useMemo(() => createKizenApiClient(request), [request]);
 
   const setSelectValue = useCallback(
     (newValue: SelectOption | SelectOption[]) => {
@@ -134,10 +137,12 @@ export const SelectBlock: FC<{
             }
 
             if (url.startsWith('/')) {
-              const res = await request(url, { method, headers, ...(body != null && { body }) });
-              const fetchedResult = (await res.json()) as unknown;
+              const res = await kizenRequestHandler(apiClient)(method, url, {
+                headers,
+                ...(body != null && { body }),
+              });
 
-              apiResult = { data: fetchedResult };
+              apiResult = res;
             } else {
               const res = await fetch(url, { method, headers, ...(body != null && { body }) });
 
@@ -165,7 +170,7 @@ export const SelectBlock: FC<{
         setOptionsLoading(false);
       }
     },
-    [field, pluginApiName, request],
+    [field, pluginApiName, apiClient],
   );
 
   // Non-typeahead dynamic fetch: triggered by state changes

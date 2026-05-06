@@ -6,7 +6,7 @@ import {
   handleKizenNetworkResponse,
   KizenRequestError,
 } from '@kizenapps/engine/util';
-import type { OnNetworkRequestFn } from '@kizenapps/engine';
+import type { JSONObject, OnNetworkRequestFn } from '@kizenapps/engine';
 
 export const BASE_URLS: Record<Environment, string> = {
   go: 'https://app.go.kizen.com/api',
@@ -65,32 +65,39 @@ export const kizenRequestHandler =
     payload?: unknown,
     options?: unknown,
   ): ReturnType<OnNetworkRequestFn> => {
-    try {
-      const response = await apiClient.request(method, url, payload, options);
+    const isProxyRequest = url.startsWith('/external-integrations/proxy');
 
-      const processedResponse = handleKizenNetworkResponse({
-        data: response,
-        status: (response.status_code as number | undefined) ?? 200,
-      });
+    if (isProxyRequest) {
+      try {
+        const response = await apiClient.request(method, url, payload, options);
 
-      return processedResponse;
-    } catch (ex: unknown) {
-      if (ex instanceof KizenRequestError) {
-        // If the error is already a KizenRequestError, it means the handling of the network response
-        // threw. In that case, re-throw the error.
-        throw ex;
-      } else if (isMockError(ex)) {
-        if (url.startsWith('/external-integrations/proxy')) {
+        const processedResponse = handleKizenNetworkResponse({
+          data: response,
+          status: (response.status_code as number | undefined) ?? 200,
+        });
+
+        return processedResponse;
+      } catch (ex) {
+        // Re-throw KizenRequestErrors, they will be handled correctly
+
+        if (ex instanceof KizenRequestError) {
+          throw ex;
+        }
+
+        // If we get an error thrown by our fetch at this point, it means we failed to call the proxy
+        if (isMockError(ex)) {
           throw createKizenProxyError(ex.response?.status, ex.response?.data?.error);
         }
 
-        // If we weren't calling the proxy, we can throw a generic error, otherwise it's confusing
-        // to the caller to get a proxy error when they didn't call the proxy
-        throw ex;
-      } else {
-        // Unexpected, but for now just re-throw
-
+        // This would be unexpected, but we should re-throw in case something falls through
         throw ex;
       }
+    } else {
+      const result = await apiClient.request(method, url, payload, options);
+
+      return {
+        ...result,
+        data: result.data as JSONObject,
+      };
     }
   };
