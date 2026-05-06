@@ -68,7 +68,10 @@ export const kizenRequestHandler =
     try {
       const response = await apiClient.request(method, url, payload, options);
 
-      const processedResponse = handleKizenNetworkResponse({ data: response, status: 200 });
+      const processedResponse = handleKizenNetworkResponse({
+        data: response,
+        status: (response.status_code as number | undefined) ?? 200,
+      });
 
       return processedResponse;
     } catch (ex: unknown) {
