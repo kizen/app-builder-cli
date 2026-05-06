@@ -6,7 +6,7 @@ import {
   handleKizenNetworkResponse,
   KizenRequestError,
 } from '@kizenapps/engine/util';
-import type { JSONObject, OnNetworkRequestFn } from '@kizenapps/engine';
+import type { OnNetworkRequestFn } from '@kizenapps/engine';
 
 export const BASE_URLS: Record<Environment, string> = {
   go: 'https://app.go.kizen.com/api',

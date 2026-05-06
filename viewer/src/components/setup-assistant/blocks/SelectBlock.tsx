@@ -162,10 +162,7 @@ export const SelectBlock: FC<{
             __kizen_state: { value: { ...fetchState, pluginApiName } },
           } as UnknownJSON;
 
-          const contextUrl = await runStringExpression(
-            field.getContextUrl,
-            contextExpressionState,
-          );
+          const contextUrl = await runStringExpression(field.getContextUrl, contextExpressionState);
 
           if (contextUrl) {
             let headers: Record<string, string> = { 'Content-Type': 'application/json' };
