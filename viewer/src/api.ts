@@ -1,5 +1,12 @@
 import { useCallback } from 'react';
 import { useCredentials, type Environment } from './CredentialsContext.js';
+import { isMockError, type KizenApiClient } from './lib/kizenApiClient.js';
+import {
+  createKizenProxyError,
+  handleKizenNetworkResponse,
+  KizenRequestError,
+} from '@kizenapps/engine/util';
+import type { OnNetworkRequestFn } from '@kizenapps/engine';
 
 export const BASE_URLS: Record<Environment, string> = {
   go: 'https://app.go.kizen.com/api',
@@ -49,3 +56,38 @@ export function useApi(): (path: string, options?: ApiRequestInit) => Promise<Re
     [baseUrl, apiKey, userId, businessId],
   );
 }
+
+export const kizenRequestHandler =
+  (apiClient: KizenApiClient) =>
+  async (
+    method: string,
+    url: string,
+    payload?: unknown,
+    options?: unknown,
+  ): ReturnType<OnNetworkRequestFn> => {
+    try {
+      const response = await apiClient.request(method, url, payload, options);
+
+      const processedResponse = handleKizenNetworkResponse({ data: response, status: 200 });
+
+      return processedResponse;
+    } catch (ex: unknown) {
+      if (ex instanceof KizenRequestError) {
+        // If the error is already a KizenRequestError, it means the handling of the network response
+        // threw. In that case, re-throw the error.
+        throw ex;
+      } else if (isMockError(ex)) {
+        if (url.startsWith('/external-integrations/proxy')) {
+          throw createKizenProxyError(ex.response?.status, ex.response?.data?.error);
+        }
+
+        // If we weren't calling the proxy, we can throw a generic error, otherwise it's confusing
+        // to the caller to get a proxy error when they didn't call the proxy
+        throw ex;
+      } else {
+        // Unexpected, but for now just re-throw
+
+        throw ex;
+      }
+    }
+  };

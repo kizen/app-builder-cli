@@ -32,6 +32,56 @@ export interface KizenApiClient {
   request(method: string, url: string, payload?: unknown, options?: unknown): Promise<JSONObject>;
 }
 
+class MockError extends Error {
+  code: number;
+  request: {
+    method: string;
+    url: string;
+    body: unknown;
+    headers?: Record<string, string> | undefined;
+  };
+  response?:
+    | {
+        data?: {
+          error: string;
+        };
+        status: number;
+      }
+    | undefined;
+  __isMock = true;
+
+  constructor({
+    code,
+    request,
+    response,
+  }: {
+    code: number;
+    request: {
+      method: string;
+      url: string;
+      body: unknown;
+      headers?: Record<string, string> | undefined;
+    };
+    response?:
+      | {
+          data?: {
+            error: string;
+          };
+          status: number;
+        }
+      | undefined;
+  }) {
+    super(`Request failed with status ${String(code)}`);
+    this.code = code;
+    this.request = request;
+    this.response = response;
+  }
+}
+
+export const isMockError = (error: unknown): error is MockError => {
+  return typeof error === 'object' && error !== null && '__isMock' in error;
+};
+
 const send = async (
   request: RequestFn,
   method: string,
@@ -52,6 +102,27 @@ const send = async (
     }),
     ...(headers && { headers }),
   });
+
+  // The main app uses Axios, which throws on network errors. To keep error handling
+  // consistent between the main app and the viewer, we throw on non-2xx statuses here
+  // as well, even though `fetch` itself doesn't throw in those cases.
+  if (!res.ok) {
+    throw new MockError({
+      code: res.status,
+      request: {
+        method: method.toUpperCase(),
+        url,
+        body,
+        headers,
+      },
+      response: {
+        data: {
+          error: `Request failed with status ${String(res.status)}`,
+        },
+        status: res.status,
+      },
+    });
+  }
 
   if (res.status === 204 || res.headers.get('content-length') === '0') {
     return {};

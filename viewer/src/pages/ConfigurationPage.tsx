@@ -24,7 +24,7 @@ import {
   type StoredConfig,
 } from '../lib/configStorage.js';
 import { createKizenApiClient } from '../lib/kizenApiClient.js';
-import { useApi, BASE_URLS } from '../api.js';
+import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useBootstrap } from '../BootstrapContext.js';
 import { useObjectLookups } from '../hooks/useObjectLookups.js';
 import { useCriticalExceptionDialog } from '../hooks/useCriticalExceptionDialog.js';
@@ -32,11 +32,6 @@ import { useCredentials } from '../CredentialsContext.js';
 import type { PluginBaseConfig } from '../types.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner } from '@fortawesome/free-solid-svg-icons';
-import {
-  createKizenProxyError,
-  handleKizenNetworkResponse,
-  KizenRequestError,
-} from '@kizenapps/engine/util';
 
 interface SetupAssistantFormProps {
   config: SetupAssistantConfig;
@@ -166,23 +161,7 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
       }}
       performFileUpload={() => Promise.resolve({ url: '' })}
       monitoringExceptionHelper={onMonitoringException}
-      performRequest={async (method, url, payload, options) => {
-        try {
-          const response = await apiClient.request(method, url, payload, options);
-
-          const processedResponse = handleKizenNetworkResponse({ data: response, status: 200 });
-
-          return processedResponse;
-        } catch (ex: unknown) {
-          if (ex instanceof KizenRequestError) {
-            // If the error is already a KizenRequestError, it means the handling of the network response
-            // threw. In that case, re-throw the error.
-            throw ex;
-          } else {
-            throw createKizenProxyError(500, 'Unknown error occurred during request');
-          }
-        }
-      }}
+      performRequest={kizenRequestHandler(apiClient)}
       modal={{
         showing,
         show,
