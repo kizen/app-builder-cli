@@ -26,15 +26,10 @@ import type {
   ToolbarItemConfig,
   UnknownJSON,
 } from '@kizenapps/engine';
-import {
-  createKizenProxyError,
-  handleKizenNetworkResponse,
-  KizenRequestError,
-  mergeConfig,
-} from '@kizenapps/engine/util';
+import { mergeConfig } from '@kizenapps/engine/util';
 import { AppEngineProvider } from '@kizenapps/engine/react';
 import { useBootstrap } from '../BootstrapContext.js';
-import { useApi, BASE_URLS } from '../api.js';
+import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useCredentials } from '../CredentialsContext.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner, faCircleInfo } from '@fortawesome/free-solid-svg-icons';
@@ -529,23 +524,7 @@ export const SandboxPage: FC = () => {
         });
       }}
       monitoringExceptionHelper={onMonitoringException}
-      performRequest={async (method, url, payload, options) => {
-        try {
-          const response = await apiClient.request(method, url, payload, options);
-
-          const processedResponse = handleKizenNetworkResponse({ data: response, status: 200 });
-
-          return processedResponse;
-        } catch (ex: unknown) {
-          if (ex instanceof KizenRequestError) {
-            // If the error is already a KizenRequestError, it means the handling of the network response
-            // threw. In that case, re-throw the error.
-            throw ex;
-          } else {
-            throw createKizenProxyError(500, 'Unknown error occurred during request');
-          }
-        }
-      }}
+      performRequest={kizenRequestHandler(apiClient)}
       modal={{ showing, show, showPrompt, onConfirm, onHide }}
       showToast={({ message, variant }) => {
         setShowingToast({ message, variant: variant ?? 'success' });
