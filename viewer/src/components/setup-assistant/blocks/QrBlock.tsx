@@ -1,5 +1,5 @@
 import type { FC } from 'react';
-import QRCode from 'react-qr-code';
+import { QRCodeSVG } from 'qrcode.react';
 import type { QrField } from '../../../lib/setupAssistantTypes.js';
 import { useFieldBlock } from '../useFieldBlock.js';
 import { LinkAnchor } from './LinkAnchor.js';
@@ -12,7 +12,7 @@ export const QrBlock: FC<{ field: QrField }> = ({ field }) => {
   }
 
   const size = field.size ?? 128;
-  const code = <QRCode value={field.value} size={size} />;
+  const code = <QRCodeSVG value={field.value} size={size} />;
 
   if (field.link) {
     return (
