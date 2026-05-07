@@ -31,6 +31,7 @@ import { AppEngineProvider } from '@kizenapps/engine/react';
 import { useBootstrap } from '../BootstrapContext.js';
 import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useCredentials } from '../CredentialsContext.js';
+import { ToastContext, type ShowToastFn } from '../ToastContext.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner, faCircleInfo } from '@fortawesome/free-solid-svg-icons';
 
@@ -482,6 +483,10 @@ export const SandboxPage: FC = () => {
 
   const { onMonitoringException, dialog: criticalExceptionDialog } = useCriticalExceptionDialog();
 
+  const showToast: ShowToastFn = ({ message, variant }) => {
+    setShowingToast({ message, variant: variant ?? 'success' });
+  };
+
   if (!bootstrap) {
     return <FontAwesomeIcon icon={faSpinner} className="animate-spin text-neutral-400" size="2x" />;
   }
@@ -526,15 +531,13 @@ export const SandboxPage: FC = () => {
       monitoringExceptionHelper={onMonitoringException}
       performRequest={kizenRequestHandler(apiClient)}
       modal={{ showing, show, showPrompt, onConfirm, onHide }}
-      showToast={({ message, variant }) => {
-        setShowingToast({ message, variant: variant ?? 'success' });
-      }}
+      showToast={showToast}
       clearToasts={() => {
         setShowingToast(null);
       }}
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
-        <>
+        <ToastContext.Provider value={showToast}>
           <SandboxPageInner showingToast={showingToast} browserRef={browserRef} />
           <Modal
             show={showPluginModal}
@@ -544,7 +547,7 @@ export const SandboxPage: FC = () => {
             onHide={derivedModalState.props.onHide}
           />
           {criticalExceptionDialog}
-        </>
+        </ToastContext.Provider>
       )}
     </AppEngineProvider>
   );
