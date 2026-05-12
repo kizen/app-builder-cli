@@ -476,6 +476,15 @@ export const DevSidebar: FC<DevSidebarProps> = ({
                     />
                   </div>
                 </div>
+                <button
+                  onClick={() => {
+                    localStorage.clear();
+                    window.location.reload();
+                  }}
+                  className="text-[11px] text-neutral-600 hover:text-red-400 self-start"
+                >
+                  clear storage
+                </button>
               </div>
             )}
           </div>
