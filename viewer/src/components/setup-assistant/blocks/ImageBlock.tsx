@@ -1,17 +1,17 @@
 import type { CSSProperties, FC } from 'react';
-import type { ImageField } from '../../../lib/setupAssistantTypes.js';
+import type { AssistantField } from '@kizenapps/engine';
 import { useFieldBlock } from '../useFieldBlock.js';
 import { LinkAnchor } from './LinkAnchor.js';
 
-const toDimension = (v: number | string | undefined): string | undefined => {
+const toDimension = (v: number | undefined): string | undefined => {
   if (v === undefined) {
     return undefined;
   }
 
-  return typeof v === 'number' ? `${String(v)}px` : v;
+  return `${String(v)}px`;
 };
 
-export const ImageBlock: FC<{ field: ImageField }> = ({ field }) => {
+export const ImageBlock: FC<{ field: AssistantField }> = ({ field }) => {
   const { shouldHide } = useFieldBlock(field);
 
   if (shouldHide) {
@@ -44,7 +44,7 @@ export const ImageBlock: FC<{ field: ImageField }> = ({ field }) => {
         <LinkAnchor
           link={{
             ...field.link,
-            include: field.include,
+            ...(field.include !== undefined && { include: field.include }),
           }}
           className="inline-block"
         >

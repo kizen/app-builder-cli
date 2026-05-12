@@ -2,12 +2,12 @@ import type { FC } from 'react';
 import { useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { getQrCodeValue } from '@kizenapps/engine/util';
-import type { QrField } from '../../../lib/setupAssistantTypes.js';
+import type { AssistantField } from '@kizenapps/engine';
 import { useFieldBlock } from '../useFieldBlock.js';
 import { LinkAnchor } from './LinkAnchor.js';
 import { useAuthParams } from './util.js';
 
-export const QrBlock: FC<{ field: QrField }> = ({ field }) => {
+export const QrBlock: FC<{ field: AssistantField }> = ({ field }) => {
   const { shouldHide } = useFieldBlock(field);
 
   const getParam = useAuthParams();

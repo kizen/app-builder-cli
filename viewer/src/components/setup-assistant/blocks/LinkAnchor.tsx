@@ -1,10 +1,10 @@
 import { useMemo, type FC, type ReactNode } from 'react';
-import type { LinkField } from '../../../lib/setupAssistantTypes.js';
+import type { IncludeOption } from '@kizenapps/engine';
 import { useAuthParams } from './util.js';
 import { getLinkValue } from '@kizenapps/engine/util';
 
 interface LinkAnchorProps {
-  link: LinkField;
+  link: { href?: string; include?: IncludeOption[] };
   children: ReactNode;
   className?: string;
 }

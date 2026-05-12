@@ -25,7 +25,11 @@ type ServerMessage =
   | { type: 'log'; message: string }
   | { type: 'proxy-log'; entry?: ProxyLogEntry; message?: string }
   | { type: 'console-message'; level: string; args: unknown[] }
-  | { type: 'credentials-updated'; credentials: Partial<Credentials> | null; activeProfile?: string | null }
+  | {
+      type: 'credentials-updated';
+      credentials: Partial<Credentials> | null;
+      activeProfile?: string | null;
+    }
   | { type: 'venv-install-start' }
   | { type: 'venv-install-log'; line: string; stream: 'stdout' | 'stderr' }
   | { type: 'venv-install-complete' }

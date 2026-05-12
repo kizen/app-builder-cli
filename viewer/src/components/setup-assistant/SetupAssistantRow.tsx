@@ -1,6 +1,5 @@
 import type { FC } from 'react';
 import type { AssistantField } from '@kizenapps/engine';
-import type { ExtendedAssistantField } from '../../lib/setupAssistantTypes.js';
 import { BooleanBlock } from './blocks/BooleanBlock.js';
 import { ContainerBlock } from './blocks/ContainerBlock.js';
 import { CustomObjectBlock } from './blocks/CustomObjectBlock.js';
@@ -34,7 +33,7 @@ const fieldTypeComponents: Record<AssistantField['type'], FC<BlockProps>> = {
 };
 
 export const SetupAssistantRow: FC<{
-  field: ExtendedAssistantField;
+  field: AssistantField;
   pluginApiName: string;
   disabled?: boolean;
 }> = ({ field, pluginApiName, disabled = false }) => {

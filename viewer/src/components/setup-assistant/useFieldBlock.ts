@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { useSetupAssistant } from '@kizenapps/engine/react';
-import type { ExtendedAssistantField } from '../../lib/setupAssistantTypes.js';
+import type { AssistantField } from '@kizenapps/engine';
 
 type SetupAssistantContext = ReturnType<typeof useSetupAssistant>;
 
@@ -23,7 +23,7 @@ export interface FieldBlockContext extends SetupAssistantContext {
  * The caller is responsible for rendering `null` when `shouldHide` is true
  * (hooks cannot conditionally return).
  */
-export function useFieldBlock(field: ExtendedAssistantField, disabled = false): FieldBlockContext {
+export function useFieldBlock(field: AssistantField, disabled = false): FieldBlockContext {
   const ctx = useSetupAssistant();
   const { evaluateExpression, shouldHideField, getFieldErrorState, disabledKeys } = ctx;
 
