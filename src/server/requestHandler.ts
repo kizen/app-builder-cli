@@ -188,7 +188,12 @@ export function createRequestHandler(
         if (url === '/api/credentials') {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
 
-          res.end(credentialsRef.current !== null ? JSON.stringify(credentialsRef.current) : '{}');
+          res.end(
+            JSON.stringify({
+              credentials: credentialsRef.current ?? null,
+              activeProfile: activeProfileRef.current ?? null,
+            }),
+          );
 
           return;
         }
@@ -231,7 +236,11 @@ export function createRequestHandler(
               ...(active !== undefined && { activeCredentialProfile: active }),
             });
 
-            broadcast({ type: 'credentials-updated', credentials: creds });
+            broadcast({
+              type: 'credentials-updated',
+              credentials: creds,
+              activeProfile: activeProfileRef.current ?? null,
+            });
           }
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
