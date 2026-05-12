@@ -168,7 +168,7 @@ export function useDevReload(): {
           logs: prev.logs,
           error: msg.message,
         }));
-      } else if (msg.type === 'credentials-updated') {
+      } else {
         setServerCredentials(msg.credentials);
         setServerActiveProfile(msg.activeProfile ?? null);
       }

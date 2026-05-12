@@ -28,6 +28,9 @@ const fieldTypeComponents: Record<AssistantField['type'], FC<BlockProps>> = {
   number: NumberBlock,
   select: SelectBlock,
   boolean: BooleanBlock,
+  qr: QrBlock,
+  image: ImageBlock,
+  link: LinkBlock,
 };
 
 export const SetupAssistantRow: FC<{
@@ -35,18 +38,6 @@ export const SetupAssistantRow: FC<{
   pluginApiName: string;
   disabled?: boolean;
 }> = ({ field, pluginApiName, disabled = false }) => {
-  if (field.type === 'image') {
-    return <ImageBlock field={field} />;
-  }
-
-  if (field.type === 'qr') {
-    return <QrBlock field={field} />;
-  }
-
-  if (field.type === 'link') {
-    return <LinkBlock field={field} />;
-  }
-
   const FieldComponent = fieldTypeComponents[field.type];
 
   return <FieldComponent field={field} pluginApiName={pluginApiName} disabled={disabled} />;

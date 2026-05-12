@@ -1,4 +1,4 @@
-import type { AssistantField } from '@kizenapps/engine';
+import type { AssistantField, IncludeOption } from '@kizenapps/engine';
 
 export interface LinkField {
   key: string;
@@ -25,6 +25,7 @@ export interface QrField {
   type: 'qr';
   value: string;
   size?: number;
+  include?: IncludeOption[];
   link?: LinkField;
   when?: string;
 }
