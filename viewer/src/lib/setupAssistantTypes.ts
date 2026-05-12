@@ -7,6 +7,7 @@ export interface LinkField {
   href: string;
   target?: '_blank';
   when?: string;
+  include?: IncludeOption[] | undefined;
 }
 
 export interface ImageField {
@@ -18,6 +19,7 @@ export interface ImageField {
   width?: number | string;
   height?: number | string;
   when?: string;
+  include?: IncludeOption[] | undefined;
 }
 
 export interface QrField {
@@ -25,7 +27,7 @@ export interface QrField {
   type: 'qr';
   value: string;
   size?: number;
-  include?: IncludeOption[];
+  include?: IncludeOption[] | undefined;
   link?: LinkField;
   when?: string;
 }

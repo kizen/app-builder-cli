@@ -12,7 +12,7 @@ export const LinkBlock: FC<{ field: LinkField }> = ({ field }) => {
 
   return (
     <LinkAnchor link={field} className="text-[13px] text-blue-600 underline">
-      {field.text ?? field.href}
+      {field.text}
     </LinkAnchor>
   );
 };

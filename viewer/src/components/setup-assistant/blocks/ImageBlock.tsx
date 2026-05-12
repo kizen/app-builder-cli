@@ -40,11 +40,19 @@ export const ImageBlock: FC<{ field: ImageField }> = ({ field }) => {
 
   if (field.link) {
     return (
-      <LinkAnchor link={field.link} className="inline-block">
-        {img}
-      </LinkAnchor>
+      <div className="flex justify-center">
+        <LinkAnchor
+          link={{
+            ...field.link,
+            include: field.include,
+          }}
+          className="inline-block"
+        >
+          {img}
+        </LinkAnchor>
+      </div>
     );
   }
 
-  return img;
+  return <div className="flex justify-center">{img}</div>;
 };
