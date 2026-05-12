@@ -12,7 +12,7 @@ export const DescriptionBlock: FC<{ field: AssistantField }> = ({ field }) => {
 
   return (
     <div
-      className="text-[13px] text-neutral-500 "
+      className="text-[13px] text-neutral-500 leading-relaxed"
       dangerouslySetInnerHTML={{ __html: renderMarkdown(field.content ?? '') }}
     />
   );
