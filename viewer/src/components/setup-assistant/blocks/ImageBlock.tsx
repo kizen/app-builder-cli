@@ -1,14 +1,33 @@
-import type { CSSProperties, FC } from 'react';
+import type { FC } from 'react';
 import type { AssistantField } from '@kizenapps/engine';
 import { useFieldBlock } from '../useFieldBlock.js';
 import { LinkAnchor } from './LinkAnchor.js';
 
-const toDimension = (v: number | undefined): string | undefined => {
-  if (v === undefined) {
-    return undefined;
+const isDimensionless = (field: AssistantField): boolean =>
+  !field.width && !field.height;
+
+const getWidth = (field: AssistantField): string => {
+  if (isDimensionless(field)) {
+    return '100%';
   }
 
-  return `${String(v)}px`;
+  if (field.width || field.width === 0) {
+    return `${String(field.width)}px`;
+  }
+
+  return 'auto';
+};
+
+const getHeight = (field: AssistantField): string => {
+  if (isDimensionless(field)) {
+    return 'auto';
+  }
+
+  if (field.height || field.height === 0) {
+    return `${String(field.height)}px`;
+  }
+
+  return 'auto';
 };
 
 export const ImageBlock: FC<{ field: AssistantField }> = ({ field }) => {
@@ -18,23 +37,16 @@ export const ImageBlock: FC<{ field: AssistantField }> = ({ field }) => {
     return null;
   }
 
-  const style: CSSProperties = {};
-  const w = toDimension(field.width);
-  const h = toDimension(field.height);
-
-  if (w !== undefined) {
-    style.width = w;
-  }
-
-  if (h !== undefined) {
-    style.height = h;
-  }
-
   const img = (
     <img
       src={field.src}
       alt={field.title ?? ''}
-      style={Object.keys(style).length > 0 ? style : undefined}
+      title={field.title}
+      style={{
+        width: getWidth(field),
+        height: getHeight(field),
+        maxWidth: '100%',
+      }}
     />
   );
 
