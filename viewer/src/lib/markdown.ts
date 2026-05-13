@@ -22,5 +22,7 @@ const processor = unified()
   .use(rehypeStringify);
 
 export function renderMarkdown(md: string): string {
-  return String(processor.processSync(md));
+  const proc = String(processor.processSync(md));
+
+  return proc;
 }
