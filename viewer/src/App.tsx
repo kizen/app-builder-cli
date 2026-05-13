@@ -29,7 +29,7 @@ const DevSidebar = lazy(() =>
 import { CredentialsContext, type Credentials } from './CredentialsContext.js';
 import { BootstrapContext } from './BootstrapContext.js';
 import type { BootstrapData } from './BootstrapContext.js';
-import { STORAGE_KEYS } from './lib/storageKeys.js';
+import { STORAGE_KEYS, setCredentialPrefix } from './lib/storageKeys.js';
 
 // Capture before SandboxPage can override window.open for plugin intercepts
 const nativeOpen = window.open.bind(window);
@@ -73,6 +73,7 @@ export const App: FC = () => {
     consoleLogs,
     clearConsoleLogs,
     serverCredentials,
+    serverActiveProfile,
     venvInstall,
     dismissVenvInstall,
   } = useDevReload();
@@ -135,10 +136,11 @@ export const App: FC = () => {
   useEffect(() => {
     void fetch('/api/credentials')
       .then((res) => res.json())
-      .then((data: Partial<Credentials>) => {
-        if (data.apiKey) {
-          const merged = { ...EMPTY_CREDENTIALS, ...data } as Credentials;
+      .then((data: { credentials: Partial<Credentials> | null; activeProfile: string | null }) => {
+        if (data.credentials?.apiKey) {
+          const merged = { ...EMPTY_CREDENTIALS, ...data.credentials } as Credentials;
 
+          setCredentialPrefix(data.activeProfile);
           setCredentials(merged);
 
           localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(merged));
@@ -156,10 +158,11 @@ export const App: FC = () => {
 
     const merged = { ...EMPTY_CREDENTIALS, ...serverCredentials } as Credentials;
 
+    setCredentialPrefix(serverActiveProfile);
     setCredentials(merged);
 
     localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(merged));
-  }, [serverCredentials]);
+  }, [serverCredentials, serverActiveProfile]);
 
   const handleCredentialsChange = (next: Credentials): void => {
     setCredentials(next);

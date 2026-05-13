@@ -5,7 +5,10 @@ import { ContainerBlock } from './blocks/ContainerBlock.js';
 import { CustomObjectBlock } from './blocks/CustomObjectBlock.js';
 import { DescriptionBlock } from './blocks/DescriptionBlock.js';
 import { FieldBlock } from './blocks/FieldBlock.js';
+import { ImageBlock } from './blocks/ImageBlock.js';
+import { LinkBlock } from './blocks/LinkBlock.js';
 import { NumberBlock } from './blocks/NumberBlock.js';
+import { QrBlock } from './blocks/QrBlock.js';
 import { SelectBlock } from './blocks/SelectBlock.js';
 import { TextBlock } from './blocks/TextBlock.js';
 
@@ -24,6 +27,9 @@ const fieldTypeComponents: Record<AssistantField['type'], FC<BlockProps>> = {
   number: NumberBlock,
   select: SelectBlock,
   boolean: BooleanBlock,
+  qr: QrBlock,
+  image: ImageBlock,
+  link: LinkBlock,
 };
 
 export const SetupAssistantRow: FC<{

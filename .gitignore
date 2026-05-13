@@ -3,3 +3,5 @@ dist/
 .kizenapp/
 *.local
 .DS_Store
+.yalc/
+yalc.lock

@@ -25,7 +25,11 @@ type ServerMessage =
   | { type: 'log'; message: string }
   | { type: 'proxy-log'; entry?: ProxyLogEntry; message?: string }
   | { type: 'console-message'; level: string; args: unknown[] }
-  | { type: 'credentials-updated'; credentials: Partial<Credentials> | null }
+  | {
+      type: 'credentials-updated';
+      credentials: Partial<Credentials> | null;
+      activeProfile?: string | null;
+    }
   | { type: 'venv-install-start' }
   | { type: 'venv-install-log'; line: string; stream: 'stdout' | 'stderr' }
   | { type: 'venv-install-complete' }
@@ -50,6 +54,7 @@ export function useDevReload(): {
   consoleLogs: ConsoleEntry[];
   clearConsoleLogs: () => void;
   serverCredentials: Partial<Credentials> | null;
+  serverActiveProfile: string | null;
   venvInstall: VenvInstallState;
   dismissVenvInstall: () => void;
 } {
@@ -58,6 +63,7 @@ export function useDevReload(): {
   const [proxyLogs, setProxyLogs] = useState<ProxyLogEntry[]>([]);
   const [consoleLogs, setConsoleLogs] = useState<ConsoleEntry[]>([]);
   const [serverCredentials, setServerCredentials] = useState<Partial<Credentials> | null>(null);
+  const [serverActiveProfile, setServerActiveProfile] = useState<string | null>(null);
   const [venvInstall, setVenvInstall] = useState<VenvInstallState>({
     status: 'idle',
     visible: false,
@@ -168,6 +174,7 @@ export function useDevReload(): {
         }));
       } else {
         setServerCredentials(msg.credentials);
+        setServerActiveProfile(msg.activeProfile ?? null);
       }
     };
 
@@ -275,6 +282,7 @@ export function useDevReload(): {
     consoleLogs,
     clearConsoleLogs,
     serverCredentials,
+    serverActiveProfile,
     venvInstall,
     dismissVenvInstall,
   };
