@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, type FC } from 'react';
+import { useState, useCallback, useRef, type FC, useMemo } from 'react';
 import type {
   AssistantField,
   ModalConfig,
@@ -9,8 +9,7 @@ import type {
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { Dialog, DialogHeader, type DialogSize } from './Dialog.js';
-import { useQuery } from '@tanstack/react-query';
-import { bundleQueryOptions } from '../bundleQuery.js';
+import { useAppPage } from '@kizenapps/engine/react';
 
 // The engine sends richer block types than ModalBlock declares (number, boolean, select).
 // We model the full superset here rather than casting everywhere.
@@ -274,8 +273,58 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
   return null;
 };
 
-const ModalCustomContent: FC = () => {
-  return <div></div>;
+const ModalCustomContent: FC<{
+  pages?: RoutablePageConfig[] | undefined;
+  viewId?: string | undefined;
+}> = ({ pages, viewId }) => {
+  const view = useMemo(() => {
+    if (!pages || !viewId) {
+      return undefined;
+    }
+
+    return pages.find((p) => p.api_name === viewId) ?? undefined;
+  }, [pages, viewId]);
+
+  const {
+    scriptUIRef,
+    outputUIRef,
+    scopedCss,
+    sanitizedHtml,
+    interactableScriptRef,
+    iframeURL,
+    pending,
+  } = useAppPage(view);
+
+  return (
+    <div className="relative h-full w-full">
+      {pending && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
+          loading…
+        </div>
+      )}
+
+      {view?.type === 'script' && (
+        <>
+          <div ref={scriptUIRef} className="h-full w-full p-3" />
+          <style>{scopedCss}</style>
+        </>
+      )}
+
+      {view?.type === 'html' && (
+        <div ref={interactableScriptRef} className="h-full overflow-auto p-3">
+          {sanitizedHtml && (
+            <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+          )}
+          <div ref={outputUIRef} />
+          <style>{scopedCss}</style>
+        </div>
+      )}
+
+      {view?.type === 'iframe' && iframeURL && (
+        <iframe src={iframeURL} className="h-full w-full border-0" title={view.name} />
+      )}
+    </div>
+  );
 };
 
 interface ModalProps {
@@ -284,6 +333,7 @@ interface ModalProps {
   pluginApiName?: string;
   onConfirm: (values: UnknownJSON) => void;
   onHide: (eventSource: 'button' | 'close', ...args: unknown[]) => void;
+  pages?: RoutablePageConfig[];
 }
 
 const SIZE_MAP: Record<string, DialogSize> = {
@@ -292,7 +342,14 @@ const SIZE_MAP: Record<string, DialogSize> = {
   large: 'xl',
 };
 
-export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, onHide }) => {
+export const Modal: FC<ModalProps> = ({
+  show,
+  config,
+  pluginApiName,
+  onConfirm,
+  onHide,
+  pages,
+}) => {
   const flex = config as FlexConfig;
   const blocks = (flex.content ?? []) as FlexBlock[];
   const isDynamic = Boolean(flex.dynamic);
@@ -369,7 +426,7 @@ export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, 
       }
     >
       {isCustomView ? (
-        <ModalCustomContent />
+        <ModalCustomContent pages={pages} viewId={config.viewId} />
       ) : isDynamic ? (
         <div className="relative max-h-[60vh] overflow-y-auto px-5 py-4">
           <DynamicModalContent
