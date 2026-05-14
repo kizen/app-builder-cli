@@ -545,6 +545,7 @@ export const SandboxPage: FC = () => {
             pluginApiName={pluginApiName}
             onConfirm={derivedModalState.props.onConfirm}
             onHide={derivedModalState.props.onHide}
+            pages={routablePages}
           />
           {criticalExceptionDialog}
         </ToastContext.Provider>

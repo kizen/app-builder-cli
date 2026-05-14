@@ -46,8 +46,8 @@ const RoutablePageView: FC<{ page: RoutablePageConfig; isActive: boolean }> = ({
       )}
 
       {page.type === 'html' && (
-        <div ref={interactableScriptRef} className="overflow-auto p-3">
-          {sanitizedHtml && <div dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />}
+        <div ref={interactableScriptRef} className="h-full overflow-auto p-3">
+          {sanitizedHtml && <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />}
           <div ref={outputUIRef} />
           <style>{scopedCss}</style>
         </div>

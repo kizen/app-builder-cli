@@ -1,8 +1,16 @@
 import { useState, useCallback, useRef, type FC } from 'react';
-import type { AssistantField, ModalConfig, SelectOption, UnknownJSON } from '@kizenapps/engine';
+import type {
+  AssistantField,
+  ModalConfig,
+  RoutablePageConfig,
+  SelectOption,
+  UnknownJSON,
+} from '@kizenapps/engine';
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { Dialog, DialogHeader, type DialogSize } from './Dialog.js';
+import { useQuery } from '@tanstack/react-query';
+import { bundleQueryOptions } from '../bundleQuery.js';
 
 // The engine sends richer block types than ModalBlock declares (number, boolean, select).
 // We model the full superset here rather than casting everywhere.
@@ -266,6 +274,10 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
   return null;
 };
 
+const ModalCustomContent: FC = () => {
+  return <div></div>;
+};
+
 interface ModalProps {
   show: boolean;
   config: ModalConfig;
@@ -285,9 +297,13 @@ export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, 
   const blocks = (flex.content ?? []) as FlexBlock[];
   const isDynamic = Boolean(flex.dynamic);
 
+  console.log(show, config, pluginApiName);
+
   const [fieldValues, setFieldValues] = useState<FieldValues>({});
   const [dynamicLoading, setDynamicLoading] = useState(false);
   const dynamicRef = useRef<DynamicModalContentHandle>(null);
+
+  const isCustomView = Boolean(config.viewId);
 
   const handleChange = useCallback((key: string, value: unknown) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -352,7 +368,9 @@ export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, 
         </>
       }
     >
-      {isDynamic ? (
+      {isCustomView ? (
+        <ModalCustomContent />
+      ) : isDynamic ? (
         <div className="relative max-h-[60vh] overflow-y-auto px-5 py-4">
           <DynamicModalContent
             ref={dynamicRef}
