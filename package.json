@@ -29,8 +29,8 @@
     "version:check": "node scripts/version-release.js"
   },
   "dependencies": {
-    "@kizenapps/engine": "file:/Users/keegan/Developer/plugin-engine",
-    "@kizenapps/packager": "0.1.1-6c23c4c",
+    "@kizenapps/engine": "1.5.0-b163380",
+    "@kizenapps/packager": "0.1.1",
     "chrome-launcher": "^1.2.1",
     "chrome-remote-interface": "^0.34.0",
     "commander": "^14.0.3",

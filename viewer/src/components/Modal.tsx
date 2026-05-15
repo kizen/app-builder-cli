@@ -374,9 +374,13 @@ export const Modal: FC<ModalProps> = ({
 
   const handleConfirm = async (): Promise<void> => {
     if (isCustomView) {
-      const formData = customContentRef.current?.collectFormData() ?? {};
+      const { ready, data } = customContentRef.current?.collectFormData() ?? {};
 
-      onConfirm({ formData } as UnknownJSON);
+      if (!ready) {
+        return;
+      }
+
+      onConfirm({ formData: data } as UnknownJSON);
     } else if (isDynamic && dynamicRef.current) {
       const { isValid, values } = await dynamicRef.current.validateAndGetValues();
 
