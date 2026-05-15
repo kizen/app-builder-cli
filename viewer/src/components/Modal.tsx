@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, type FC, useMemo } from 'react';
+import { useState, useCallback, useRef, forwardRef, type FC, useMemo } from 'react';
 import type {
   AssistantField,
   ModalConfig,
@@ -9,7 +9,11 @@ import type {
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { Dialog, DialogHeader, type DialogSize } from './Dialog.js';
-import { useAppPage } from '@kizenapps/engine/react';
+import {
+  useAppPage,
+  useRegisterFormDataCollection,
+  type ModalCustomContentHandle,
+} from '@kizenapps/engine/react';
 
 // The engine sends richer block types than ModalBlock declares (number, boolean, select).
 // We model the full superset here rather than casting everywhere.
@@ -273,10 +277,10 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
   return null;
 };
 
-const ModalCustomContent: FC<{
-  pages?: RoutablePageConfig[] | undefined;
-  viewId?: string | undefined;
-}> = ({ pages, viewId }) => {
+const ModalCustomContent = forwardRef<
+  ModalCustomContentHandle,
+  { pages?: RoutablePageConfig[] | undefined; viewId?: string | undefined }
+>(({ pages, viewId }, ref) => {
   const view = useMemo(() => {
     if (!pages || !viewId) {
       return undefined;
@@ -293,10 +297,13 @@ const ModalCustomContent: FC<{
     interactableScriptRef,
     iframeURL,
     pending,
+    collectFormData,
   } = useAppPage(view);
 
+  useRegisterFormDataCollection(ref, collectFormData);
+
   return (
-    <div className="relative h-full w-full">
+    <div className="relative h-full w-full overflow-hidden rounded-lg">
       {pending && (
         <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
           loading…
@@ -305,13 +312,13 @@ const ModalCustomContent: FC<{
 
       {view?.type === 'script' && (
         <>
-          <div ref={scriptUIRef} className="h-full w-full p-3" />
+          <div ref={scriptUIRef} className="h-full w-full" />
           <style>{scopedCss}</style>
         </>
       )}
 
       {view?.type === 'html' && (
-        <div ref={interactableScriptRef} className="h-full overflow-auto p-3">
+        <div ref={interactableScriptRef} className="h-full overflow-auto">
           {sanitizedHtml && (
             <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
           )}
@@ -325,7 +332,7 @@ const ModalCustomContent: FC<{
       )}
     </div>
   );
-};
+});
 
 interface ModalProps {
   show: boolean;
@@ -354,11 +361,10 @@ export const Modal: FC<ModalProps> = ({
   const blocks = (flex.content ?? []) as FlexBlock[];
   const isDynamic = Boolean(flex.dynamic);
 
-  console.log(show, config, pluginApiName);
-
   const [fieldValues, setFieldValues] = useState<FieldValues>({});
   const [dynamicLoading, setDynamicLoading] = useState(false);
   const dynamicRef = useRef<DynamicModalContentHandle>(null);
+  const customContentRef = useRef<ModalCustomContentHandle>(null);
 
   const isCustomView = Boolean(config.viewId);
 
@@ -367,7 +373,11 @@ export const Modal: FC<ModalProps> = ({
   }, []);
 
   const handleConfirm = async (): Promise<void> => {
-    if (isDynamic && dynamicRef.current) {
+    if (isCustomView) {
+      const formData = customContentRef.current?.collectFormData() ?? {};
+
+      onConfirm({ formData } as UnknownJSON);
+    } else if (isDynamic && dynamicRef.current) {
       const { isValid, values } = await dynamicRef.current.validateAndGetValues();
 
       if (!isValid) {
@@ -400,33 +410,35 @@ export const Modal: FC<ModalProps> = ({
       onBackdropClick={() => {
         handleHide('close');
       }}
-      header={config.title ? <DialogHeader title={config.title} /> : undefined}
+      header={!config.frameless && config.title ? <DialogHeader title={config.title} /> : undefined}
       footer={
-        <>
-          <button
-            onClick={() => {
-              handleHide('button');
-            }}
-            className="rounded border border-black/10 px-3 py-1.5 text-[12px] text-neutral-600 transition-colors hover:bg-black/5"
-          >
-            {cancelLabel}
-          </button>
-          <button
-            onClick={() => void handleConfirm()}
-            disabled={isDynamic && dynamicLoading}
-            className={`rounded px-3 py-1.5 text-[12px] text-white transition-colors ${
-              isDynamic && dynamicLoading
-                ? 'cursor-not-allowed bg-neutral-400'
-                : 'bg-neutral-900 hover:bg-neutral-700'
-            }`}
-          >
-            {confirmLabel}
-          </button>
-        </>
+        config.frameless ? undefined : (
+          <>
+            <button
+              onClick={() => {
+                handleHide('button');
+              }}
+              className="rounded border border-black/10 px-3 py-1.5 text-[12px] text-neutral-600 transition-colors hover:bg-black/5"
+            >
+              {cancelLabel}
+            </button>
+            <button
+              onClick={() => void handleConfirm()}
+              disabled={isDynamic && dynamicLoading}
+              className={`rounded px-3 py-1.5 text-[12px] text-white transition-colors ${
+                isDynamic && dynamicLoading
+                  ? 'cursor-not-allowed bg-neutral-400'
+                  : 'bg-neutral-900 hover:bg-neutral-700'
+              }`}
+            >
+              {confirmLabel}
+            </button>
+          </>
+        )
       }
     >
       {isCustomView ? (
-        <ModalCustomContent pages={pages} viewId={config.viewId} />
+        <ModalCustomContent ref={customContentRef} pages={pages} viewId={config.viewId} />
       ) : isDynamic ? (
         <div className="relative max-h-[60vh] overflow-y-auto px-5 py-4">
           <DynamicModalContent

@@ -93,7 +93,7 @@ interface CDPClient {
     setDockTile: (opts: { image?: string; label?: string }) => Promise<void>;
   };
   send: (method: string, params?: object, sessionId?: string) => Promise<unknown>;
-  on: (event: string, handler: (params: unknown) => void) => void;
+  on: (event: string, handler: (params: unknown, sessionId?: string) => void) => void;
   close: () => Promise<void>;
 }
 
@@ -218,15 +218,23 @@ function serializeArg(arg: CDPRemoteObject): unknown {
   return arg.description ?? `[${arg.type}]`;
 }
 
-async function serializeArgAsync(client: CDPClient, arg: CDPRemoteObject): Promise<unknown> {
+async function serializeArgAsync(
+  client: CDPClient,
+  arg: CDPRemoteObject,
+  sessionId?: string,
+): Promise<unknown> {
   if (arg.type === 'object' && arg.objectId) {
     try {
-      const result = await client.Runtime.callFunctionOn({
-        objectId: arg.objectId,
-        functionDeclaration:
-          'function() { try { const seen = new WeakSet(); return JSON.stringify(this, function(k,v) { if (typeof v === "bigint") { return String(v) + "n"; } if (typeof v === "object" && v !== null) { if (seen.has(v)) return "[Circular]"; seen.add(v); } return v; }); } catch { return undefined; } }',
-        returnByValue: true,
-      });
+      const result = (await client.send(
+        'Runtime.callFunctionOn',
+        {
+          objectId: arg.objectId,
+          functionDeclaration:
+            'function() { try { const seen = new WeakSet(); return JSON.stringify(this, function(k,v) { if (typeof v === "bigint") { return String(v) + "n"; } if (typeof v === "object" && v !== null) { if (seen.has(v)) return "[Circular]"; seen.add(v); } return v; }); } catch { return undefined; } }',
+          returnByValue: true,
+        },
+        sessionId,
+      )) as { result: { value?: unknown } };
       const val = result.result.value;
 
       if (typeof val === 'string') {
@@ -280,6 +288,7 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
+      '--disable-features=DeviceBoundSessions',
     ],
     userDataDir: opts.userDataDir,
     handleSIGINT: false,
@@ -507,29 +516,38 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
       handleTarget(targetInfo);
     });
 
-    c.on('Runtime.consoleAPICalled', (rawParams: unknown) => {
-      void (async () => {
-        const { type, args } = rawParams as CDPConsoleEvent;
+    // Serialize events one at a time to guarantee broadcast order matches
+    // emission order. Without this, a slow callFunctionOn round-trip for a
+    // large object can let a later primitive-only message overtake it.
+    let serializationChain = Promise.resolve();
 
-        if (args[0]?.type === 'string' && String(args[0].value).includes('Chrome Security')) {
-          return;
-        }
+    c.on('Runtime.consoleAPICalled', (rawParams: unknown, sessionId?: string) => {
+      const event = rawParams as CDPConsoleEvent;
+      const type = event?.type ?? 'log';
+      const args = event?.args ?? [];
 
-        const level =
-          type === 'warning'
-            ? 'warn'
-            : ['log', 'warn', 'error', 'info'].includes(type)
-              ? type
-              : 'log';
+      if (args[0]?.type === 'string' && String(args[0].value).includes('Chrome Security')) {
+        return;
+      }
 
-        vb(`console.${level} (${String(args.length)} arg(s))`);
+      const level =
+        type === 'warning'
+          ? 'warn'
+          : ['log', 'warn', 'error', 'info'].includes(type)
+            ? type
+            : 'log';
 
-        const serialized = await Promise.all(args.map((arg) => serializeArgAsync(c, arg)));
+      vb(`console.${level} (${String(args.length)} arg(s))`);
 
-        opts.broadcast({ type: 'console-message', level, args: serialized });
-      })().catch((e: unknown) => {
-        vb(`console serialization failed: ${(e as Error).message}`);
-      });
+      serializationChain = serializationChain.then(() =>
+        Promise.all(args.map((arg) => serializeArgAsync(c, arg, sessionId)))
+          .then((serialized) => {
+            opts.broadcast({ type: 'console-message', level, args: serialized });
+          })
+          .catch((e: unknown) => {
+            dbg(`console serialization failed: ${(e as Error).message}`);
+          }),
+      );
     });
 
     // CDP's underlying WebSocket can drop (sleep/wake, transient failure) while
