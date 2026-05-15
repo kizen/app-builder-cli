@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type FC } from 'react';
 import { ENVIRONMENTS, type Credentials } from '../CredentialsContext.js';
 import { RouteHarness } from './RouteHarness.js';
 import type { ProxyLogEntry } from '../useDevReload.js';
+import type { ConsoleEntry } from '../consoleCapture.js';
 import { STORAGE_KEYS } from '../lib/storageKeys.js';
 import { Tooltip } from './Tooltip.js';
 
@@ -13,16 +14,11 @@ interface CredentialProfile {
   isDefault: boolean;
 }
 
-export interface ConsoleEntry {
-  level: 'log' | 'warn' | 'error' | 'info';
-  args: unknown[];
-}
-
 interface DevSidebarProps {
   onClose: () => void;
   buildLogs: string[];
   proxyLogs: ProxyLogEntry[];
-  consoleLogs: ConsoleEntry[];
+  consoleLogs: readonly ConsoleEntry[];
   onClearConsole: () => void;
   credentials: Credentials;
   onCredentialsChange: (c: Credentials) => void;
@@ -66,7 +62,7 @@ function formatArg(arg: unknown): string {
 }
 
 interface ConsolePanelProps {
-  logs: ConsoleEntry[];
+  logs: readonly ConsoleEntry[];
   height: string;
 }
 

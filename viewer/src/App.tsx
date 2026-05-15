@@ -30,6 +30,7 @@ import { CredentialsContext, type Credentials } from './CredentialsContext.js';
 import { BootstrapContext } from './BootstrapContext.js';
 import type { BootstrapData } from './BootstrapContext.js';
 import { STORAGE_KEYS, setCredentialPrefix } from './lib/storageKeys.js';
+import { pushConsole, type ConsoleEntry } from './consoleCapture.js';
 
 // Capture before SandboxPage can override window.open for plugin intercepts
 const nativeOpen = window.open.bind(window);
@@ -65,6 +66,28 @@ const isPluginNotPublishedBody = (body: unknown): boolean => {
 
   return field.some((msg) => typeof msg === 'string' && msg.includes('does not exist'));
 };
+
+const CAPTURE_LEVELS: ReadonlySet<string> = new Set(['log', 'warn', 'error', 'info']);
+
+window.console = new Proxy(window.console, {
+  get(target, prop) {
+    const orig: unknown = Reflect.get(target, prop);
+
+    if (typeof orig === 'function') {
+      const fn = orig as (...a: unknown[]) => unknown;
+
+      return function (...args: unknown[]) {
+        if (typeof prop === 'string' && CAPTURE_LEVELS.has(prop)) {
+          pushConsole({ level: prop as ConsoleEntry['level'], args });
+        }
+
+        return fn.apply(target, args);
+      };
+    }
+
+    return orig;
+  },
+});
 
 export const App: FC = () => {
   const {

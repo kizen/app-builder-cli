@@ -484,7 +484,8 @@ export const SandboxPage: FC = () => {
       : {};
 
     return app.artifacts.routable_pages.map(
-      (page) => ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
+      (page) =>
+        ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
     );
   }, [bundle, apiName]);
 
@@ -563,7 +564,11 @@ export const SandboxPage: FC = () => {
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
         <ToastContext.Provider value={showToast}>
-          <SandboxPageInner showingToast={showingToast} browserRef={browserRef} routablePages={routablePages} />
+          <SandboxPageInner
+            showingToast={showingToast}
+            browserRef={browserRef}
+            routablePages={routablePages}
+          />
           <Modal
             show={showPluginModal}
             config={derivedModalState.config}

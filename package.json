@@ -29,7 +29,7 @@
     "version:check": "node scripts/version-release.js"
   },
   "dependencies": {
-    "@kizenapps/engine": "1.5.0-b163380",
+    "@kizenapps/engine": "file:/Users/keegan/Developer/plugin-engine",
     "@kizenapps/packager": "0.1.1",
     "chrome-launcher": "^1.2.1",
     "chrome-remote-interface": "^0.34.0",
