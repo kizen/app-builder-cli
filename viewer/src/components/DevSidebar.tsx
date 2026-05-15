@@ -227,7 +227,7 @@ const ConsolePanel: FC<ConsolePanelProps> = ({ logs, height }) => {
         logs.map((entry, i) => (
           <div
             key={i}
-            className={`whitespace-pre px-4 py-1.5 text-[12px] leading-6 ${levelColor[entry.level]} ${i % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-800/40'}`}
+            className={`whitespace-pre px-4 py-0.5 text-[12px] leading-5 ${levelColor[entry.level]} ${i % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-800/40'}`}
           >
             {entry.args.map((arg, j) => (
               <span key={j}>
