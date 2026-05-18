@@ -3,8 +3,7 @@ import type { AssistantField } from '@kizenapps/engine';
 import { useFieldBlock } from '../useFieldBlock.js';
 import { LinkAnchor } from './LinkAnchor.js';
 
-const isDimensionless = (field: AssistantField): boolean =>
-  !field.width && !field.height;
+const isDimensionless = (field: AssistantField): boolean => !field.width && !field.height;
 
 const getWidth = (field: AssistantField): string => {
   if (isDimensionless(field)) {

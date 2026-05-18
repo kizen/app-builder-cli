@@ -47,7 +47,9 @@ const RoutablePageView: FC<{ page: RoutablePageConfig; isActive: boolean }> = ({
 
       {page.type === 'html' && (
         <div ref={interactableScriptRef} className="h-full overflow-auto p-3">
-          {sanitizedHtml && <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />}
+          {sanitizedHtml && (
+            <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+          )}
           <div ref={outputUIRef} />
           <style>{scopedCss}</style>
         </div>
@@ -110,6 +112,39 @@ export const RoutablePageBrowser = forwardRef<BrowserHandle, { pages: RoutablePa
     const [dynamicTabs, setDynamicTabs] = useState<DynamicTab[]>([]);
     const [navVersions, setNavVersions] = useState<Record<string, number>>({});
     const tabIdCounter = useRef(0);
+    const tabBarRef = useRef<HTMLDivElement>(null);
+    const [canScrollLeft, setCanScrollLeft] = useState(false);
+    const [canScrollRight, setCanScrollRight] = useState(false);
+
+    const checkTabScroll = useCallback(() => {
+      const el = tabBarRef.current;
+
+      if (!el) {
+        return;
+      }
+
+      setCanScrollLeft(el.scrollLeft > 0);
+      setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    }, []);
+
+    useEffect(() => {
+      const el = tabBarRef.current;
+
+      if (!el) {
+        return;
+      }
+
+      checkTabScroll();
+      el.addEventListener('scroll', checkTabScroll);
+      const ro = new ResizeObserver(checkTabScroll);
+
+      ro.observe(el);
+
+      return () => {
+        el.removeEventListener('scroll', checkTabScroll);
+        ro.disconnect();
+      };
+    }, [checkTabScroll]);
 
     const currentHomePath = homeHistory.entries[homeHistory.index] ?? '';
     const displayPath = activeTab === 'home' ? currentHomePath : activeTab;
@@ -258,72 +293,86 @@ export const RoutablePageBrowser = forwardRef<BrowserHandle, { pages: RoutablePa
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-black/8 bg-neutral-50">
-          <button
-            onClick={() => {
-              setActiveTab('home');
-            }}
-            className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
-              activeTab === 'home'
-                ? 'bg-white font-medium text-neutral-900'
-                : 'text-neutral-500 hover:bg-black/5'
-            }`}
-          >
-            home
-          </button>
-          {pages.map((page) => (
-            <button
-              key={page.api_name}
-              onClick={() => {
-                setActiveTab(page.api_name);
-              }}
-              className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
-                activeTab === page.api_name
-                  ? 'bg-white font-medium text-neutral-900'
-                  : 'text-neutral-500 hover:bg-black/5'
-              }`}
-            >
-              {page.toolbar_icon &&
-                (ICON_MAP[page.toolbar_icon] ? (
-                  <FontAwesomeIcon
-                    icon={ICON_MAP[page.toolbar_icon]}
-                    className="mr-1 text-[10px] text-neutral-400"
-                  />
-                ) : (
-                  <span
-                    className={`mr-1 rounded px-1 font-mono text-[9px] ${VALID_ICONS.has(page.toolbar_icon) || CUSTOM_ICON_NAMES.has(page.toolbar_icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-                  >
-                    {page.toolbar_icon}
-                  </span>
-                ))}
-              {page.name}
-            </button>
-          ))}
-          {dynamicTabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`flex items-center border-r border-black/8 ${activeTab === tab.id ? 'bg-white' : 'hover:bg-black/5'}`}
-            >
+        <div className="relative border-b border-black/8 bg-neutral-50">
+          {canScrollLeft && (
+            <div className="pointer-events-none absolute inset-y-0 left-0 z-10 flex items-center pl-1 pr-6 bg-gradient-to-r from-neutral-50 to-transparent">
+              <span className="font-mono text-[13px] leading-none text-neutral-400">‹</span>
+            </div>
+          )}
+          {canScrollRight && (
+            <div className="pointer-events-none absolute inset-y-0 right-0 z-10 flex items-center pl-6 pr-1 bg-gradient-to-l from-neutral-50 to-transparent">
+              <span className="font-mono text-[13px] leading-none text-neutral-400">›</span>
+            </div>
+          )}
+          <div ref={tabBarRef} className="overflow-x-auto">
+            <div className="flex min-w-max">
               <button
                 onClick={() => {
-                  setActiveTab(tab.id);
+                  setActiveTab('home');
                 }}
-                className={`py-1.5 pl-3 pr-1 font-mono text-[11px] transition-colors ${
-                  activeTab === tab.id ? 'font-medium text-neutral-900' : 'text-neutral-500'
+                className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
+                  activeTab === 'home'
+                    ? 'bg-white font-medium text-neutral-900'
+                    : 'text-neutral-500 hover:bg-black/5'
                 }`}
               >
-                {tab.title}
+                home
               </button>
-              <button
-                onClick={() => {
-                  closeTab(tab.id);
-                }}
-                className="px-1.5 py-1.5 font-mono text-[11px] text-neutral-300 transition-colors hover:text-neutral-600"
-              >
-                ×
-              </button>
+              {pages.map((page) => (
+                <button
+                  key={page.api_name}
+                  onClick={() => {
+                    setActiveTab(page.api_name);
+                  }}
+                  className={`border-r border-black/8 px-3 py-1.5 font-mono text-[11px] transition-colors ${
+                    activeTab === page.api_name
+                      ? 'bg-white font-medium text-neutral-900'
+                      : 'text-neutral-500 hover:bg-black/5'
+                  }`}
+                >
+                  {page.toolbar_icon &&
+                    (ICON_MAP[page.toolbar_icon] ? (
+                      <FontAwesomeIcon
+                        icon={ICON_MAP[page.toolbar_icon]}
+                        className="mr-1 text-[10px] text-neutral-400"
+                      />
+                    ) : (
+                      <span
+                        className={`mr-1 rounded px-1 font-mono text-[9px] ${VALID_ICONS.has(page.toolbar_icon) || CUSTOM_ICON_NAMES.has(page.toolbar_icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
+                      >
+                        {page.toolbar_icon}
+                      </span>
+                    ))}
+                  {page.name}
+                </button>
+              ))}
+              {dynamicTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  className={`flex items-center border-r border-black/8 ${activeTab === tab.id ? 'bg-white' : 'hover:bg-black/5'}`}
+                >
+                  <button
+                    onClick={() => {
+                      setActiveTab(tab.id);
+                    }}
+                    className={`py-1.5 pl-3 pr-1 font-mono text-[11px] transition-colors ${
+                      activeTab === tab.id ? 'font-medium text-neutral-900' : 'text-neutral-500'
+                    }`}
+                  >
+                    {tab.title}
+                  </button>
+                  <button
+                    onClick={() => {
+                      closeTab(tab.id);
+                    }}
+                    className="px-1.5 py-1.5 font-mono text-[11px] text-neutral-300 transition-colors hover:text-neutral-600"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
             </div>
-          ))}
+          </div>
         </div>
 
         {/* Content */}
