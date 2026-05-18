@@ -312,7 +312,7 @@ const ModalCustomContent = forwardRef<
 
       {view?.type === 'script' && (
         <>
-          <div ref={scriptUIRef} className="h-full w-full" />
+          <div ref={scriptUIRef} className="h-full w-full overflow-y-auto" />
           <style>{scopedCss}</style>
         </>
       )}
@@ -411,6 +411,7 @@ export const Modal: FC<ModalProps> = ({
     <Dialog
       open={show}
       size={size}
+      height="75vh"
       onBackdropClick={() => {
         handleHide('close');
       }}
@@ -442,20 +443,24 @@ export const Modal: FC<ModalProps> = ({
       }
     >
       {isCustomView ? (
-        <ModalCustomContent ref={customContentRef} pages={pages} viewId={config.viewId} />
+        <div className="min-h-0 flex-1">
+          <ModalCustomContent ref={customContentRef} pages={pages} viewId={config.viewId} />
+        </div>
       ) : isDynamic ? (
-        <div className="relative max-h-[60vh] overflow-y-auto px-5 py-4">
-          <DynamicModalContent
-            ref={dynamicRef}
-            fields={toAssistantFields(blocks)}
-            pluginApiName={pluginApiName ?? flex.pluginApiName ?? ''}
-            onLoadingChange={setDynamicLoading}
-          />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            <DynamicModalContent
+              ref={dynamicRef}
+              fields={toAssistantFields(blocks)}
+              pluginApiName={pluginApiName ?? flex.pluginApiName ?? ''}
+              onLoadingChange={setDynamicLoading}
+            />
+          </div>
           <LoadingOverlay visible={dynamicLoading} />
         </div>
       ) : (
         blocks.length > 0 && (
-          <div className="max-h-[60vh] space-y-3 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
             {blocks.map((block, i) => (
               <ModalField
                 key={fieldKey(block) || `${block.type}-${String(i)}`}

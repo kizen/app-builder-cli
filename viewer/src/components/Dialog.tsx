@@ -18,6 +18,9 @@ interface DialogProps {
   open: boolean;
   onBackdropClick?: (() => void) | undefined;
   size?: DialogSize | undefined;
+  // CSS height for the panel (e.g. '75vh'). When set, the panel becomes a flex
+  // column at that exact height — children must use flex-1 / overflow to scroll.
+  height?: string | undefined;
   ariaModal?: boolean | undefined;
   fontMono?: boolean | undefined;
   header?: ReactNode | undefined;
@@ -29,6 +32,7 @@ export const Dialog: FC<DialogProps> = ({
   open,
   onBackdropClick,
   size = 'md',
+  height,
   ariaModal = true,
   fontMono = true,
   header,
@@ -123,7 +127,8 @@ export const Dialog: FC<DialogProps> = ({
       <div
         ref={contentRef}
         tabIndex={-1}
-        className={`w-full ${SIZE_CLASS[size]} rounded-lg border border-black/10 bg-white ${fontMono ? 'font-mono' : ''} shadow-xl focus:outline-none`}
+        className={`w-full ${SIZE_CLASS[size]} rounded-lg border border-black/10 bg-white ${fontMono ? 'font-mono' : ''} shadow-xl focus:outline-none${height ? ' flex flex-col overflow-hidden' : ''}`}
+        style={height ? { height } : undefined}
         onClick={(e) => {
           e.stopPropagation();
         }}
