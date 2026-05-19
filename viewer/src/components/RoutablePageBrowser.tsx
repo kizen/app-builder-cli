@@ -40,7 +40,7 @@ const RoutablePageView: FC<{ page: RoutablePageConfig; isActive: boolean }> = ({
 
       {page.type === 'script' && (
         <>
-          <div ref={scriptUIRef} className="h-full w-full p-3" />
+          <div ref={scriptUIRef} className="h-full w-full overflow-auto p-3" />
           <style>{scopedCss}</style>
         </>
       )}
