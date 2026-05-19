@@ -15,35 +15,6 @@ interface CDPHeader {
   value: string;
 }
 
-interface CDPRemoteObject {
-  type: string;
-  subtype?: string;
-  value?: unknown;
-  description?: string;
-  objectId?: string;
-  preview?: CDPObjectPreview;
-}
-
-interface CDPPropertyPreview {
-  name: string;
-  type: string;
-  value?: string;
-  subtype?: string;
-  valuePreview?: CDPObjectPreview;
-}
-
-interface CDPObjectPreview {
-  type: string;
-  subtype?: string;
-  overflow: boolean;
-  properties: CDPPropertyPreview[];
-}
-
-interface CDPConsoleEvent {
-  type: string;
-  args: CDPRemoteObject[];
-}
-
 interface CDPFetchPausedEvent {
   requestId: string;
   request: { url: string };
@@ -70,21 +41,7 @@ interface CDPClient {
     getAllCookies: () => Promise<{ cookies: CDPCookie[] }>;
     setCookie: (opts: CDPCookieSet) => Promise<void>;
   };
-  Runtime: {
-    enable: () => Promise<void>;
-    consoleAPICalled: (handler: (params: CDPConsoleEvent) => void) => void;
-    callFunctionOn: (opts: {
-      objectId: string;
-      functionDeclaration: string;
-      returnByValue: boolean;
-    }) => Promise<{ result: { value?: unknown } }>;
-  };
   Target: {
-    setAutoAttach: (opts: {
-      autoAttach: boolean;
-      waitForDebuggerOnStart: boolean;
-      flatten: boolean;
-    }) => Promise<void>;
     setDiscoverTargets: (opts: { discover: boolean }) => Promise<void>;
     closeTarget: (opts: { targetId: string }) => Promise<void>;
     activateTarget: (opts: { targetId: string }) => Promise<void>;
@@ -93,7 +50,7 @@ interface CDPClient {
     setDockTile: (opts: { image?: string; label?: string }) => Promise<void>;
   };
   send: (method: string, params?: object, sessionId?: string) => Promise<unknown>;
-  on: (event: string, handler: (params: unknown) => void) => void;
+  on: (event: string, handler: (params: unknown, sessionId?: string) => void) => void;
   close: () => Promise<void>;
 }
 
@@ -103,12 +60,6 @@ interface CDPTargetCreatedEvent {
     type: string;
     url: string;
   };
-}
-
-interface CDPAttachedToTargetEvent {
-  sessionId: string;
-  targetInfo: { targetId: string; type: string; url: string };
-  waitingForDebugger: boolean;
 }
 
 interface CDPCookie {
@@ -152,94 +103,6 @@ function isKizenUrl(url: string): boolean {
   }
 }
 
-function parseProp(prop: CDPPropertyPreview): unknown {
-  if (prop.type === 'number') {
-    return Number(prop.value);
-  }
-
-  if (prop.type === 'boolean') {
-    return prop.value === 'true';
-  }
-
-  if (prop.type === 'undefined') {
-    return undefined;
-  }
-
-  if (prop.type === 'object' && prop.value === 'null') {
-    return null;
-  }
-
-  if (prop.type === 'object' && prop.valuePreview) {
-    const { valuePreview } = prop;
-
-    if (valuePreview.subtype === 'array') {
-      return valuePreview.properties
-        .filter((p) => /^\d+$/.test(p.name))
-        .sort((a, b) => parseInt(a.name) - parseInt(b.name))
-        .map(parseProp);
-    }
-
-    const obj: Record<string, unknown> = {};
-
-    for (const p of valuePreview.properties) {
-      obj[p.name] = parseProp(p);
-    }
-
-    return obj;
-  }
-
-  return prop.value ?? `[${prop.type}]`;
-}
-
-function serializeArg(arg: CDPRemoteObject): unknown {
-  if (arg.value !== undefined) {
-    return arg.value;
-  }
-
-  if (arg.preview) {
-    const { preview } = arg;
-
-    if (preview.subtype === 'array') {
-      return preview.properties
-        .filter((p) => /^\d+$/.test(p.name))
-        .sort((a, b) => parseInt(a.name) - parseInt(b.name))
-        .map(parseProp);
-    }
-
-    const obj: Record<string, unknown> = {};
-
-    for (const prop of preview.properties) {
-      obj[prop.name] = parseProp(prop);
-    }
-
-    return obj;
-  }
-
-  return arg.description ?? `[${arg.type}]`;
-}
-
-async function serializeArgAsync(client: CDPClient, arg: CDPRemoteObject): Promise<unknown> {
-  if (arg.type === 'object' && arg.objectId) {
-    try {
-      const result = await client.Runtime.callFunctionOn({
-        objectId: arg.objectId,
-        functionDeclaration:
-          'function() { try { const seen = new WeakSet(); return JSON.stringify(this, function(k,v) { if (typeof v === "bigint") { return String(v) + "n"; } if (typeof v === "object" && v !== null) { if (seen.has(v)) return "[Circular]"; seen.add(v); } return v; }); } catch { return undefined; } }',
-        returnByValue: true,
-      });
-      const val = result.result.value;
-
-      if (typeof val === 'string') {
-        return JSON.parse(val) as unknown;
-      }
-    } catch {
-      // fall through to preview-based serialization
-    }
-  }
-
-  return serializeArg(arg);
-}
-
 async function installDockIcon(client: CDPClient): Promise<void> {
   try {
     const iconPath = join(dirname(fileURLToPath(import.meta.url)), 'viewer', 'icon.png');
@@ -280,6 +143,7 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-extensions',
+      '--disable-features=DeviceBoundSessions',
     ],
     userDataDir: opts.userDataDir,
     handleSIGINT: false,
@@ -437,29 +301,6 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
       })();
     }, 2000);
 
-    await c.send('Runtime.enable', { generatePreview: true });
-
-    // Child targets (iframes, popups, nested pages) auto-attach with their own
-    // sessionIds. Runtime.enable is per-session, so without this the main page
-    // works but sandbox/plugin frames are silent. Register before setAutoAttach
-    // so we don't miss the first attach event.
-    c.on('Target.attachedToTarget', (rawParams: unknown) => {
-      const params = rawParams as CDPAttachedToTargetEvent;
-      const { sessionId, targetInfo } = params;
-
-      vb(`attached session ${sessionId} (${targetInfo.type} ${targetInfo.url})`);
-
-      void c.send('Runtime.enable', { generatePreview: true }, sessionId).catch((e: unknown) => {
-        vb(`  Runtime.enable on session ${sessionId} failed: ${(e as Error).message}`);
-      });
-    });
-
-    await c.Target.setAutoAttach({
-      autoAttach: true,
-      waitForDebuggerOnStart: false,
-      flatten: true,
-    });
-
     // macOS dock clicks on --app= windows open a stray new-tab-page window
     // (Chromium excludes app windows from its "is a browser window open?" check).
     // activate the original app window, then close the intruder. setDiscoverTargets replays
@@ -505,31 +346,6 @@ export async function launchChromeViewer(opts: ChromeViewerOptions): Promise<Chr
 
       vb(`target ~${targetInfo.type} ${targetInfo.targetId} ${targetInfo.url}`);
       handleTarget(targetInfo);
-    });
-
-    c.on('Runtime.consoleAPICalled', (rawParams: unknown) => {
-      void (async () => {
-        const { type, args } = rawParams as CDPConsoleEvent;
-
-        if (args[0]?.type === 'string' && String(args[0].value).includes('Chrome Security')) {
-          return;
-        }
-
-        const level =
-          type === 'warning'
-            ? 'warn'
-            : ['log', 'warn', 'error', 'info'].includes(type)
-              ? type
-              : 'log';
-
-        vb(`console.${level} (${String(args.length)} arg(s))`);
-
-        const serialized = await Promise.all(args.map((arg) => serializeArgAsync(c, arg)));
-
-        opts.broadcast({ type: 'console-message', level, args: serialized });
-      })().catch((e: unknown) => {
-        vb(`console serialization failed: ${(e as Error).message}`);
-      });
     });
 
     // CDP's underlying WebSocket can drop (sleep/wake, transient failure) while

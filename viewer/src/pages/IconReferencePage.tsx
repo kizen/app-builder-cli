@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type FC } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { Card } from '../components/Card.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
-import { VALID_ICONS_LIST } from '../lib/validIcons.js';
+import { VALID_ICONS_LIST } from '@shared/lib/validIcons.js';
 
 export const IconReferencePage: FC = () => {
   const [copiedName, setCopiedName] = useState<string | null>(null);

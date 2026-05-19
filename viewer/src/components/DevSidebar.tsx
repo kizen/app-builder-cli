@@ -4,8 +4,10 @@ import { useCallback, useEffect, useRef, useState, type FC } from 'react';
 import { ENVIRONMENTS, type Credentials } from '../CredentialsContext.js';
 import { RouteHarness } from './RouteHarness.js';
 import type { ProxyLogEntry } from '../useDevReload.js';
+import type { ConsoleEntry } from '../consoleCapture.js';
 import { STORAGE_KEYS } from '../lib/storageKeys.js';
 import { Tooltip } from './Tooltip.js';
+import { Dialog, DialogHeader } from './Dialog.js';
 
 interface CredentialProfile {
   name: string;
@@ -13,16 +15,11 @@ interface CredentialProfile {
   isDefault: boolean;
 }
 
-export interface ConsoleEntry {
-  level: 'log' | 'warn' | 'error' | 'info';
-  args: unknown[];
-}
-
 interface DevSidebarProps {
   onClose: () => void;
   buildLogs: string[];
   proxyLogs: ProxyLogEntry[];
-  consoleLogs: ConsoleEntry[];
+  consoleLogs: readonly ConsoleEntry[];
   onClearConsole: () => void;
   credentials: Credentials;
   onCredentialsChange: (c: Credentials) => void;
@@ -45,28 +42,173 @@ const levelColor: Record<ConsoleEntry['level'], string> = {
   error: 'text-red-400',
 };
 
-function formatArg(arg: unknown): string {
-  if (typeof arg === 'string') {
-    return arg;
-  }
-
-  if (arg === null) {
-    return 'null';
-  }
-
-  if (arg === undefined) {
-    return 'undefined';
-  }
-
+function stringifyFull(value: unknown): string {
   try {
-    return JSON.stringify(arg);
+    const seen = new WeakSet();
+    const result = JSON.stringify(
+      value,
+      (_key, v: unknown) => {
+        if (typeof v === 'bigint') {
+          return `${v.toString()}n`;
+        }
+
+        if (typeof v === 'function') {
+          return `[Function: ${v.name || 'anonymous'}]`;
+        }
+
+        if (typeof v === 'object' && v !== null) {
+          if (seen.has(v)) {
+            return '[Circular]';
+          }
+
+          seen.add(v);
+        }
+
+        return v;
+      },
+      2,
+    );
+
+    return typeof result === 'string' ? result : '[unserializable]';
   } catch {
     return '[unserializable]';
   }
 }
 
+function previewOf(text: string, max = 16): string {
+  const compact = text.replace(/\s+/g, ' ').trim();
+
+  if (compact.length <= max) {
+    return compact;
+  }
+
+  return `${compact.slice(0, max)}…`;
+}
+
+function classifyArg(value: object): { label: string; preview: string; full: string } {
+  if (typeof value === 'function') {
+    const fn = value as { name?: string; toString: () => string };
+    const body = fn.toString();
+
+    return { label: `ƒ ${fn.name || 'anonymous'}`, preview: previewOf(body), full: body };
+  }
+
+  if (Array.isArray(value)) {
+    const full = stringifyFull(value);
+
+    return { label: `Array(${String(value.length)})`, preview: previewOf(full), full };
+  }
+
+  if (value instanceof Error) {
+    const head = `${value.name}: ${value.message}`;
+
+    return {
+      label: value.name || 'Error',
+      preview: previewOf(value.message),
+      full: value.stack ? `${head}\n${value.stack}` : head,
+    };
+  }
+
+  if (value instanceof Date) {
+    const iso = value.toISOString();
+
+    return { label: 'Date', preview: previewOf(iso, 20), full: iso };
+  }
+
+  if (value instanceof Map) {
+    const full = stringifyFull(Object.fromEntries(value));
+
+    return { label: `Map(${String(value.size)})`, preview: previewOf(full), full };
+  }
+
+  if (value instanceof Set) {
+    const full = stringifyFull([...value]);
+
+    return { label: `Set(${String(value.size)})`, preview: previewOf(full), full };
+  }
+
+  if (typeof Node !== 'undefined' && value instanceof Node) {
+    const tag = value.nodeName.toLowerCase();
+    const html = value instanceof Element ? value.outerHTML : value.textContent;
+    const full = html ?? `<${tag}>`;
+
+    return { label: `<${tag}>`, preview: previewOf(full), full };
+  }
+
+  const ctorName = (value as { constructor?: { name?: string } }).constructor?.name;
+  const label = ctorName && ctorName !== 'Object' ? ctorName : 'Object';
+  const full = stringifyFull(value);
+
+  return { label, preview: previewOf(full), full };
+}
+
+interface ConsoleArgProps {
+  value: unknown;
+}
+
+const ConsoleArg: FC<ConsoleArgProps> = ({ value }) => {
+  const [open, setOpen] = useState(false);
+
+  if (value === null) {
+    return <span className="italic text-neutral-500">null</span>;
+  }
+
+  if (value === undefined) {
+    return <span className="italic text-neutral-500">undefined</span>;
+  }
+
+  if (typeof value === 'string') {
+    return <span>{value}</span>;
+  }
+
+  if (
+    typeof value === 'number' ||
+    typeof value === 'bigint' ||
+    typeof value === 'boolean' ||
+    typeof value === 'symbol'
+  ) {
+    return <span>{String(value)}</span>;
+  }
+
+  const { label, preview, full } = classifyArg(value as object);
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen(true);
+        }}
+        className="inline-block rounded bg-neutral-700/70 px-1.5 py-0 align-baseline text-[11px] font-mono text-neutral-200 hover:bg-neutral-600"
+      >
+        {label}
+        {preview !== '' && <span className="ml-1.5 font-normal text-neutral-400">{preview}</span>}
+      </button>
+      <Dialog
+        open={open}
+        size="xl"
+        onBackdropClick={() => {
+          setOpen(false);
+        }}
+        header={
+          <DialogHeader
+            title={label}
+            onClose={() => {
+              setOpen(false);
+            }}
+          />
+        }
+      >
+        <pre className="m-0 max-h-[60vh] overflow-auto whitespace-pre px-5 py-3 text-[12px] leading-5 text-neutral-800">
+          {full}
+        </pre>
+      </Dialog>
+    </>
+  );
+};
+
 interface ConsolePanelProps {
-  logs: ConsoleEntry[];
+  logs: readonly ConsoleEntry[];
   height: string;
 }
 
@@ -85,9 +227,14 @@ const ConsolePanel: FC<ConsolePanelProps> = ({ logs, height }) => {
         logs.map((entry, i) => (
           <div
             key={i}
-            className={`whitespace-pre px-4 text-[12px] leading-5 ${levelColor[entry.level]} ${i % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-800/40'}`}
+            className={`whitespace-pre px-4 py-0.5 text-[12px] leading-5 ${levelColor[entry.level]} ${i % 2 === 0 ? 'bg-neutral-900' : 'bg-neutral-800/40'}`}
           >
-            {entry.args.map(formatArg).join(' ')}
+            {entry.args.map((arg, j) => (
+              <span key={j}>
+                {j > 0 && ' '}
+                <ConsoleArg value={arg} />
+              </span>
+            ))}
           </div>
         ))
       )}

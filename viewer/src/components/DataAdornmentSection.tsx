@@ -7,7 +7,7 @@ import type { UnknownJSON } from '@kizenapps/engine';
 import { useCredentials } from '../CredentialsContext.js';
 import { Typeahead } from './Typeahead.js';
 import { useEntitySelector } from '../hooks/useEntitySelector.js';
-import { VALID_ICONS } from '../lib/validIcons.js';
+import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { WhenBadge } from './WhenBadge.js';
 

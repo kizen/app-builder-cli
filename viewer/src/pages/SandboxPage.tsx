@@ -47,7 +47,8 @@ const NotInstalledNotice: FC = () => (
 const SandboxPageInner: FC<{
   showingToast: { message: string; variant?: string } | null;
   browserRef: RefObject<BrowserHandle | null>;
-}> = ({ showingToast, browserRef }) => {
+  routablePages: RoutablePageConfig[];
+}> = ({ showingToast, browserRef, routablePages }) => {
   const { apiName } = useParams({ strict: false });
 
   const sidebarWidth = useSidebarWidth();
@@ -179,10 +180,6 @@ const SandboxPageInner: FC<{
     plugin_api_name: app.api_name,
     args: configArgs,
   }));
-
-  const routablePages = app.artifacts.routable_pages.map(
-    (page) => ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
-  );
 
   const calendarSources = app.artifacts.calendar_sources.map(
     (source) =>
@@ -438,6 +435,7 @@ export const SandboxPage: FC = () => {
   }, [showingToast]);
 
   const { apiName } = useParams({ strict: false });
+  const { data: bundle } = useQuery(bundleQueryOptions);
   const bootstrap = useBootstrap();
   const request = useApi();
   const apiClient = useMemo(() => createKizenApiClient(request), [request]);
@@ -462,6 +460,34 @@ export const SandboxPage: FC = () => {
       },
     ];
   }, [apiName]);
+
+  const routablePages = useMemo((): RoutablePageConfig[] => {
+    if (!bundle || !apiName) {
+      return [];
+    }
+
+    const app = bundle.find((a) => a.api_name === apiName);
+
+    if (!app) {
+      return [];
+    }
+
+    const baseConfig = app.base_config as PluginBaseConfig | undefined;
+    const hasSetupAssistant =
+      (baseConfig?.setup_assistant?.fields?.length ?? 0) > 0 ||
+      (baseConfig?.user_setup_assistant?.fields?.length ?? 0) > 0;
+    const effectiveConfig = resolveEffectiveConfig(apiName, app.config_template);
+    const configArgs: Record<string, unknown> = effectiveConfig
+      ? hasSetupAssistant
+        ? { __kizen_clean_config: effectiveConfig }
+        : { ...effectiveConfig }
+      : {};
+
+    return app.artifacts.routable_pages.map(
+      (page) =>
+        ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
+    );
+  }, [bundle, apiName]);
 
   const showPrompt = (): void => {
     setShowing(true);
@@ -538,13 +564,18 @@ export const SandboxPage: FC = () => {
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
         <ToastContext.Provider value={showToast}>
-          <SandboxPageInner showingToast={showingToast} browserRef={browserRef} />
+          <SandboxPageInner
+            showingToast={showingToast}
+            browserRef={browserRef}
+            routablePages={routablePages}
+          />
           <Modal
             show={showPluginModal}
             config={derivedModalState.config}
             pluginApiName={pluginApiName}
             onConfirm={derivedModalState.props.onConfirm}
             onHide={derivedModalState.props.onHide}
+            pages={routablePages}
           />
           {criticalExceptionDialog}
         </ToastContext.Provider>

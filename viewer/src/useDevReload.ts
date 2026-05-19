@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { Credentials } from './CredentialsContext.js';
-import type { ConsoleEntry } from './components/DevSidebar.js';
+import {
+  clearConsoleLogs as clearConsoleBuffer,
+  getConsoleLogs,
+  subscribeConsole,
+  type ConsoleEntry,
+} from './consoleCapture.js';
 
 export type { ProxyLogEntry } from '@shared/lib/proxy.js';
 import { type ProxyLogEntry } from '@shared/lib/proxy.js';
@@ -24,7 +29,6 @@ type ServerMessage =
   | { type: 'rebuild' }
   | { type: 'log'; message: string }
   | { type: 'proxy-log'; entry?: ProxyLogEntry; message?: string }
-  | { type: 'console-message'; level: string; args: unknown[] }
   | {
       type: 'credentials-updated';
       credentials: Partial<Credentials> | null;
@@ -51,7 +55,7 @@ const LOG_BUFFER_LIMIT = 500;
 export function useDevReload(): {
   buildLogs: string[];
   proxyLogs: ProxyLogEntry[];
-  consoleLogs: ConsoleEntry[];
+  consoleLogs: readonly ConsoleEntry[];
   clearConsoleLogs: () => void;
   serverCredentials: Partial<Credentials> | null;
   serverActiveProfile: string | null;
@@ -61,7 +65,7 @@ export function useDevReload(): {
   const queryClient = useQueryClient();
   const [buildLogs, setBuildLogs] = useState<string[]>([]);
   const [proxyLogs, setProxyLogs] = useState<ProxyLogEntry[]>([]);
-  const [consoleLogs, setConsoleLogs] = useState<ConsoleEntry[]>([]);
+  const consoleLogs = useSyncExternalStore(subscribeConsole, getConsoleLogs);
   const [serverCredentials, setServerCredentials] = useState<Partial<Credentials> | null>(null);
   const [serverActiveProfile, setServerActiveProfile] = useState<string | null>(null);
   const [venvInstall, setVenvInstall] = useState<VenvInstallState>({
@@ -118,15 +122,6 @@ export function useDevReload(): {
         };
 
         setProxyLogs((prev) => [...prev, entry].slice(-LOG_BUFFER_LIMIT));
-      } else if (msg.type === 'console-message') {
-        const validLevels = ['log', 'warn', 'error', 'info'] as const;
-        const level: ConsoleEntry['level'] = validLevels.includes(
-          msg.level as ConsoleEntry['level'],
-        )
-          ? (msg.level as ConsoleEntry['level'])
-          : 'log';
-
-        setConsoleLogs((prev) => [...prev, { level, args: msg.args }].slice(-LOG_BUFFER_LIMIT));
       } else if (msg.type === 'venv-install-start') {
         clearVenvTimers();
         setVenvInstall({ status: 'installing', visible: false, logs: [], error: null });
@@ -273,7 +268,7 @@ export function useDevReload(): {
   }, [queryClient, clearVenvTimers]);
 
   const clearConsoleLogs = (): void => {
-    setConsoleLogs([]);
+    clearConsoleBuffer();
   };
 
   return {

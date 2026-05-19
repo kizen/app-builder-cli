@@ -292,9 +292,7 @@ import { faChevronUp } from '@fortawesome/pro-light-svg-icons/faChevronUp';
 import { faWindowRestore } from '@fortawesome/pro-light-svg-icons/faWindowRestore';
 import { faForward } from '@fortawesome/pro-light-svg-icons/faForward';
 
-// Icons that map to null in the Kizen registry have no FA equivalent.
-// They use custom React components and are rendered as text badges instead.
-export const CUSTOM_ICON_NAMES = new Set(['kizen-k', 'form-entity']);
+export { CUSTOM_ICON_NAMES } from '@shared/lib/validIcons.js';
 
 export const ICON_MAP: Record<string, IconDefinition> = {
   phone: faPhone,

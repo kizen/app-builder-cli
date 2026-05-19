@@ -296,3 +296,8 @@ export const VALID_ICONS = new Set([
 ]);
 
 export const VALID_ICONS_LIST = [...VALID_ICONS].sort();
+
+// Icons rendered as custom Kizen-brand React components — no FontAwesome equivalent.
+export const CUSTOM_ICON_NAMES = new Set(['kizen-k', 'form-entity']);
+
+export const ALL_VALID_ICONS_LIST = [...VALID_ICONS_LIST, ...[...CUSTOM_ICON_NAMES].sort()];

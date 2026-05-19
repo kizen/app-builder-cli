@@ -1,8 +1,20 @@
-import { useState, useCallback, useRef, type FC } from 'react';
-import type { AssistantField, ModalConfig, SelectOption, UnknownJSON } from '@kizenapps/engine';
+import { useState, useCallback, useRef, forwardRef, type FC, useMemo } from 'react';
+import type {
+  AssistantField,
+  ModalConfig,
+  ModalSize,
+  RoutablePageConfig,
+  SelectOption,
+  UnknownJSON,
+} from '@kizenapps/engine';
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
-import { Dialog, DialogHeader, type DialogSize } from './Dialog.js';
+import { Dialog, DialogHeader } from './Dialog.js';
+import {
+  useAppPage,
+  useRegisterFormDataCollection,
+  type ModalCustomContentHandle,
+} from '@kizenapps/engine/react';
 
 // The engine sends richer block types than ModalBlock declares (number, boolean, select).
 // We model the full superset here rather than casting everywhere.
@@ -38,7 +50,7 @@ interface FlexBlock {
 // Accept a wider config so `size` and runtime-only block types don't cause TS errors
 type FlexConfig = ModalConfig & {
   content?: FlexBlock[];
-  size?: 'small' | 'medium' | 'large';
+  size?: ModalSize;
 };
 
 const ASSISTANT_FIELD_TYPES: ReadonlySet<AssistantField['type']> = new Set([
@@ -266,21 +278,96 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
   return null;
 };
 
+const ModalCustomContent = forwardRef<
+  ModalCustomContentHandle,
+  {
+    pages?: RoutablePageConfig[] | undefined;
+    viewId?: string | undefined;
+    args?: UnknownJSON | undefined;
+  }
+>(({ pages, viewId, args }, ref) => {
+  const view = useMemo(() => {
+    if (!pages || !viewId) {
+      return undefined;
+    }
+
+    const found = pages.find((p) => p.api_name === viewId);
+
+    if (!found) {
+      return undefined;
+    }
+
+    return args ? ({ ...found, args } as RoutablePageConfig) : found;
+  }, [pages, viewId, args]);
+
+  const {
+    scriptUIRef,
+    outputUIRef,
+    scopedCss,
+    sanitizedHtml,
+    interactableScriptRef,
+    iframeURL,
+    pending,
+    collectFormData,
+  } = useAppPage(view);
+
+  useRegisterFormDataCollection(ref, collectFormData);
+
+  return (
+    <div className="relative h-full w-full overflow-hidden rounded-lg">
+      {pending && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
+          loading…
+        </div>
+      )}
+
+      {view?.type === 'script' && (
+        <>
+          <div ref={scriptUIRef} className="h-full w-full overflow-y-auto" />
+          <style>{scopedCss}</style>
+        </>
+      )}
+
+      {view?.type === 'html' && (
+        <div ref={interactableScriptRef} className="h-full overflow-auto">
+          {sanitizedHtml && (
+            <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+          )}
+          <div ref={outputUIRef} />
+          <style>{scopedCss}</style>
+        </div>
+      )}
+
+      {view?.type === 'iframe' && iframeURL && (
+        <iframe src={iframeURL} className="h-full w-full border-0" title={view.name} />
+      )}
+    </div>
+  );
+});
+
 interface ModalProps {
   show: boolean;
   config: ModalConfig;
   pluginApiName?: string;
   onConfirm: (values: UnknownJSON) => void;
   onHide: (eventSource: 'button' | 'close', ...args: unknown[]) => void;
+  pages?: RoutablePageConfig[];
 }
 
-const SIZE_MAP: Record<string, DialogSize> = {
-  small: 'sm',
-  medium: 'md',
-  large: 'xl',
+const MODAL_SIZE_PX: Record<ModalSize, number> = {
+  small: 400,
+  medium: 900,
+  large: 1200,
 };
 
-export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, onHide }) => {
+export const Modal: FC<ModalProps> = ({
+  show,
+  config,
+  pluginApiName,
+  onConfirm,
+  onHide,
+  pages,
+}) => {
   const flex = config as FlexConfig;
   const blocks = (flex.content ?? []) as FlexBlock[];
   const isDynamic = Boolean(flex.dynamic);
@@ -288,13 +375,24 @@ export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, 
   const [fieldValues, setFieldValues] = useState<FieldValues>({});
   const [dynamicLoading, setDynamicLoading] = useState(false);
   const dynamicRef = useRef<DynamicModalContentHandle>(null);
+  const customContentRef = useRef<ModalCustomContentHandle>(null);
+
+  const isCustomView = Boolean(config.viewId);
 
   const handleChange = useCallback((key: string, value: unknown) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
   }, []);
 
   const handleConfirm = async (): Promise<void> => {
-    if (isDynamic && dynamicRef.current) {
+    if (isCustomView) {
+      const { ready, data } = customContentRef.current?.collectFormData() ?? {};
+
+      if (!ready) {
+        return;
+      }
+
+      onConfirm({ formData: data } as UnknownJSON);
+    } else if (isDynamic && dynamicRef.current) {
       const { isValid, values } = await dynamicRef.current.validateAndGetValues();
 
       if (!isValid) {
@@ -318,53 +416,67 @@ export const Modal: FC<ModalProps> = ({ show, config, pluginApiName, onConfirm, 
 
   const confirmLabel = config.confirmButton?.label ?? 'Confirm';
   const cancelLabel = config.cancelButton?.label ?? 'Cancel';
-  const size = SIZE_MAP[flex.size ?? 'medium'] ?? 'md';
+  const maxWidth = MODAL_SIZE_PX[flex.size ?? 'medium'];
 
   return (
     <Dialog
       open={show}
-      size={size}
+      maxWidth={maxWidth}
+      height="75vh"
       onBackdropClick={() => {
         handleHide('close');
       }}
-      header={config.title ? <DialogHeader title={config.title} /> : undefined}
+      header={!config.frameless && config.title ? <DialogHeader title={config.title} /> : undefined}
       footer={
-        <>
-          <button
-            onClick={() => {
-              handleHide('button');
-            }}
-            className="rounded border border-black/10 px-3 py-1.5 text-[12px] text-neutral-600 transition-colors hover:bg-black/5"
-          >
-            {cancelLabel}
-          </button>
-          <button
-            onClick={() => void handleConfirm()}
-            disabled={isDynamic && dynamicLoading}
-            className={`rounded px-3 py-1.5 text-[12px] text-white transition-colors ${
-              isDynamic && dynamicLoading
-                ? 'cursor-not-allowed bg-neutral-400'
-                : 'bg-neutral-900 hover:bg-neutral-700'
-            }`}
-          >
-            {confirmLabel}
-          </button>
-        </>
+        config.frameless ? undefined : (
+          <>
+            <button
+              onClick={() => {
+                handleHide('button');
+              }}
+              className="rounded border border-black/10 px-3 py-1.5 text-[12px] text-neutral-600 transition-colors hover:bg-black/5"
+            >
+              {cancelLabel}
+            </button>
+            <button
+              onClick={() => void handleConfirm()}
+              disabled={isDynamic && dynamicLoading}
+              className={`rounded px-3 py-1.5 text-[12px] text-white transition-colors ${
+                isDynamic && dynamicLoading
+                  ? 'cursor-not-allowed bg-neutral-400'
+                  : 'bg-neutral-900 hover:bg-neutral-700'
+              }`}
+            >
+              {confirmLabel}
+            </button>
+          </>
+        )
       }
     >
-      {isDynamic ? (
-        <div className="relative max-h-[60vh] overflow-y-auto px-5 py-4">
-          <DynamicModalContent
-            ref={dynamicRef}
-            fields={toAssistantFields(blocks)}
-            pluginApiName={pluginApiName ?? flex.pluginApiName ?? ''}
-            onLoadingChange={setDynamicLoading}
+      {isCustomView ? (
+        <div className="min-h-0 flex-1">
+          <ModalCustomContent
+            ref={customContentRef}
+            pages={pages}
+            viewId={config.viewId}
+            args={config.args}
           />
+        </div>
+      ) : isDynamic ? (
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+            <DynamicModalContent
+              ref={dynamicRef}
+              fields={toAssistantFields(blocks)}
+              pluginApiName={pluginApiName ?? flex.pluginApiName ?? ''}
+              onLoadingChange={setDynamicLoading}
+            />
+          </div>
           <LoadingOverlay visible={dynamicLoading} />
         </div>
       ) : (
         blocks.length > 0 && (
-          <div className="max-h-[60vh] space-y-3 overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-4">
             {blocks.map((block, i) => (
               <ModalField
                 key={fieldKey(block) || `${block.type}-${String(i)}`}

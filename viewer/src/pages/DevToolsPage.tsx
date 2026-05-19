@@ -1,5 +1,6 @@
 import { type FC, useEffect, useState } from 'react';
-import { DevSidebar, type ConsoleEntry } from '../components/DevSidebar.js';
+import { DevSidebar } from '../components/DevSidebar.js';
+import { type ConsoleEntry } from '../consoleCapture.js';
 import { type Credentials } from '../CredentialsContext.js';
 import { STORAGE_KEYS } from '../lib/storageKeys.js';
 
