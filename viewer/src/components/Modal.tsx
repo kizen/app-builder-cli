@@ -292,19 +292,12 @@ const ModalCustomContent = forwardRef<
     }
 
     const found = pages.find((p) => p.api_name === viewId);
+
     if (!found) {
       return undefined;
     }
 
-    // useAppPage merges `currentPage.args` into the args passed to the view's
-    // script worker, so attach the modal's args here. Without this the view's
-    // main script.js cannot read `this.args` (only event scripts can, because
-    // they receive args directly from the form submission event).
-    // ModalConfig types args one level shallower than RoutablePageConfig —
-    // both shapes are runtime-equivalent JSON objects, hence the cast.
-    return args
-      ? { ...found, args: args as RoutablePageConfig['args'] }
-      : found;
+    return args ? ({ ...found, args } as RoutablePageConfig) : found;
   }, [pages, viewId, args]);
 
   const {
@@ -361,8 +354,6 @@ interface ModalProps {
   pages?: RoutablePageConfig[];
 }
 
-// Mirrors `modalSize` from @kizenapps/engine. Inlined because it's a type-only
-// export in this engine build.
 const MODAL_SIZE_PX: Record<ModalSize, number> = {
   small: 400,
   medium: 900,
