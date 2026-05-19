@@ -6,7 +6,7 @@ import { Card } from '../components/Card.js';
 import type { DeployablePlugin } from '@kizenapps/packager';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
-import { VALID_ICONS } from '../lib/validIcons.js';
+import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import type { PluginBaseConfig } from '../types.js';
 import { formatBytes } from '@shared/lib/formatBytes.js';
 

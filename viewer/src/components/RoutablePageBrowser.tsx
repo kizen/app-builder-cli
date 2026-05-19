@@ -10,7 +10,7 @@ import {
   type FC,
 } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { VALID_ICONS } from '../lib/validIcons.js';
+import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 
 const ROUTABLE_IFRAME_ALLOW =

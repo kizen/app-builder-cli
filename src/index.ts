@@ -5,6 +5,7 @@ import { program } from 'commander';
 import { buildCommand } from './commands/build.js';
 import { createCommand } from './commands/create.js';
 import { devCommand } from './commands/dev.js';
+import { iconsCommand } from './commands/icons.js';
 import { reportCommand } from './commands/report.js';
 
 const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
@@ -19,5 +20,7 @@ buildCommand(program);
 devCommand(program);
 
 reportCommand(program);
+
+iconsCommand(program);
 
 program.parse();

@@ -4,7 +4,7 @@ import type { GenericPluginConfig } from '@kizenapps/engine';
 import type { FC } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { LoadingOverlay } from './LoadingOverlay.js';
-import { VALID_ICONS } from '../lib/validIcons.js';
+import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { WhenBadge } from './WhenBadge.js';
 
