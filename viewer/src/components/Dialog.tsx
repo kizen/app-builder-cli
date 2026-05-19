@@ -18,6 +18,8 @@ interface DialogProps {
   open: boolean;
   onBackdropClick?: (() => void) | undefined;
   size?: DialogSize | undefined;
+  // Exact pixel max-width override. When set, takes precedence over `size`.
+  maxWidth?: number | string | undefined;
   // CSS height for the panel (e.g. '75vh'). When set, the panel becomes a flex
   // column at that exact height — children must use flex-1 / overflow to scroll.
   height?: string | undefined;
@@ -32,6 +34,7 @@ export const Dialog: FC<DialogProps> = ({
   open,
   onBackdropClick,
   size = 'md',
+  maxWidth,
   height,
   ariaModal = true,
   fontMono = true,
@@ -127,8 +130,13 @@ export const Dialog: FC<DialogProps> = ({
       <div
         ref={contentRef}
         tabIndex={-1}
-        className={`w-full ${SIZE_CLASS[size]} rounded-lg border border-black/10 bg-white ${fontMono ? 'font-mono' : ''} shadow-xl focus:outline-none${height ? ' flex flex-col overflow-hidden' : ''}`}
-        style={height ? { height } : undefined}
+        className={`w-full ${maxWidth === undefined ? SIZE_CLASS[size] : ''} rounded-lg border border-black/10 bg-white ${fontMono ? 'font-mono' : ''} shadow-xl focus:outline-none${height ? ' flex flex-col overflow-hidden' : ''}`}
+        style={{
+          ...(height ? { height } : null),
+          ...(maxWidth !== undefined
+            ? { maxWidth: typeof maxWidth === 'number' ? `${String(maxWidth)}px` : maxWidth }
+            : null),
+        }}
         onClick={(e) => {
           e.stopPropagation();
         }}

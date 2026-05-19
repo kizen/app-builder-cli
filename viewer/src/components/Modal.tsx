@@ -2,13 +2,14 @@ import { useState, useCallback, useRef, forwardRef, type FC, useMemo } from 'rea
 import type {
   AssistantField,
   ModalConfig,
+  ModalSize,
   RoutablePageConfig,
   SelectOption,
   UnknownJSON,
 } from '@kizenapps/engine';
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
-import { Dialog, DialogHeader, type DialogSize } from './Dialog.js';
+import { Dialog, DialogHeader } from './Dialog.js';
 import {
   useAppPage,
   useRegisterFormDataCollection,
@@ -49,7 +50,7 @@ interface FlexBlock {
 // Accept a wider config so `size` and runtime-only block types don't cause TS errors
 type FlexConfig = ModalConfig & {
   content?: FlexBlock[];
-  size?: 'small' | 'medium' | 'large';
+  size?: ModalSize;
 };
 
 const ASSISTANT_FIELD_TYPES: ReadonlySet<AssistantField['type']> = new Set([
@@ -279,15 +280,32 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
 
 const ModalCustomContent = forwardRef<
   ModalCustomContentHandle,
-  { pages?: RoutablePageConfig[] | undefined; viewId?: string | undefined }
->(({ pages, viewId }, ref) => {
+  {
+    pages?: RoutablePageConfig[] | undefined;
+    viewId?: string | undefined;
+    args?: UnknownJSON | undefined;
+  }
+>(({ pages, viewId, args }, ref) => {
   const view = useMemo(() => {
     if (!pages || !viewId) {
       return undefined;
     }
 
-    return pages.find((p) => p.api_name === viewId) ?? undefined;
-  }, [pages, viewId]);
+    const found = pages.find((p) => p.api_name === viewId);
+    if (!found) {
+      return undefined;
+    }
+
+    // useAppPage merges `currentPage.args` into the args passed to the view's
+    // script worker, so attach the modal's args here. Without this the view's
+    // main script.js cannot read `this.args` (only event scripts can, because
+    // they receive args directly from the form submission event).
+    // ModalConfig types args one level shallower than RoutablePageConfig —
+    // both shapes are runtime-equivalent JSON objects, hence the cast.
+    return args
+      ? { ...found, args: args as RoutablePageConfig['args'] }
+      : found;
+  }, [pages, viewId, args]);
 
   const {
     scriptUIRef,
@@ -343,10 +361,12 @@ interface ModalProps {
   pages?: RoutablePageConfig[];
 }
 
-const SIZE_MAP: Record<string, DialogSize> = {
-  small: 'sm',
-  medium: 'md',
-  large: 'xl',
+// Mirrors `modalSize` from @kizenapps/engine. Inlined because it's a type-only
+// export in this engine build.
+const MODAL_SIZE_PX: Record<ModalSize, number> = {
+  small: 400,
+  medium: 900,
+  large: 1200,
 };
 
 export const Modal: FC<ModalProps> = ({
@@ -405,12 +425,12 @@ export const Modal: FC<ModalProps> = ({
 
   const confirmLabel = config.confirmButton?.label ?? 'Confirm';
   const cancelLabel = config.cancelButton?.label ?? 'Cancel';
-  const size = SIZE_MAP[flex.size ?? 'medium'] ?? 'md';
+  const maxWidth = MODAL_SIZE_PX[flex.size ?? 'medium'];
 
   return (
     <Dialog
       open={show}
-      size={size}
+      maxWidth={maxWidth}
       height="75vh"
       onBackdropClick={() => {
         handleHide('close');
@@ -444,7 +464,12 @@ export const Modal: FC<ModalProps> = ({
     >
       {isCustomView ? (
         <div className="min-h-0 flex-1">
-          <ModalCustomContent ref={customContentRef} pages={pages} viewId={config.viewId} />
+          <ModalCustomContent
+            ref={customContentRef}
+            pages={pages}
+            viewId={config.viewId}
+            args={config.args}
+          />
         </div>
       ) : isDynamic ? (
         <div className="relative flex min-h-0 flex-1 flex-col">
