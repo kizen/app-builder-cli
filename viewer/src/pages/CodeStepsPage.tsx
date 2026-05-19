@@ -1,6 +1,8 @@
 import { useParams, useNavigate } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { type FC, useEffect, useMemo, useRef, useState } from 'react';
+import { type FC, useEffect, useMemo, useState } from 'react';
+import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { faPlay, faSpinner } from '@fortawesome/free-solid-svg-icons';
 import { useApi } from '../api.js';
 import { bundleQueryOptions } from '../bundleQuery.js';
 import { Card } from '../components/Card.js';
@@ -24,7 +26,6 @@ export const CodeStepsPage: FC = () => {
 
   const [isRunning, setIsRunning] = useState(false);
   const [result, setResult] = useState<ExecutionResult | null>(null);
-  const resultPanelRef = useRef<HTMLDivElement>(null);
 
   const inputsKey = `kizen-step-inputs:${apiName ?? ''}:${stepApiName ?? ''}`;
   const [inputValues, setInputValues] = useLocalStorage<Record<string, string>>(inputsKey, {});
@@ -96,12 +97,6 @@ export const CodeStepsPage: FC = () => {
   useEffect(() => {
     setResult(null);
   }, [stepApiName]);
-
-  useEffect(() => {
-    if (result && resultPanelRef.current) {
-      resultPanelRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [result]);
 
   if (isLoading) {
     return (
@@ -342,11 +337,27 @@ export const CodeStepsPage: FC = () => {
         onModeChange={setExecutionMode}
       />
 
-      {result && (
-        <div ref={resultPanelRef}>
+      <div className="sticky bottom-0 z-10 max-h-[60vh] overflow-y-auto rounded-lg shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.18)]">
+        {result ? (
           <ExecutionResultPanel result={result} />
-        </div>
-      )}
+        ) : (
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-black/10 bg-white px-4 py-3">
+            {isRunning ? (
+              <>
+                <FontAwesomeIcon icon={faSpinner} className="animate-spin text-neutral-400" />
+                <span className="text-[12px] text-neutral-500">Running step…</span>
+              </>
+            ) : (
+              <>
+                <FontAwesomeIcon icon={faPlay} className="text-neutral-300" />
+                <span className="text-[12px] text-neutral-400">
+                  Run the step to see output, logs, and network activity here.
+                </span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
