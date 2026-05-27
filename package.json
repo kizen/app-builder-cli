@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@kizenapps/engine": "1.5.0",
-    "@kizenapps/packager": "0.1.1",
+    "@kizenapps/packager": "0.1.2",
     "chrome-launcher": "^1.2.1",
     "chrome-remote-interface": "^0.34.0",
     "commander": "^14.0.3",
