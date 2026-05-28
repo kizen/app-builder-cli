@@ -1,6 +1,6 @@
 {
   "name": "@kizenapps/cli",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "CLI tool for running Kizen plugin apps locally",
   "license": "GPL-3.0",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@kizenapps/engine": "1.5.0",
-    "@kizenapps/packager": "0.1.1",
+    "@kizenapps/packager": "0.1.2",
     "chrome-launcher": "^1.2.1",
     "chrome-remote-interface": "^0.34.0",
     "commander": "^14.0.3",
