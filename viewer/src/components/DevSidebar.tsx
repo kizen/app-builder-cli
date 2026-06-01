@@ -345,6 +345,18 @@ const ProxyLogPanel: FC<ProxyLogPanelProps> = ({ logs, height }) => {
                   >
                     {entry.status === 0 ? 'ERR' : entry.status}
                   </span>
+                  {entry.upstreamStatus !== undefined && (
+                    <Tooltip
+                      text={`Third-party API returned ${String(entry.upstreamStatus)} (the proxy call itself returned ${String(entry.status)})`}
+                    >
+                      <span
+                        className={`flex w-12 shrink-0 cursor-default items-center justify-center gap-1.5 rounded text-center font-mono font-semibold ${statusBadgeClass(entry.upstreamStatus)}`}
+                      >
+                        <span className="text-neutral-500">→</span>
+                        {entry.upstreamStatus}
+                      </span>
+                    </Tooltip>
+                  )}
                   <span
                     className={`w-14 shrink-0 rounded text-center font-mono font-semibold ${entry.fromCache ? 'bg-violet-900/60 text-violet-300' : 'bg-neutral-800 text-neutral-400'}`}
                   >

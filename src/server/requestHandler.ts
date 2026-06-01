@@ -129,6 +129,34 @@ export function getViewerPath(): string {
   return join(dirname(filename), 'viewer');
 }
 
+/**
+ * Calls to Kizen's `/external-integrations/proxy` endpoint wrap the third-party
+ * API's status in the response body (`status_code`) and return HTTP 200 even
+ * when the upstream call failed. Pull that real status out so the network log
+ * can surface it instead of the misleading proxy status.
+ */
+function extractUpstreamStatus(
+  upstreamPath: string,
+  headers: Record<string, string>,
+  body: Buffer,
+): number | undefined {
+  if (!upstreamPath.includes('/external-integrations/proxy')) {
+    return undefined;
+  }
+
+  if (!headers['content-type']?.includes('application/json')) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(body.toString('utf8')) as { status_code?: unknown };
+
+    return typeof parsed.status_code === 'number' ? parsed.status_code : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function fileExists(filePath: string): Promise<boolean> {
   try {
     await access(filePath);
@@ -411,6 +439,7 @@ export function createRequestHandler(
               kind: 'request',
               method: 'GET',
               status: cached.status,
+              upstreamStatus: extractUpstreamStatus(upstreamPath, cached.headers, cached.body),
               fromCache,
               url: upstreamPath,
             });
@@ -436,6 +465,7 @@ export function createRequestHandler(
             kind: 'request',
             method,
             status: upstream.status,
+            upstreamStatus: extractUpstreamStatus(upstreamPath, responseHeaders, responseBody),
             fromCache: false,
             url: upstreamPath,
           });
