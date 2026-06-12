@@ -198,11 +198,15 @@ const VENV_PACKAGES = [
   'lxml',
   'msgpack',
   'numpy',
+  'oracledb',
   'paramiko',
+  'psycopg',
   'pyjwt',
+  'pymysql',
   'pypdf',
   'pytz',
   'requests',
+  'sqlalchemy',
   'tzdata',
 ];
 
