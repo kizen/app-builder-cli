@@ -16,5 +16,8 @@ export default defineConfig([
     // ~double the dist size but give Node-side consumers readable stack
     // traces from the minified bundle.
     sourcemap: true,
+    // Bundle .txt assets (e.g. python-requirements.txt) as inlined strings so
+    // they are available at runtime without a separate file-copy step.
+    loader: { '.txt': 'text' },
   },
 ]);

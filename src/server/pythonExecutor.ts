@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { writeFile, rm, mkdtemp, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import requirementsTxt from './python-requirements.txt';
 import { type ExecutionResult, type HttpRequests } from '../../shared/lib/execution.js';
 export type {
   ExecutionResult,
@@ -191,24 +192,25 @@ export interface ExecuteStepParams {
 }
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
-const VENV_PACKAGES = [
-  'awslambdaric',
-  'bcrypt',
-  'fpdf2',
-  'lxml',
-  'msgpack',
-  'numpy',
-  'oracledb',
-  'paramiko',
-  'psycopg',
-  'pyjwt',
-  'pymysql',
-  'pypdf',
-  'pytz',
-  'requests',
-  'sqlalchemy',
-  'tzdata',
-];
+
+// Parse a pip requirements file: strip blank lines, full-line comments, and
+// inline comments (e.g. `requests  # HTTP library`) so that every element is
+// a clean specifier that pip accepts as a positional argument.
+function parseRequirementsFile(content: string): string[] {
+  return content
+    .split('\n')
+    .map((line) => line.trim().replace(/\s+#.*$/, ''))
+    .filter((line) => line.length > 0 && !line.startsWith('#'));
+}
+
+// ./python-requirements.txt is the single source of truth for packages.
+// Keep it in sync with the remote code-runner:
+//   webapp/apps/code_runner/runtimes/python/requirements.txt
+const VENV_PACKAGES = parseRequirementsFile(requirementsTxt);
+
+if (VENV_PACKAGES.length === 0) {
+  throw new Error('python-requirements.txt bundled no packages — check the build output');
+}
 
 let venvReady: Promise<string> | null = null;
 

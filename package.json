@@ -1,6 +1,6 @@
 {
   "name": "@kizenapps/cli",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "CLI tool for running Kizen plugin apps locally",
   "license": "GPL-3.0",
   "type": "module",
