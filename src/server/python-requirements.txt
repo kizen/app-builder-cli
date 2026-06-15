@@ -1,0 +1,17 @@
+awslambdaric
+bcrypt
+fpdf2
+lxml
+msgpack
+numpy
+oracledb
+paramiko
+psycopg[binary]>=3.3,<4.0
+pyjwt[crypto]
+pymysql[rsa,ed25519]
+pypdf[full]
+python-dateutil
+pytz
+requests
+sqlalchemy>=2.0,<2.1
+tzdata
