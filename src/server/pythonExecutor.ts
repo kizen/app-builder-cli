@@ -214,15 +214,95 @@ if (VENV_PACKAGES.length === 0) {
 
 let venvReady: Promise<string> | null = null;
 
-function resolvePythonBinary(runtime: string): string {
-  // e.g. "python-3.9" -> try "python3.9" first
-  const match = /^python-(\d+\.\d+)$/.exec(runtime);
+// The bundled requirements (psycopg 3.3 in particular) require Python >= 3.10,
+// matching the remote code-runner which only ships 3.12 / 3.13 images. A venv
+// built on an older interpreter fails `pip install` with a cryptic
+// "No matching distribution found for psycopg[binary]<4.0,>=3.3".
+const MIN_PYTHON: readonly [number, number] = [3, 10];
 
-  if (match?.[1]) {
-    return `python${match[1]}`;
+function meetsMinimum([major, minor]: [number, number]): boolean {
+  return major > MIN_PYTHON[0] || (major === MIN_PYTHON[0] && minor >= MIN_PYTHON[1]);
+}
+
+function formatVersion(version: readonly [number, number]): string {
+  return `${String(version[0])}.${String(version[1])}`;
+}
+
+function resolvePythonBinary(runtime: string): string {
+  // Deployed plugin steps carry the runtime in hyphen form ("python-3-13");
+  // callers without a runtime fall back to dot form ("python-3.13"). Accept
+  // both and map to the interpreter name, e.g. "python3.13".
+  const match = /^python-(\d+)[.-](\d+)$/.exec(runtime);
+  const major = match?.[1];
+  const minor = match?.[2];
+
+  if (major !== undefined && minor !== undefined) {
+    return `python${major}.${minor}`;
   }
 
   return 'python3';
+}
+
+// Probe an interpreter for its (major, minor) version. Resolves null if the
+// binary is missing or can't run, so callers can try the next candidate.
+function probePython(bin: string): Promise<[number, number] | null> {
+  return new Promise((resolve) => {
+    const proc = spawn(bin, ['-c', "import sys; print('%d.%d' % sys.version_info[:2])"], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+
+    let out = '';
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString('utf-8');
+    });
+    proc.on('error', () => {
+      resolve(null);
+    });
+    proc.on('close', (code) => {
+      const match = /(\d+)\.(\d+)/.exec(out);
+
+      if (code !== 0 || !match) {
+        resolve(null);
+
+        return;
+      }
+
+      resolve([Number(match[1]), Number(match[2])]);
+    });
+  });
+}
+
+// Pick a system interpreter new enough to install the bundled requirements.
+// Prefer the exact version the runtime asked for, then fall back to python3.
+// Throws a clear, actionable error when nothing usable is found.
+async function findSystemPython(runtime: string): Promise<string> {
+  const preferred = resolvePythonBinary(runtime);
+  const candidates = preferred === 'python3' ? ['python3'] : [preferred, 'python3'];
+  const tried: string[] = [];
+
+  for (const bin of candidates) {
+    const version = await probePython(bin);
+
+    if (!version) {
+      tried.push(`${bin}: not found`);
+
+      continue;
+    }
+
+    if (meetsMinimum(version)) {
+      return bin;
+    }
+
+    tried.push(`${bin}: ${formatVersion(version)} (too old)`);
+  }
+
+  throw new Error(
+    `No Python >= ${formatVersion(MIN_PYTHON)} found for runtime "${runtime}". ` +
+      `The local runner needs Python ${formatVersion(MIN_PYTHON)}+ to install the bundled ` +
+      `packages (e.g. psycopg 3.3), matching the remote code-runner (3.12 / 3.13). ` +
+      `Tried ${tried.join(', ')}. Install Python 3.12 or 3.13 and retry.`,
+  );
 }
 
 function runCommand(
@@ -301,16 +381,36 @@ function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<st
       const venvPython = join(VENV_DIR, 'bin', 'python');
 
       try {
-        await access(venvPython);
-      } catch {
-        const systemPython = resolvePythonBinary(runtime);
+        // Reuse an existing venv only when its interpreter is new enough for
+        // the bundled requirements; otherwise rebuild it. A stale venv (e.g.
+        // Python 3.9) would otherwise fail `pip install` every time with a
+        // cryptic "No matching distribution" error for psycopg 3.3.
+        let reusable = false;
 
-        await runCommand(systemPython, ['-m', 'venv', VENV_DIR]);
-      }
+        try {
+          await access(venvPython);
 
-      emitInstall({ kind: 'start' });
+          const existing = await probePython(venvPython);
 
-      try {
+          reusable = existing !== null && meetsMinimum(existing);
+        } catch {
+          reusable = false;
+        }
+
+        if (!reusable) {
+          // Clear any stale/half-built venv before recreating it. Best-effort:
+          // rm of a missing dir is a no-op with force.
+          await rm(VENV_DIR, { recursive: true, force: true }).catch(() => {
+            /* ignore */
+          });
+
+          const systemPython = await findSystemPython(runtime);
+
+          await runCommand(systemPython, ['-m', 'venv', VENV_DIR]);
+        }
+
+        emitInstall({ kind: 'start' });
+
         await runCommand(
           venvPython,
           ['-m', 'pip', 'install', '--disable-pip-version-check', ...VENV_PACKAGES],
@@ -320,15 +420,18 @@ function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<st
         );
 
         emitInstall({ kind: 'complete' });
+
+        return venvPython;
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
 
         emitInstall({ kind: 'error', message });
 
         // Reset so the next call retries rather than returning the cached
-        // rejection forever. Also nuke the venv dir: if `python -m venv`
-        // failed mid-create, the remnants will confuse the access() check
-        // on the next attempt. rm is best-effort — we'll rebuild either way.
+        // rejection forever. Also nuke the venv dir: a half-built venv (a
+        // failed `python -m venv` or an interpreter that's too old) would
+        // confuse the reuse check on the next attempt. rm is best-effort —
+        // we rebuild either way.
         venvReady = null;
 
         await rm(VENV_DIR, { recursive: true, force: true }).catch(() => {
@@ -339,8 +442,6 @@ function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<st
       } finally {
         installListeners.clear();
       }
-
-      return venvPython;
     })();
   }
 
