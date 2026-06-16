@@ -1,12 +1,13 @@
 import { useGenericAppCustomScript } from '@kizenapps/engine/react';
 import type { ToolbarItemConfig, UnknownJSON } from '@kizenapps/engine';
 import type { GenericPluginConfig } from '@kizenapps/engine';
-import type { FC } from 'react';
+import { useState, type FC } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { WhenBadge } from './WhenBadge.js';
+import { ScriptResultPill, toErrorMessage, type ScriptResult } from './ScriptResultPill.js';
 
 type ToolbarItemWithWhen = ToolbarItemConfig & { when?: string };
 
@@ -20,9 +21,13 @@ export const ToolbarItem: FC<{
   // purely as a script plugin here.
   const plugin: GenericPluginConfig = { ...item, name: item.label, type: 'script' };
 
+  const [result, setResult] = useState<ScriptResult | null>(null);
+
   const [execute, { pending }] = useGenericAppCustomScript({
     onError: (e) => {
       console.error(`[toolbar] ${item.api_name}:`, e);
+
+      setResult({ kind: 'error', message: toErrorMessage(e) });
     },
     plugin,
   });
@@ -31,9 +36,16 @@ export const ToolbarItem: FC<{
 
   return (
     <button
-      onClick={() =>
-        void execute(item.script, (item as typeof item & { args?: Record<string, unknown> }).args)
-      }
+      onClick={() => {
+        setResult(null);
+
+        void execute(
+          item.script,
+          (item as typeof item & { args?: Record<string, unknown> }).args,
+        ).then((value) => {
+          setResult({ kind: 'value', value });
+        });
+      }}
       disabled={pending}
       className="relative flex flex-col items-start rounded border border-black/8 bg-white px-3 py-1.5 font-mono text-[12px] text-neutral-800 transition-colors hover:bg-black/5 disabled:opacity-50"
     >
@@ -57,6 +69,7 @@ export const ToolbarItem: FC<{
         <span>{item.label}</span>
       </span>
       {when && whenState && <WhenBadge when={when} whenState={whenState} />}
+      {result && <ScriptResultPill result={result} />}
       <LoadingOverlay visible={pending} />
     </button>
   );
