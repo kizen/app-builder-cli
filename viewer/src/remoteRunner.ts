@@ -5,7 +5,7 @@ import type {
   HttpRequests,
 } from './components/ExecutionResultPanel.js';
 
-const SUPPORTED_RUNTIMES = ['python-3-13', 'python-3-12'] as const;
+const SUPPORTED_RUNTIMES = ['python-3-12', 'python-3-13'] as const;
 // Matches the remote code-runner default (apps/code_runner/configs.py:
 // DEFAULT_RUNTIME = "python-3-13").
 const DEFAULT_RUNTIME = 'python-3-13';
@@ -72,12 +72,8 @@ export function toKizenType(dataType: string): string {
   return DATA_TYPE_TO_KIZEN[dataType.toLowerCase()] ?? 's';
 }
 
-function resolveRuntime(runtime: string): string {
-  if ((SUPPORTED_RUNTIMES as readonly string[]).includes(runtime)) {
-    return runtime;
-  }
-
-  return DEFAULT_RUNTIME;
+function isSupportedRuntime(runtime: string): boolean {
+  return (SUPPORTED_RUNTIMES as readonly string[]).includes(runtime);
 }
 
 function encodeInputs(
@@ -166,9 +162,30 @@ export async function executeRemoteStep(
 ): Promise<ExecutionResult> {
   const start = Date.now();
 
+  // A missing runtime falls back to the default; a present-but-unsupported one
+  // is a config error and hard-fails (mirroring local execution) rather than
+  // being silently coerced and run on a different interpreter than declared.
+  const runtime = params.scriptRuntime || DEFAULT_RUNTIME;
+
+  if (!isSupportedRuntime(runtime)) {
+    return {
+      success: false,
+      outputValues: {},
+      logs: [],
+      stdout: '',
+      stderr: '',
+      error:
+        `Unsupported runtime "${runtime}". Supported runtimes: ` +
+        `${SUPPORTED_RUNTIMES.join(', ')}. Update the step's config.json "runtime" field ` +
+        `(e.g. "python 3.13").`,
+      exitCode: 1,
+      durationMs: Date.now() - start,
+    };
+  }
+
   const body: Record<string, unknown> = {
     user_script: params.script,
-    runtime: resolveRuntime(params.scriptRuntime),
+    runtime,
     secrets: params.secretNames.length > 0 ? params.secretNames : undefined,
     inputs: encodeInputs(params.inputs, params.inputTypes),
     output_types: encodeOutputTypes(params.outputTypes),

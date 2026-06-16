@@ -193,6 +193,17 @@ export interface ExecuteStepParams {
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
 
+// The remote code-runner only ships these Lambda images
+// (apps/code_runner/Dockerfile.python-3-12, Dockerfile.python-3-13). Reject any
+// other runtime locally so a bad or unsupported "runtime" in a step's
+// config.json fails fast here instead of silently running on whatever
+// interpreter happens to be around — and behaving differently on deploy.
+const SUPPORTED_RUNTIMES = ['python-3-12', 'python-3-13'] as const;
+
+function isSupportedRuntime(runtime: string): boolean {
+  return (SUPPORTED_RUNTIMES as readonly string[]).includes(runtime);
+}
+
 // Parse a pip requirements file: strip blank lines, full-line comments, and
 // inline comments (e.g. `requests  # HTTP library`) so that every element is
 // a clean specifier that pip accepts as a positional argument.
@@ -363,87 +374,101 @@ function runCommand(
   });
 }
 
-const installListeners = new Set<VenvInstallListener>();
-
-function emitInstall(event: VenvInstallEvent): void {
-  for (const listener of installListeners) {
-    listener(event);
-  }
-}
+// Progress listeners for the in-flight venv build, so every caller awaiting the
+// same build receives its install output. Non-null only while a build is live,
+// so a cached-return call doesn't leak a listener that never fires.
+let venvInstallListeners: Set<VenvInstallListener> | null = null;
 
 function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<string> {
-  if (listener) {
-    installListeners.add(listener);
+  if (venvReady) {
+    // Build already running or done. Attach to its progress if it's still live.
+    if (listener) {
+      venvInstallListeners?.add(listener);
+    }
+
+    return venvReady;
   }
 
-  if (!venvReady) {
-    venvReady = (async () => {
-      const venvPython = join(VENV_DIR, 'bin', 'python');
+  const listeners = new Set<VenvInstallListener>();
+
+  if (listener) {
+    listeners.add(listener);
+  }
+
+  venvInstallListeners = listeners;
+
+  const emit = (event: VenvInstallEvent): void => {
+    for (const l of listeners) {
+      l(event);
+    }
+  };
+
+  const venvPython = join(VENV_DIR, 'bin', 'python');
+
+  venvReady = (async () => {
+    try {
+      // Reuse an existing venv only when its interpreter is new enough for the
+      // bundled requirements; otherwise rebuild it. A stale venv (e.g. Python
+      // 3.9) would otherwise fail `pip install` every time with a cryptic
+      // "No matching distribution" error for psycopg 3.3.
+      let reusable = false;
 
       try {
-        // Reuse an existing venv only when its interpreter is new enough for
-        // the bundled requirements; otherwise rebuild it. A stale venv (e.g.
-        // Python 3.9) would otherwise fail `pip install` every time with a
-        // cryptic "No matching distribution" error for psycopg 3.3.
-        let reusable = false;
+        await access(venvPython);
 
-        try {
-          await access(venvPython);
+        const existing = await probePython(venvPython);
 
-          const existing = await probePython(venvPython);
+        reusable = existing !== null && meetsMinimum(existing);
+      } catch {
+        reusable = false;
+      }
 
-          reusable = existing !== null && meetsMinimum(existing);
-        } catch {
-          reusable = false;
-        }
-
-        if (!reusable) {
-          // Clear any stale/half-built venv before recreating it. Best-effort:
-          // rm of a missing dir is a no-op with force.
-          await rm(VENV_DIR, { recursive: true, force: true }).catch(() => {
-            /* ignore */
-          });
-
-          const systemPython = await findSystemPython(runtime);
-
-          await runCommand(systemPython, ['-m', 'venv', VENV_DIR]);
-        }
-
-        emitInstall({ kind: 'start' });
-
-        await runCommand(
-          venvPython,
-          ['-m', 'pip', 'install', '--disable-pip-version-check', ...VENV_PACKAGES],
-          (line, stream) => {
-            emitInstall({ kind: 'log', line, stream });
-          },
-        );
-
-        emitInstall({ kind: 'complete' });
-
-        return venvPython;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-
-        emitInstall({ kind: 'error', message });
-
-        // Reset so the next call retries rather than returning the cached
-        // rejection forever. Also nuke the venv dir: a half-built venv (a
-        // failed `python -m venv` or an interpreter that's too old) would
-        // confuse the reuse check on the next attempt. rm is best-effort —
-        // we rebuild either way.
-        venvReady = null;
-
+      if (!reusable) {
+        // Clear any stale/half-built venv before recreating it. Best-effort:
+        // rm of a missing dir is a no-op with force.
         await rm(VENV_DIR, { recursive: true, force: true }).catch(() => {
           /* ignore */
         });
 
-        throw err;
-      } finally {
-        installListeners.clear();
+        const systemPython = await findSystemPython(runtime);
+
+        await runCommand(systemPython, ['-m', 'venv', VENV_DIR]);
       }
-    })();
-  }
+
+      emit({ kind: 'start' });
+
+      await runCommand(
+        venvPython,
+        ['-m', 'pip', 'install', '--disable-pip-version-check', ...VENV_PACKAGES],
+        (line, stream) => {
+          emit({ kind: 'log', line, stream });
+        },
+      );
+
+      emit({ kind: 'complete' });
+
+      return venvPython;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+
+      emit({ kind: 'error', message });
+
+      // Reset so the next call retries rather than returning the cached
+      // rejection forever. Also nuke the venv dir: a half-built venv (a failed
+      // `python -m venv` or an interpreter that's too old) would confuse the
+      // reuse check on the next attempt. rm is best-effort — we rebuild either
+      // way.
+      venvReady = null;
+
+      await rm(VENV_DIR, { recursive: true, force: true }).catch(() => {
+        /* ignore */
+      });
+
+      throw err;
+    } finally {
+      venvInstallListeners = null;
+    }
+  })();
 
   return venvReady;
 }
@@ -485,8 +510,32 @@ function parseResult(stdout: string): {
   }
 }
 
+function failedExecutionResult(error: string): ExecutionResult {
+  return {
+    success: false,
+    outputValues: {},
+    logs: [],
+    stdout: '',
+    stderr: '',
+    error,
+    exitCode: 1,
+    durationMs: 0,
+  };
+}
+
 export async function executePythonStep(params: ExecuteStepParams): Promise<ExecutionResult> {
   const timeout = params.timeout ?? DEFAULT_TIMEOUT;
+
+  // Fail fast on a runtime the remote code-runner can't run, instead of
+  // silently building a venv on whatever interpreter is handy.
+  if (!isSupportedRuntime(params.scriptRuntime)) {
+    return failedExecutionResult(
+      `Unsupported runtime "${params.scriptRuntime}". Supported runtimes: ` +
+        `${SUPPORTED_RUNTIMES.join(', ')}. Update the step's config.json "runtime" field ` +
+        `(e.g. "python 3.13").`,
+    );
+  }
+
   const pythonBin = await ensureVenv(params.scriptRuntime, params.onInstallProgress);
   const start = Date.now();
 
