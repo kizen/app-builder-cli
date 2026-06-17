@@ -1,10 +1,11 @@
-import { type FC } from 'react';
+import { useState, type FC } from 'react';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { useRecordDetailCustomScript } from '@kizenapps/engine/react';
 import type { JSAction } from '@kizenapps/packager';
 import { useCredentials } from '../CredentialsContext.js';
 import { Typeahead } from './Typeahead.js';
 import { useEntitySelector } from '../hooks/useEntitySelector.js';
+import { ScriptResultPill, toErrorMessage, type ScriptResult } from './ScriptResultPill.js';
 
 interface JsActionItemProps {
   action: JSAction;
@@ -27,11 +28,15 @@ const JsActionItem: FC<JsActionItemProps> = ({
   configArgs,
   disabled,
 }) => {
+  const [result, setResult] = useState<ScriptResult | null>(null);
+
   const [execute, { pending }] = useRecordDetailCustomScript({
     objectId,
     entityId,
     onError: (e) => {
       console.error(`[js-action] ${action.api_name}:`, e);
+
+      setResult({ kind: 'error', message: toErrorMessage(e) });
     },
   });
 
@@ -51,7 +56,11 @@ const JsActionItem: FC<JsActionItemProps> = ({
           overrideContext.actionEntityId = actionEntityId;
         }
 
-        void execute(action.script, configArgs, executionPlugin, overrideContext);
+        setResult(null);
+
+        void execute(action.script, configArgs, executionPlugin, overrideContext).then((value) => {
+          setResult({ kind: 'value', value });
+        });
       }}
       disabled={disabled === true || pending}
       className="relative flex flex-col items-start rounded border border-black/8 bg-white px-3 py-1.5 text-left transition-colors hover:bg-black/5 disabled:opacity-50"
@@ -62,6 +71,7 @@ const JsActionItem: FC<JsActionItemProps> = ({
           for: {action.hint_object_name}
         </span>
       )}
+      {result && <ScriptResultPill result={result} />}
       <LoadingOverlay visible={pending} />
     </button>
   );

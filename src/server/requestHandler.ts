@@ -347,7 +347,10 @@ export function createRequestHandler(
 
           const stepParams: Parameters<typeof executePythonStep>[0] = {
             script: body.script,
-            scriptRuntime: body.scriptRuntime ?? 'python-3.9',
+            // Matches the remote code-runner default (apps/code_runner/configs.py:
+            // DEFAULT_RUNTIME = "python-3-13"). Only used when a caller omits a
+            // runtime; real plugin steps send their own "python-3-NN" value.
+            scriptRuntime: body.scriptRuntime ?? 'python-3-13',
             inputs: body.inputs ?? {},
             secrets: body.secrets ?? {},
             onInstallProgress: (event) => {

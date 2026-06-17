@@ -10,6 +10,7 @@ import { useEntitySelector } from '../hooks/useEntitySelector.js';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { WhenBadge } from './WhenBadge.js';
+import { ScriptResultPill, toErrorMessage, type ScriptResult } from './ScriptResultPill.js';
 
 interface DataAdornmentItemProps {
   adornment: DataAdornment;
@@ -32,11 +33,15 @@ const DataAdornmentItem: FC<DataAdornmentItemProps> = ({
   disabled,
   whenState,
 }) => {
+  const [result, setResult] = useState<ScriptResult | null>(null);
+
   const [execute, { pending }] = useRecordDetailCustomScript({
     objectId,
     entityId,
     onError: (e) => {
       console.error(`[data-adornment] ${adornment.field_type}:`, e);
+
+      setResult({ kind: 'error', message: toErrorMessage(e) });
     },
   });
 
@@ -58,7 +63,11 @@ const DataAdornmentItem: FC<DataAdornmentItemProps> = ({
           ...configArgs,
         };
 
-        void execute(adornment.script, scriptArgs, executionPlugin);
+        setResult(null);
+
+        void execute(adornment.script, scriptArgs, executionPlugin).then((value) => {
+          setResult({ kind: 'value', value });
+        });
       }}
       disabled={disabled === true || pending}
       className="relative flex flex-col items-start rounded border border-black/8 bg-white px-3 py-1.5 text-left transition-colors hover:bg-black/5 disabled:opacity-50"
@@ -87,6 +96,7 @@ const DataAdornmentItem: FC<DataAdornmentItemProps> = ({
       </span>
       <span className="font-mono text-[10px] text-neutral-400">{adornment.field_type}</span>
       {adornment.when && whenState && <WhenBadge when={adornment.when} whenState={whenState} />}
+      {result && <ScriptResultPill result={result} />}
       <LoadingOverlay visible={pending} />
     </button>
   );
