@@ -19,7 +19,8 @@ export function proxyLogEntryToString(entry: ProxyLogEntry): string {
   }
 
   const cache = entry.fromCache ? ' [cache]' : '';
-  const upstream = entry.upstreamStatus !== undefined ? ` (upstream ${String(entry.upstreamStatus)})` : '';
+  const upstream =
+    entry.upstreamStatus !== undefined ? ` (upstream ${String(entry.upstreamStatus)})` : '';
 
   return `${entry.method} ${entry.url} → ${String(entry.status)}${upstream}${cache}`;
 }

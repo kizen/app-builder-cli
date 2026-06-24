@@ -61,8 +61,8 @@ export const SecretsPage: FC = () => {
   const { apiKey, userId, businessId, environment } = credentials;
 
   // Public key — persisted in localStorage, collapsed once loaded
-  const [publicKey, setPublicKey] = useState<string | null>(
-    () => loadStoredKey(apiName, environment),
+  const [publicKey, setPublicKey] = useState<string | null>(() =>
+    loadStoredKey(apiName, environment),
   );
   const [pkCollapsed, setPkCollapsed] = useState<boolean>(
     () => loadStoredKey(apiName, environment) !== null,
@@ -127,7 +127,9 @@ export const SecretsPage: FC = () => {
   };
 
   const handleEncrypt = async (): Promise<void> => {
-    if (!publicKey || !secretValue.trim()) return;
+    if (!publicKey || !secretValue.trim()) {
+      return;
+    }
 
     setEncryptLoading(true);
     setEncryptError(null);
@@ -159,7 +161,9 @@ export const SecretsPage: FC = () => {
   };
 
   const handleValidate = async (): Promise<void> => {
-    if (!validateInput.trim()) return;
+    if (!validateInput.trim()) {
+      return;
+    }
 
     setValidateLoading(true);
     setValidationResult(null);
@@ -167,8 +171,10 @@ export const SecretsPage: FC = () => {
     // Accept either the full { encrypted: true, value: "..." } JSON
     // or the raw base64 value string directly.
     let raw = validateInput.trim();
+
     try {
       const outer = JSON.parse(raw) as Record<string, unknown>;
+
       if (typeof outer.value === 'string') {
         raw = outer.value;
       }
@@ -194,7 +200,10 @@ export const SecretsPage: FC = () => {
   };
 
   const handleCopyPublicKey = (): void => {
-    if (!publicKey) return;
+    if (!publicKey) {
+      return;
+    }
+
     void navigator.clipboard.writeText(publicKey).then(() => {
       setPkCopied(true);
       setTimeout(() => {
@@ -204,10 +213,14 @@ export const SecretsPage: FC = () => {
   };
 
   const handleDownloadPublicKey = (): void => {
-    if (!publicKey) return;
+    if (!publicKey) {
+      return;
+    }
+
     const blob = new Blob([publicKey], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
+
     a.href = url;
     a.download = `${apiName}-${environment}-public-key.pem`;
     a.click();
@@ -215,7 +228,10 @@ export const SecretsPage: FC = () => {
   };
 
   const handleCopyEncrypted = (): void => {
-    if (!encryptedValue) return;
+    if (!encryptedValue) {
+      return;
+    }
+
     void navigator.clipboard.writeText(encryptedValue).then(() => {
       setEncryptCopied(true);
       setTimeout(() => {
@@ -234,8 +250,8 @@ export const SecretsPage: FC = () => {
           <div>
             <p className="text-[13px] font-medium text-neutral-500">No credentials configured</p>
             <p className="mt-1 text-[12px] text-neutral-400">
-              A credential profile with a valid API key, user ID, and business ID is required to
-              use this page. Set one up in{' '}
+              A credential profile with a valid API key, user ID, and business ID is required to use
+              this page. Set one up in{' '}
               <code className="rounded bg-neutral-100 px-1 py-0.5 text-[11px]">
                 ~/.kizenappbuilder/credentials.json
               </code>{' '}
@@ -251,10 +267,7 @@ export const SecretsPage: FC = () => {
     return (
       <Card>
         <div className="flex items-center justify-center py-8">
-          <FontAwesomeIcon
-            icon={faSpinner}
-            className="animate-spin text-[20px] text-neutral-300"
-          />
+          <FontAwesomeIcon icon={faSpinner} className="animate-spin text-[20px] text-neutral-300" />
         </div>
       </Card>
     );
@@ -437,7 +450,9 @@ export const SecretsPage: FC = () => {
                 setSecretValue(e.target.value);
               }}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') void handleEncrypt();
+                if (e.key === 'Enter') {
+                  void handleEncrypt();
+                }
               }}
               placeholder="Enter the plaintext secret…"
               className="w-full rounded-lg border border-black/10 px-3 py-2 text-[13px] outline-none focus:ring-2 focus:ring-blue-400"

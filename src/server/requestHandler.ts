@@ -485,51 +485,48 @@ export function createRequestHandler(
               label: 'Version',
               expected: String(CRYPTO_VERSION),
               actual: String(envelope.v),
-              pass: envelope.v === CRYPTO_VERSION,
+              pass: (envelope.v as number) === CRYPTO_VERSION,
             },
             {
               label: 'Algorithm',
               expected: CRYPTO_ALG,
               actual: envelope.alg,
-              pass: envelope.alg === CRYPTO_ALG,
+              pass: (envelope.alg as string) === CRYPTO_ALG,
             },
             {
               label: 'Wrapped key',
               expected: '384 bytes (RSA-3072)',
-              actual: `${bufLen(envelope.k)} bytes`,
+              actual: `${String(bufLen(envelope.k))} bytes`,
               pass: bufLen(envelope.k) === 384,
             },
             {
               label: 'IV',
               expected: '12 bytes',
-              actual: `${bufLen(envelope.iv)} bytes`,
+              actual: `${String(bufLen(envelope.iv))} bytes`,
               pass: bufLen(envelope.iv) === 12,
             },
             {
               label: 'Auth tag',
               expected: '16 bytes',
-              actual: `${bufLen(envelope.tag)} bytes`,
+              actual: `${String(bufLen(envelope.tag))} bytes`,
               pass: bufLen(envelope.tag) === 16,
             },
             {
               label: 'Ciphertext',
               expected: '≥ 1 byte',
-              actual: `${bufLen(envelope.ct)} bytes`,
+              actual: `${String(bufLen(envelope.ct))} bytes`,
               pass: bufLen(envelope.ct) >= 1,
             },
           ];
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(
-            JSON.stringify({ valid: checks.every((c) => c.pass), checks }),
-          );
+          res.end(JSON.stringify({ valid: checks.every((c) => c.pass), checks }));
 
           return;
         }
 
         if (url.startsWith('/api/wizard')) {
-          const wizardBase =
-            process.env.PLUGIN_WIZARD_URL ?? 'http://localhost:9823';
+          const wizardBase = process.env.PLUGIN_WIZARD_URL ?? 'http://localhost:9823';
           const upstreamPath = url.slice('/api/wizard'.length) || '/';
           const upstreamUrl = `${wizardBase}${upstreamPath}`;
           const method = req.method ?? 'GET';
