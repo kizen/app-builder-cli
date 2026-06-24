@@ -24,6 +24,9 @@ const CodeStepsPage = lazy(() =>
 const SourceBrowserPage = lazy(() =>
   import('./pages/SourceBrowserPage.js').then((m) => ({ default: m.SourceBrowserPage })),
 );
+const SecretsPage = lazy(() =>
+  import('./pages/SecretsPage.js').then((m) => ({ default: m.SecretsPage })),
+);
 
 const rootRoute = createRootRoute({ component: App });
 
@@ -81,6 +84,12 @@ export const appSourceBrowserRoute = createRoute({
   component: SourceBrowserPage,
 });
 
+export const appSecretsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/$apiName/secrets',
+  component: SecretsPage,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   appDetailRoute,
@@ -91,6 +100,7 @@ const routeTree = rootRoute.addChildren([
   appCodeStepsRoute,
   appCodeStepDetailRoute,
   appSourceBrowserRoute,
+  appSecretsRoute,
 ]);
 
 export const router = createRouter({ routeTree });

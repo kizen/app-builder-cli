@@ -21,6 +21,13 @@ import { loadConfig, saveConfig } from '../lib/config.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
 import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
+import {
+  CRYPTO_ALG,
+  CRYPTO_VERSION,
+  deserializeEnvelope,
+  encrypt,
+  serializeEnvelope,
+} from '@kizenapps/packager';
 
 const SOURCE_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -393,6 +400,179 @@ export function createRequestHandler(
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
 
           res.end('{"ok":true}');
+
+          return;
+        }
+
+        if (url === '/api/local/encrypt' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}') as {
+            publicKeyPem?: string;
+            value?: string;
+          };
+
+          if (typeof body.publicKeyPem !== 'string' || typeof body.value !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Missing required fields: publicKeyPem, value' }));
+
+            return;
+          }
+
+          try {
+            const envelope = encrypt(body.value, body.publicKeyPem);
+            const serialized = serializeEnvelope(envelope);
+
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(serialized));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: (err as Error).message }));
+          }
+
+          return;
+        }
+
+        if (url === '/api/local/validate' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}') as {
+            value?: string;
+          };
+
+          if (typeof body.value !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Missing required field: value' }));
+
+            return;
+          }
+
+          interface CheckResult {
+            label: string;
+            expected: string;
+            actual: string;
+            pass: boolean;
+          }
+
+          let envelope: ReturnType<typeof deserializeEnvelope> | undefined;
+          let parseError: string | undefined;
+
+          try {
+            envelope = deserializeEnvelope(body.value);
+          } catch (err) {
+            parseError = (err as Error).message;
+          }
+
+          if (parseError !== undefined || envelope === undefined) {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ valid: false, checks: [], error: parseError }));
+
+            return;
+          }
+
+          const bufLen = (b64: string): number => Buffer.from(b64, 'base64').length;
+
+          const checks: CheckResult[] = [
+            {
+              label: 'Version',
+              expected: String(CRYPTO_VERSION),
+              actual: String(envelope.v),
+              pass: envelope.v === CRYPTO_VERSION,
+            },
+            {
+              label: 'Algorithm',
+              expected: CRYPTO_ALG,
+              actual: envelope.alg,
+              pass: envelope.alg === CRYPTO_ALG,
+            },
+            {
+              label: 'Wrapped key',
+              expected: '384 bytes (RSA-3072)',
+              actual: `${bufLen(envelope.k)} bytes`,
+              pass: bufLen(envelope.k) === 384,
+            },
+            {
+              label: 'IV',
+              expected: '12 bytes',
+              actual: `${bufLen(envelope.iv)} bytes`,
+              pass: bufLen(envelope.iv) === 12,
+            },
+            {
+              label: 'Auth tag',
+              expected: '16 bytes',
+              actual: `${bufLen(envelope.tag)} bytes`,
+              pass: bufLen(envelope.tag) === 16,
+            },
+            {
+              label: 'Ciphertext',
+              expected: '≥ 1 byte',
+              actual: `${bufLen(envelope.ct)} bytes`,
+              pass: bufLen(envelope.ct) >= 1,
+            },
+          ];
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(
+            JSON.stringify({ valid: checks.every((c) => c.pass), checks }),
+          );
+
+          return;
+        }
+
+        if (url.startsWith('/api/wizard')) {
+          const wizardBase =
+            process.env.PLUGIN_WIZARD_URL ?? 'http://localhost:9823';
+          const upstreamPath = url.slice('/api/wizard'.length) || '/';
+          const upstreamUrl = `${wizardBase}${upstreamPath}`;
+          const method = req.method ?? 'GET';
+
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { host: _wizardHost, ...wizardForwardHeaders } = req.headers;
+
+          const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+          const resolvedBody = body && body.length > 0 ? body : undefined;
+
+          let upstream: Response;
+
+          try {
+            upstream = await fetch(upstreamUrl, {
+              method,
+              headers: wizardForwardHeaders as Record<string, string>,
+              ...(resolvedBody !== undefined && { body: resolvedBody }),
+            });
+          } catch (err) {
+            const message =
+              (err as NodeJS.ErrnoException).code === 'ECONNREFUSED'
+                ? `plugin-wizard is not running at ${wizardBase}`
+                : `Failed to reach plugin-wizard: ${(err as Error).message}`;
+
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: message }));
+
+            return;
+          }
+
+          const wizardResponseHeaders = sanitizeUpstreamHeaders(
+            Object.fromEntries(upstream.headers),
+          );
+          const wizardBody = await upstream.arrayBuffer();
+
+          res.writeHead(upstream.status, wizardResponseHeaders);
+          res.end(Buffer.from(wizardBody));
 
           return;
         }

@@ -8,6 +8,7 @@ import {
   faFlaskVial,
   faGear,
   faIcons,
+  faKey,
   faListCheck,
   type IconDefinition,
 } from '@fortawesome/free-solid-svg-icons';
@@ -29,14 +30,15 @@ const BASE_TABS: readonly Tab[] = [
   { id: 'summary', label: 'Summary', icon: faChartSimple, order: 0 },
   { id: 'sandbox', label: 'Sandbox', icon: faFlaskVial, order: 1 },
   { id: 'configuration', label: 'Configuration', icon: faGear, order: 2 },
-  { id: 'source', label: 'App Source', icon: faCode, order: 4 },
+  { id: 'secrets', label: 'Secrets', icon: faKey, order: 3 },
+  { id: 'source', label: 'App Source', icon: faCode, order: 5 },
 ];
 
-const CODE_STEPS_TAB: Tab = { id: 'code-steps', label: 'Code Steps', icon: faListCheck, order: 3 };
+const CODE_STEPS_TAB: Tab = { id: 'code-steps', label: 'Code Steps', icon: faListCheck, order: 4 };
 
 const TRAILING_TABS: readonly Tab[] = [
-  { id: 'versions', label: 'Version History', icon: faCodeBranch, order: 5 },
-  { id: 'icons', label: 'Icon Reference', icon: faIcons, order: 6 },
+  { id: 'versions', label: 'Version History', icon: faCodeBranch, order: 6 },
+  { id: 'icons', label: 'Icon Reference', icon: faIcons, order: 7 },
 ];
 
 export const NavTabs: FC<NavTabsProps> = ({ currentApiName, currentSubPage, hasCodeSteps }) => {
