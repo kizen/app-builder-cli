@@ -5,6 +5,9 @@ export interface AppBuilderConfig {
   credentialMode?: 'global' | 'local';
   activeCredentialProfile?: string;
   lastPath?: string;
+  // Which encryption API the Secrets page fetches public keys from.
+  // 'auto' derives dev/prod from the plugin's release_environments (KZN-16467).
+  encryptionTarget?: 'auto' | 'dev' | 'prod';
 }
 
 export async function loadConfig(outputDir: string): Promise<AppBuilderConfig> {

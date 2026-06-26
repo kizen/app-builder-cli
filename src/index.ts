@@ -5,6 +5,7 @@ import { program } from 'commander';
 import { buildCommand } from './commands/build.js';
 import { createCommand } from './commands/create.js';
 import { devCommand } from './commands/dev.js';
+import { encryptCommand } from './commands/encrypt.js';
 import { iconsCommand } from './commands/icons.js';
 import { reportCommand } from './commands/report.js';
 
@@ -18,6 +19,8 @@ createCommand(program);
 buildCommand(program);
 
 devCommand(program);
+
+encryptCommand(program);
 
 reportCommand(program);
 

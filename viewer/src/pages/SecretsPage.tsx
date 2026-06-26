@@ -1,5 +1,5 @@
 import { useParams } from '@tanstack/react-router';
-import { useState, type FC } from 'react';
+import { useEffect, useState, type FC } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faCheck,
@@ -15,6 +15,21 @@ import { useQuery } from '@tanstack/react-query';
 import { Card } from '../components/Card.js';
 import { useCredentials } from '../CredentialsContext.js';
 import { bootstrapQueryOptions } from '../bootstrapQuery.js';
+import { bundleQueryOptions } from '../bundleQuery.js';
+import { useLocalStorage } from '../hooks/useLocalStorage.js';
+import {
+  autoEncryptionTarget,
+  resolveEncryptionTarget,
+  type EncryptionTargetSetting,
+} from '../lib/encryptionTarget.js';
+
+// Where the encryption runs, mirroring the `encrypt` CLI's --remote flag and the
+// code step runner's Local/Remote toggle:
+//   - 'local'  → the dev server encrypts in-process (/api/local/encrypt) using the
+//                public key fetched below.
+//   - 'remote' → the plugin-wizard's /encrypt endpoint does the crypto with the
+//                keypair it holds (no public key needed client-side).
+type EncryptionMode = 'local' | 'remote';
 
 // ── Types (mirror the /api/local/validate response shape) ─────────────────────
 
@@ -33,21 +48,21 @@ interface ValidationResult {
 
 // ── localStorage helpers ───────────────────────────────────────────────────────
 
-function pkStorageKey(apiName: string, environment: string): string {
-  return `secrets-pk::${apiName}::${environment}`;
+function pkStorageKey(apiName: string, environment: string, target: string): string {
+  return `secrets-pk::${apiName}::${environment}::${target}`;
 }
 
-function loadStoredKey(apiName: string, environment: string): string | null {
+function loadStoredKey(apiName: string, environment: string, target: string): string | null {
   try {
-    return localStorage.getItem(pkStorageKey(apiName, environment));
+    return localStorage.getItem(pkStorageKey(apiName, environment, target));
   } catch {
     return null;
   }
 }
 
-function saveStoredKey(apiName: string, environment: string, pem: string): void {
+function saveStoredKey(apiName: string, environment: string, target: string, pem: string): void {
   try {
-    localStorage.setItem(pkStorageKey(apiName, environment), pem);
+    localStorage.setItem(pkStorageKey(apiName, environment, target), pem);
   } catch {
     // Ignore storage failures (private browsing, quota exceeded, etc.)
   }
@@ -60,13 +75,27 @@ export const SecretsPage: FC = () => {
   const credentials = useCredentials();
   const { apiKey, userId, businessId, environment } = credentials;
 
-  // Public key — persisted in localStorage, collapsed once loaded
-  const [publicKey, setPublicKey] = useState<string | null>(() =>
-    loadStoredKey(apiName, environment),
+  // Encryption routing — the dev/prod default is derived from the plugin's
+  // release_environments; the user can override it and we persist the choice
+  // per project. (KZN-16467)
+  const { data: bundle, isLoading: isBundleLoading } = useQuery(bundleQueryOptions);
+  const app = bundle?.find((a) => a.api_name === apiName);
+  const releaseEnvironments = app?.release_environments;
+  const [encryptionSetting, setEncryptionSetting] = useState<EncryptionTargetSetting>('auto');
+  const [encryptionSettingLoaded, setEncryptionSettingLoaded] = useState(false);
+  const encryptionTarget = resolveEncryptionTarget(encryptionSetting, releaseEnvironments);
+
+  // Local (in-process) vs remote (plugin-wizard API) encryption. Persisted across
+  // sessions like the code step runner's mode toggle.
+  const [encryptionMode, setEncryptionMode] = useLocalStorage<EncryptionMode>(
+    'kizen-encryption-mode',
+    'local',
   );
-  const [pkCollapsed, setPkCollapsed] = useState<boolean>(
-    () => loadStoredKey(apiName, environment) !== null,
-  );
+
+  // Public key — persisted in localStorage (namespaced by env + target),
+  // collapsed once loaded. Loaded via effect since the target resolves async.
+  const [publicKey, setPublicKey] = useState<string | null>(null);
+  const [pkCollapsed, setPkCollapsed] = useState<boolean>(false);
   const [pkLoading, setPkLoading] = useState(false);
   const [pkError, setPkError] = useState<string | null>(null);
   const [pkCopied, setPkCopied] = useState(false);
@@ -82,12 +111,82 @@ export const SecretsPage: FC = () => {
   const [validateInput, setValidateInput] = useState('');
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [validateLoading, setValidateLoading] = useState(false);
+  const [validateHasWhitespace, setValidateHasWhitespace] = useState(false);
 
   const hasCredentials = Boolean(apiKey && userId && businessId);
 
   const { isError: isBootstrapError, isLoading: isBootstrapLoading } = useQuery(
     bootstrapQueryOptions(credentials),
   );
+
+  // Load the saved per-project override once on mount.
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetch('/api/encryption-target')
+      .then((res) => res.json() as Promise<{ target?: string }>)
+      .then((data) => {
+        if (
+          !cancelled &&
+          (data.target === 'auto' || data.target === 'dev' || data.target === 'prod')
+        ) {
+          setEncryptionSetting(data.target);
+        }
+      })
+      .catch(() => {
+        // Keep the default ('auto') if the setting can't be read.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setEncryptionSettingLoaded(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Show the cached public key for the current (apiName, environment, target)
+  // namespace. Re-runs when the target changes so dev/prod keys never bleed.
+  // Wait until the saved override and the bundle have resolved so the target is
+  // final — otherwise we'd briefly load the wrong namespace's key.
+  useEffect(() => {
+    if (!encryptionSettingLoaded || isBundleLoading) {
+      return;
+    }
+
+    const stored = loadStoredKey(apiName, environment, encryptionTarget);
+
+    setPublicKey(stored);
+    setPkCollapsed(stored !== null);
+  }, [apiName, environment, encryptionTarget, encryptionSettingLoaded, isBundleLoading]);
+
+  // Drop any prior encrypt result/error. Used when the mode or target changes so
+  // a stale envelope (encrypted under different settings) can't be mistaken for a
+  // fresh one — they're visually indistinguishable in the output textarea.
+  const clearEncryptResult = (): void => {
+    setEncryptedValue(null);
+    setEncryptError(null);
+  };
+
+  const handleModeChange = (next: EncryptionMode): void => {
+    setEncryptionMode(next);
+    clearEncryptResult();
+  };
+
+  const handleTargetChange = (next: EncryptionTargetSetting): void => {
+    setEncryptionSetting(next);
+    clearEncryptResult();
+
+    void fetch('/api/encryption-target', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: next }),
+    }).catch(() => {
+      // Non-fatal: the selection still applies for this session.
+    });
+  };
 
   const handleGetPublicKey = async (): Promise<void> => {
     setPkLoading(true);
@@ -102,15 +201,17 @@ export const SecretsPage: FC = () => {
           'x-api-key': apiKey,
           'x-user-id': userId,
           'x-business-id': businessId,
+          'x-encryption-target': encryptionTarget,
+          'x-auth-environment': environment,
         },
-        body: JSON.stringify({ api_name: apiName, environment }),
+        body: JSON.stringify({ api_name: apiName }),
       });
 
       const data = (await res.json()) as Record<string, unknown>;
 
       if (res.ok && typeof data.public_key === 'string') {
         setPublicKey(data.public_key);
-        saveStoredKey(apiName, environment, data.public_key);
+        saveStoredKey(apiName, environment, encryptionTarget, data.public_key);
         setPkCollapsed(true);
       } else {
         setPkError(
@@ -127,7 +228,16 @@ export const SecretsPage: FC = () => {
   };
 
   const handleEncrypt = async (): Promise<void> => {
-    if (!publicKey || !secretValue.trim()) {
+    // Until the saved override and the bundle resolve, encryptionTarget falls back
+    // to 'dev' (releaseEnvironments is still undefined) — encrypting now could bind
+    // a prod plugin's secret to dev keys. Wait, like the public-key effect does.
+    if (isBundleLoading || !encryptionSettingLoaded) {
+      return;
+    }
+
+    // Local mode encrypts in-process with the fetched public key, so it requires
+    // one; remote mode delegates to the wizard and needs only the api_name.
+    if (!secretValue.trim() || (encryptionMode === 'local' && !publicKey)) {
       return;
     }
 
@@ -136,11 +246,28 @@ export const SecretsPage: FC = () => {
     setEncryptedValue(null);
 
     try {
-      const res = await fetch('/api/local/encrypt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ publicKeyPem: publicKey, value: secretValue }),
-      });
+      // Remote: the wizard's /encrypt (via the dev-server proxy) does the crypto
+      // with the keypair for `apiName`, selected by x-encryption-target.
+      // Local: the dev server encrypts in-process using publicKeyPem.
+      const res =
+        encryptionMode === 'remote'
+          ? await fetch('/api/wizard/encrypt', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': apiKey,
+                'x-user-id': userId,
+                'x-business-id': businessId,
+                'x-encryption-target': encryptionTarget,
+                'x-auth-environment': environment,
+              },
+              body: JSON.stringify({ api_name: apiName, value: secretValue }),
+            })
+          : await fetch('/api/local/encrypt', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ publicKeyPem: publicKey, value: secretValue }),
+            });
 
       const data = (await res.json()) as Record<string, unknown>;
 
@@ -158,6 +285,23 @@ export const SecretsPage: FC = () => {
     } finally {
       setEncryptLoading(false);
     }
+  };
+
+  const handleStripWhitespace = (): void => {
+    // Collapse all whitespace runs. If the result is valid JSON, re-pretty-print
+    // it so the textarea stays readable; otherwise just use the collapsed string.
+    const collapsed = validateInput.replace(/\s+/g, '');
+
+    try {
+      const parsed = JSON.parse(collapsed) as Record<string, unknown>;
+
+      setValidateInput(JSON.stringify(parsed, null, 2));
+    } catch {
+      setValidateInput(collapsed);
+    }
+
+    setValidateHasWhitespace(false);
+    setValidationResult(null);
   };
 
   const handleValidate = async (): Promise<void> => {
@@ -222,7 +366,7 @@ export const SecretsPage: FC = () => {
     const a = document.createElement('a');
 
     a.href = url;
-    a.download = `${apiName}-${environment}-public-key.pem`;
+    a.download = `${apiName}-${environment}-${encryptionTarget}-public-key.pem`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -293,145 +437,210 @@ export const SecretsPage: FC = () => {
 
   return (
     <Card>
-      {/* ── Section 1: Public Key ──────────────────────────────────────────── */}
-      {publicKey !== null && pkCollapsed ? (
-        // Collapsed summary row
-        <div className="flex items-center justify-between rounded-lg border border-black/8 bg-neutral-50 px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <FontAwesomeIcon icon={faCheck} className="text-[11px] text-green-600" />
-            <span className="text-[12px] font-medium text-neutral-700">Public key loaded</span>
+      {/* ── Encryption controls ────────────────────────────────────────────── */}
+      <div className="mb-5 flex items-end justify-between gap-4">
+        <div>
+          <span className="block text-[12px] font-medium text-neutral-600">Encryption</span>
+          <p className="mt-0.5 text-[11px] text-neutral-400">
+            Where encryption runs, and which environment&apos;s keys secrets are encrypted against.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-end gap-3">
+          <div role="group" aria-label="Encryption mode">
+            <span className="mb-1 block text-[11px] font-medium text-neutral-500">Mode</span>
+            <div className="flex overflow-hidden rounded-lg border border-black/10 text-[12px] font-medium">
+              {(['local', 'remote'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={encryptionMode === mode}
+                  onClick={() => {
+                    handleModeChange(mode);
+                  }}
+                  className={`px-2.5 py-1.5 transition-colors ${
+                    encryptionMode === mode
+                      ? 'bg-neutral-700 text-white'
+                      : 'bg-white text-neutral-500 hover:bg-neutral-100'
+                  }`}
+                >
+                  {mode === 'local' ? 'Local' : 'Remote'}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={() => {
-                setPkCollapsed(false);
-              }}
-              className="rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
+          <div>
+            <label
+              htmlFor="enc-target"
+              className="mb-1 block text-[11px] font-medium text-neutral-500"
             >
-              Show
-            </button>
-            <span className="text-neutral-300">·</span>
-            <button
-              type="button"
-              onClick={() => {
-                void handleGetPublicKey();
+              Keys
+            </label>
+            <select
+              id="enc-target"
+              value={encryptionSetting}
+              onChange={(e) => {
+                handleTargetChange(e.target.value as EncryptionTargetSetting);
               }}
-              disabled={pkLoading}
-              className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-neutral-500 hover:bg-neutral-100 disabled:opacity-50"
+              className="rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[12px] text-neutral-700 outline-none focus:ring-2 focus:ring-blue-400"
             >
-              {pkLoading && (
-                <FontAwesomeIcon icon={faSpinner} className="animate-spin text-[10px]" />
-              )}
-              Refresh
-            </button>
+              <option value="auto">Auto ({autoEncryptionTarget(releaseEnvironments)})</option>
+              <option value="dev">Dev</option>
+              <option value="prod">Prod</option>
+            </select>
           </div>
         </div>
-      ) : (
-        // Expanded section
+      </div>
+
+      <hr className="mb-6 border-black/8" />
+
+      {/* ── Section 1: Public Key — local mode only; remote needs no client-side key ── */}
+      {encryptionMode === 'local' && (
         <>
-          <div className="mb-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-[15px] font-semibold text-neutral-900">Public Key</h2>
-              {publicKey !== null && (
+          {publicKey !== null && pkCollapsed ? (
+            // Collapsed summary row
+            <div className="flex items-center justify-between rounded-lg border border-black/8 bg-neutral-50 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <FontAwesomeIcon icon={faCheck} className="text-[11px] text-green-600" />
+                <span className="text-[12px] font-medium text-neutral-700">Public key loaded</span>
+              </div>
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => {
-                    setPkCollapsed(true);
+                    setPkCollapsed(false);
                   }}
-                  className="text-[11px] font-medium text-neutral-400 hover:text-neutral-600"
+                  className="rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
                 >
-                  Collapse
+                  Show
                 </button>
-              )}
-            </div>
-            <p className="mt-1 text-[12px] text-neutral-400">
-              Fetch the public key for{' '}
-              <code className="rounded bg-neutral-100 px-1 py-0.5 text-[11px]">{apiName}</code>.
-              Required for encryption below.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-4">
-            <div>
-              <label className="mb-1 block text-[12px] font-medium text-neutral-600">Plugin</label>
-              <div className="rounded-lg border border-black/10 bg-neutral-50 px-3 py-2 text-[13px] text-neutral-500">
-                {apiName}
+                <span className="text-neutral-300">·</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleGetPublicKey();
+                  }}
+                  disabled={pkLoading}
+                  className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-neutral-500 hover:bg-neutral-100 disabled:opacity-50"
+                >
+                  {pkLoading && (
+                    <FontAwesomeIcon icon={faSpinner} className="animate-spin text-[10px]" />
+                  )}
+                  Refresh
+                </button>
               </div>
             </div>
+          ) : (
+            // Expanded section
+            <>
+              <div className="mb-5">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-[15px] font-semibold text-neutral-900">Public Key</h2>
+                  {publicKey !== null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPkCollapsed(true);
+                      }}
+                      className="text-[11px] font-medium text-neutral-400 hover:text-neutral-600"
+                    >
+                      Collapse
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 text-[12px] text-neutral-400">
+                  Fetch the public key for{' '}
+                  <code className="rounded bg-neutral-100 px-1 py-0.5 text-[11px]">{apiName}</code>.
+                  Required for encryption below.
+                </p>
+              </div>
 
-            <button
-              type="button"
-              onClick={() => {
-                void handleGetPublicKey();
-              }}
-              disabled={pkLoading}
-              className="flex items-center justify-center gap-2 rounded-lg bg-neutral-700 px-4 py-2 text-[13px] font-medium text-white hover:bg-neutral-800 active:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {pkLoading && (
-                <FontAwesomeIcon icon={faSpinner} className="animate-spin text-[12px]" />
-              )}
-              {pkLoading ? 'Fetching…' : publicKey !== null ? 'Refresh Key' : 'Get Public Key'}
-            </button>
-
-            {pkError !== null && (
-              <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-600">
-                {pkError}
-              </p>
-            )}
-
-            {publicKey !== null && (
-              <div>
-                <div className="mb-1 flex items-center justify-between">
-                  <label className="text-[12px] font-medium text-neutral-600">
-                    Public key (PEM)
+              <div className="flex flex-col gap-4">
+                <div>
+                  <label className="mb-1 block text-[12px] font-medium text-neutral-600">
+                    Plugin
                   </label>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={handleCopyPublicKey}
-                      className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
-                    >
-                      <FontAwesomeIcon icon={faCopy} className="text-[10px]" />
-                      {pkCopied ? 'Copied!' : 'Copy'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDownloadPublicKey}
-                      className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
-                    >
-                      <FontAwesomeIcon icon={faDownload} className="text-[10px]" />
-                      Download
-                    </button>
+                  <div className="rounded-lg border border-black/10 bg-neutral-50 px-3 py-2 text-[13px] text-neutral-500">
+                    {apiName}
                   </div>
                 </div>
-                <textarea
-                  readOnly
-                  value={publicKey}
-                  rows={5}
-                  className="w-full rounded-lg border border-black/10 bg-neutral-50 px-3 py-2 font-mono text-[11px] text-neutral-600 outline-none"
-                />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleGetPublicKey();
+                  }}
+                  disabled={pkLoading}
+                  className="flex items-center justify-center gap-2 rounded-lg bg-neutral-700 px-4 py-2 text-[13px] font-medium text-white hover:bg-neutral-800 active:bg-neutral-900 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {pkLoading && (
+                    <FontAwesomeIcon icon={faSpinner} className="animate-spin text-[12px]" />
+                  )}
+                  {pkLoading ? 'Fetching…' : publicKey !== null ? 'Refresh Key' : 'Get Public Key'}
+                </button>
+
+                {pkError !== null && (
+                  <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[12px] text-red-600">
+                    {pkError}
+                  </p>
+                )}
+
+                {publicKey !== null && (
+                  <div>
+                    <div className="mb-1 flex items-center justify-between">
+                      <label className="text-[12px] font-medium text-neutral-600">
+                        Public key (PEM)
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={handleCopyPublicKey}
+                          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
+                        >
+                          <FontAwesomeIcon icon={faCopy} className="text-[10px]" />
+                          {pkCopied ? 'Copied!' : 'Copy'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleDownloadPublicKey}
+                          className="flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium text-blue-600 hover:bg-blue-50"
+                        >
+                          <FontAwesomeIcon icon={faDownload} className="text-[10px]" />
+                          Download
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      readOnly
+                      value={publicKey}
+                      rows={5}
+                      className="w-full rounded-lg border border-black/10 bg-neutral-50 px-3 py-2 font-mono text-[11px] text-neutral-600 outline-none"
+                    />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </>
+          )}
+
+          <hr className="my-6 border-black/8" />
         </>
       )}
-
-      <hr className="my-6 border-black/8" />
 
       {/* ── Section 2: Encrypt a Secret ───────────────────────────────────── */}
       <div className="mb-5">
         <h2 className="text-[15px] font-semibold text-neutral-900">Encrypt a Secret</h2>
         <p className="mt-1 text-[12px] text-neutral-400">
-          Encrypts a secret using the public key. Output is ready to paste into{' '}
+          {encryptionMode === 'remote'
+            ? 'Encrypts a secret via the remote plugin-wizard API. '
+            : 'Encrypts a secret in-process using the public key. '}
+          Output is ready to paste into{' '}
           <code className="rounded bg-neutral-100 px-1 py-0.5 text-[11px]">kizen.json</code>.
         </p>
       </div>
 
-      {publicKey === null ? (
+      {encryptionMode === 'local' && publicKey === null ? (
         <div className="flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-700">
           <FontAwesomeIcon icon={faKey} className="shrink-0 text-[11px]" />
-          Fetch the public key above first.
+          Fetch the public key above first, or switch to Remote mode.
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -464,7 +673,9 @@ export const SecretsPage: FC = () => {
             onClick={() => {
               void handleEncrypt();
             }}
-            disabled={encryptLoading || !secretValue.trim()}
+            disabled={
+              encryptLoading || !secretValue.trim() || isBundleLoading || !encryptionSettingLoaded
+            }
             className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-medium text-white hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {encryptLoading && (
@@ -527,14 +738,38 @@ export const SecretsPage: FC = () => {
             id="validate-input"
             value={validateInput}
             onChange={(e) => {
-              setValidateInput(e.target.value);
+              const v = e.target.value;
+
+              setValidateInput(v);
               setValidationResult(null);
+              // Warn if the base64 portion of the pasted value contains embedded
+              // whitespace — a common copy-paste artifact from line-wrapped output
+              // that causes JSON.parse to fail with a "bad control character" error.
+              // Detect it by checking whether base64 characters appear on both sides
+              // of a whitespace run.
+              setValidateHasWhitespace(/[A-Za-z0-9+/=]{4,}\s+[A-Za-z0-9+/=]{4,}/.test(v));
             }}
             placeholder={`Paste the { "encrypted": true, "value": "…" } JSON, or just the raw base64 value`}
             rows={4}
             className="w-full rounded-lg border border-black/10 px-3 py-2 font-mono text-[11px] text-neutral-700 outline-none focus:ring-2 focus:ring-blue-400"
           />
         </div>
+
+        {validateHasWhitespace && (
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-700">
+            <span>
+              The pasted value contains whitespace inside the base64 string — a common copy-paste
+              artifact from line-wrapped output.
+            </span>
+            <button
+              type="button"
+              onClick={handleStripWhitespace}
+              className="shrink-0 rounded px-2 py-0.5 text-[11px] font-medium text-amber-800 underline hover:no-underline"
+            >
+              Strip whitespace
+            </button>
+          </div>
+        )}
 
         <button
           type="button"

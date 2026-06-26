@@ -18,6 +18,7 @@ import {
   loadGlobalCredentials,
 } from '../lib/credentials.js';
 import { loadConfig, saveConfig } from '../lib/config.js';
+import { resolveWizardBase } from '../lib/wizardUrl.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
 import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
@@ -49,6 +50,37 @@ function isLocalHost(host: string | undefined): boolean {
 }
 
 const PROXY_ALLOWED_DOMAINS = ['kizen.com', 'kizen.dev'];
+
+/**
+ * Guards the resolved encryption-API host. The wizard proxy forwards the
+ * caller's Kizen credential headers, so a fat-fingered PLUGIN_WIZARD_URL* env
+ * var must not be able to leak them to an arbitrary origin. Allows a
+ * locally-running wizard (any localhost/loopback) plus https on a Kizen domain.
+ */
+function isAllowedWizardTarget(target: string): boolean {
+  let url: URL;
+
+  try {
+    url = new URL(target);
+  } catch {
+    return false;
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  // URL.hostname returns IPv6 literals bracketed, e.g. '[::1]'.
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+    return true;
+  }
+
+  if (url.protocol !== 'https:') {
+    return false;
+  }
+
+  return PROXY_ALLOWED_DOMAINS.some(
+    (domain) => hostname === domain || hostname.endsWith('.' + domain),
+  );
+}
 
 function isAllowedProxyTarget(target: string): boolean {
   let url: URL;
@@ -265,8 +297,10 @@ export function createRequestHandler(
             activeProfileRef.current = profileName ?? undefined;
 
             const active = activeProfileRef.current;
+            const currentConfig = await loadConfig(outputDir);
 
             await saveConfig(outputDir, {
+              ...currentConfig,
               credentialMode: 'global',
               ...(active !== undefined && { activeCredentialProfile: active }),
             });
@@ -324,6 +358,43 @@ export function createRequestHandler(
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
 
+          res.end('{"ok":true}');
+
+          return;
+        }
+
+        if (url === '/api/encryption-target' && req.method === 'GET') {
+          const config = await loadConfig(outputDir);
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ target: config.encryptionTarget ?? 'auto' }));
+
+          return;
+        }
+
+        if (url === '/api/encryption-target' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+          const body: { target?: string } =
+            parsed !== null && typeof parsed === 'object' ? (parsed as { target?: string }) : {};
+
+          if (body.target !== 'auto' && body.target !== 'dev' && body.target !== 'prod') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: "target must be one of: 'auto', 'dev', 'prod'" }));
+
+            return;
+          }
+
+          const currentConfig = await loadConfig(outputDir);
+
+          await saveConfig(outputDir, { ...currentConfig, encryptionTarget: body.target });
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end('{"ok":true}');
 
           return;
@@ -526,7 +597,29 @@ export function createRequestHandler(
         }
 
         if (url.startsWith('/api/wizard')) {
-          const wizardBase = process.env.PLUGIN_WIZARD_URL ?? 'http://localhost:9823';
+          // The viewer computes the effective dev/prod target (from the plugin's
+          // release_environments + the saved override) and sends it here; we map
+          // it to a known host. A duplicated header arrives as an array — take
+          // the first value. Default to 'dev' when absent/invalid — never route
+          // to prod keys by accident.
+          const rawTarget = req.headers['x-encryption-target'];
+          const targetHeader = Array.isArray(rawTarget) ? rawTarget[0] : rawTarget;
+          const target: 'dev' | 'prod' = targetHeader === 'prod' ? 'prod' : 'dev';
+          const wizardBase = resolveWizardBase(target);
+
+          // The credential headers below are forwarded to wizardBase — refuse to
+          // forward them anywhere but a known host.
+          if (!isAllowedWizardTarget(wizardBase)) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(
+              JSON.stringify({
+                error: `Encryption API host is not allowed: ${wizardBase}`,
+              }),
+            );
+
+            return;
+          }
+
           const upstreamPath = url.slice('/api/wizard'.length) || '/';
           const upstreamUrl = `${wizardBase}${upstreamPath}`;
           const method = req.method ?? 'GET';
@@ -537,8 +630,14 @@ export function createRequestHandler(
             chunks.push(chunk as Buffer);
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const { host: _wizardHost, ...wizardForwardHeaders } = req.headers;
+          const {
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            host: _wizardHost,
+            // Internal control header — don't forward it upstream.
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            'x-encryption-target': _encTarget,
+            ...wizardForwardHeaders
+          } = req.headers;
 
           const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
           const resolvedBody = body && body.length > 0 ? body : undefined;
