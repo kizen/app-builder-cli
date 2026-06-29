@@ -15,11 +15,9 @@ import { useQuery } from '@tanstack/react-query';
 import { Card } from '../components/Card.js';
 import { useCredentials } from '../CredentialsContext.js';
 import { bootstrapQueryOptions } from '../bootstrapQuery.js';
-import { bundleQueryOptions } from '../bundleQuery.js';
 import { useLocalStorage } from '../hooks/useLocalStorage.js';
 import {
-  autoEncryptionTarget,
-  resolveEncryptionTarget,
+  DEFAULT_ENCRYPTION_TARGET,
   type EncryptionTargetSetting,
 } from '../lib/encryptionTarget.js';
 
@@ -75,15 +73,13 @@ export const SecretsPage: FC = () => {
   const credentials = useCredentials();
   const { apiKey, userId, businessId, environment } = credentials;
 
-  // Encryption routing — the dev/prod default is derived from the plugin's
-  // release_environments; the user can override it and we persist the choice
-  // per project. (KZN-16467)
-  const { data: bundle, isLoading: isBundleLoading } = useQuery(bundleQueryOptions);
-  const app = bundle?.find((a) => a.api_name === apiName);
-  const releaseEnvironments = app?.release_environments;
-  const [encryptionSetting, setEncryptionSetting] = useState<EncryptionTargetSetting>('auto');
+  // Encryption routing — defaults to 'prod' (almost every plugin ships to
+  // production); the user can switch to 'dev' and we persist the choice per
+  // project. The setting maps 1:1 to the dev/prod target. (KZN-16467)
+  const [encryptionTarget, setEncryptionTarget] = useState<EncryptionTargetSetting>(
+    DEFAULT_ENCRYPTION_TARGET,
+  );
   const [encryptionSettingLoaded, setEncryptionSettingLoaded] = useState(false);
-  const encryptionTarget = resolveEncryptionTarget(encryptionSetting, releaseEnvironments);
 
   // Local (in-process) vs remote (plugin-wizard API) encryption. Persisted across
   // sessions like the code step runner's mode toggle.
@@ -126,15 +122,14 @@ export const SecretsPage: FC = () => {
     void fetch('/api/encryption-target')
       .then((res) => res.json() as Promise<{ target?: string }>)
       .then((data) => {
-        if (
-          !cancelled &&
-          (data.target === 'auto' || data.target === 'dev' || data.target === 'prod')
-        ) {
-          setEncryptionSetting(data.target);
+        // Only 'dev'/'prod' are valid now; anything else (incl. a legacy 'auto'
+        // from before the heuristic was dropped) keeps the 'prod' default.
+        if (!cancelled && (data.target === 'dev' || data.target === 'prod')) {
+          setEncryptionTarget(data.target);
         }
       })
       .catch(() => {
-        // Keep the default ('auto') if the setting can't be read.
+        // Keep the default ('prod') if the setting can't be read.
       })
       .finally(() => {
         if (!cancelled) {
@@ -149,10 +144,10 @@ export const SecretsPage: FC = () => {
 
   // Show the cached public key for the current (apiName, environment, target)
   // namespace. Re-runs when the target changes so dev/prod keys never bleed.
-  // Wait until the saved override and the bundle have resolved so the target is
-  // final — otherwise we'd briefly load the wrong namespace's key.
+  // Wait until the saved override has resolved so the target is final —
+  // otherwise we'd briefly load the wrong namespace's key.
   useEffect(() => {
-    if (!encryptionSettingLoaded || isBundleLoading) {
+    if (!encryptionSettingLoaded) {
       return;
     }
 
@@ -160,7 +155,7 @@ export const SecretsPage: FC = () => {
 
     setPublicKey(stored);
     setPkCollapsed(stored !== null);
-  }, [apiName, environment, encryptionTarget, encryptionSettingLoaded, isBundleLoading]);
+  }, [apiName, environment, encryptionTarget, encryptionSettingLoaded]);
 
   // Drop any prior encrypt result/error. Used when the mode or target changes so
   // a stale envelope (encrypted under different settings) can't be mistaken for a
@@ -176,7 +171,7 @@ export const SecretsPage: FC = () => {
   };
 
   const handleTargetChange = (next: EncryptionTargetSetting): void => {
-    setEncryptionSetting(next);
+    setEncryptionTarget(next);
     clearEncryptResult();
 
     void fetch('/api/encryption-target', {
@@ -228,10 +223,10 @@ export const SecretsPage: FC = () => {
   };
 
   const handleEncrypt = async (): Promise<void> => {
-    // Until the saved override and the bundle resolve, encryptionTarget falls back
-    // to 'dev' (releaseEnvironments is still undefined) — encrypting now could bind
-    // a prod plugin's secret to dev keys. Wait, like the public-key effect does.
-    if (isBundleLoading || !encryptionSettingLoaded) {
+    // Until the saved override resolves, encryptionTarget is the 'prod' default —
+    // encrypting now could bind a secret to prod keys when the user had saved a
+    // 'dev' override. Wait for it, like the public-key effect does.
+    if (!encryptionSettingLoaded) {
       return;
     }
 
@@ -477,19 +472,29 @@ export const SecretsPage: FC = () => {
             </label>
             <select
               id="enc-target"
-              value={encryptionSetting}
+              value={encryptionTarget}
               onChange={(e) => {
                 handleTargetChange(e.target.value as EncryptionTargetSetting);
               }}
               className="rounded-lg border border-black/10 bg-white px-2 py-1.5 text-[12px] text-neutral-700 outline-none focus:ring-2 focus:ring-blue-400"
             >
-              <option value="auto">Auto ({autoEncryptionTarget(releaseEnvironments)})</option>
-              <option value="dev">Dev</option>
               <option value="prod">Prod</option>
+              <option value="dev">Dev</option>
             </select>
           </div>
         </div>
       </div>
+
+      {encryptionTarget === 'dev' && (
+        <div className="mb-5 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-700">
+          <FontAwesomeIcon icon={faTriangleExclamation} className="shrink-0 text-[11px]" />
+          <span>
+            <strong className="font-semibold">Dev keys selected.</strong> Be sure you know what
+            you&apos;re doing — most apps use the production encryption service. Secrets encrypted
+            with dev keys won&apos;t decrypt in production.
+          </span>
+        </div>
+      )}
 
       <hr className="mb-6 border-black/8" />
 
@@ -673,9 +678,7 @@ export const SecretsPage: FC = () => {
             onClick={() => {
               void handleEncrypt();
             }}
-            disabled={
-              encryptLoading || !secretValue.trim() || isBundleLoading || !encryptionSettingLoaded
-            }
+            disabled={encryptLoading || !secretValue.trim() || !encryptionSettingLoaded}
             className="flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-[13px] font-medium text-white hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {encryptLoading && (

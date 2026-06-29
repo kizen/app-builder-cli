@@ -16,8 +16,8 @@ import { Spinner } from './Spinner.js';
 
 interface EncryptUIProps {
   ctx: EncryptionContext;
-  /** True when --stage was not given and the stage was derived from kizen.json release_environments. */
-  stageAutoDetected?: boolean;
+  /** True when --stage was not given and the stage fell back to the prod default. */
+  stageDefaulted?: boolean;
   /** Skip the profile picker and load from this file instead. */
   credentialsPath?: string;
   /** Provided via --api-name; skips the api_name prompt. */
@@ -45,7 +45,7 @@ const Hint: FC<{ text: string }> = ({ text }) => <Text dimColor>{text}</Text>;
 
 export const EncryptUI: FC<EncryptUIProps> = ({
   ctx,
-  stageAutoDetected,
+  stageDefaulted,
   credentialsPath,
   initialApiName,
   defaultApiName,
@@ -286,7 +286,7 @@ export const EncryptUI: FC<EncryptUIProps> = ({
 
   const modeLabel = ctx.isRemote ? 'remote Kizen API' : 'on-machine';
 
-  const stageLabel = stageAutoDetected === true ? `${ctx.stage} (auto)` : ctx.stage;
+  const stageLabel = stageDefaulted === true ? `${ctx.stage} (default)` : ctx.stage;
 
   const frame = (children: ReactNode): ReactNode => (
     <Box flexDirection="column" paddingY={1} paddingX={2} gap={1}>

@@ -38,27 +38,16 @@ async function writeEnvelopeFile(path: string, value: string): Promise<void> {
 /** Fields read from kizen.json to prefill defaults. */
 interface ManifestDefaults {
   apiName?: string;
-  releaseEnvironments?: string[];
 }
 
-/**
- * Production release environments — same set used by the viewer's SecretsPage
- * (KZN-16467). Any one of these present means prod keys should be used.
- */
-const PROD_RELEASE_ENVIRONMENTS = new Set(['prod', 'go', 'fmo']);
+/** The encryption stage used when --stage isn't given. Almost every plugin ships
+ * to production, so prod is the right default; pass --stage dev to override.
+ * Mirrors DEFAULT_ENCRYPTION_TARGET in viewer/src/lib/encryptionTarget.ts. */
+const DEFAULT_STAGE: 'dev' | 'prod' = 'prod';
 
 /**
- * Derives the encryption stage from a plugin's release_environments.
- * Mirrors autoEncryptionTarget() in viewer/src/lib/encryptionTarget.ts.
- * Defaults to 'dev' (safe — never prod) when no prod environment is found.
- */
-function autoStage(releaseEnvironments: string[] | undefined): 'dev' | 'prod' {
-  return releaseEnvironments?.some((env) => PROD_RELEASE_ENVIRONMENTS.has(env)) ? 'prod' : 'dev';
-}
-
-/**
- * Reads api_name and release_environments from kizen.json in the cwd,
- * if present, to prefill prompts and auto-detect the encryption stage.
+ * Reads api_name from kizen.json in the cwd, if present, to prefill the
+ * api_name prompt.
  */
 async function readManifestDefaults(): Promise<ManifestDefaults> {
   try {
@@ -71,15 +60,8 @@ async function readManifestDefaults(): Promise<ManifestDefaults> {
         ? manifest.api_name
         : undefined;
 
-    const releaseEnvironments =
-      Array.isArray(manifest.release_environments) &&
-      manifest.release_environments.every((e): e is string => typeof e === 'string')
-        ? manifest.release_environments
-        : undefined;
-
     return {
       ...(apiName !== undefined && { apiName }),
-      ...(releaseEnvironments !== undefined && { releaseEnvironments }),
     };
   } catch {
     // Not in a plugin directory — fine, the UI will prompt with no defaults.
@@ -108,7 +90,7 @@ async function runHeadless(
   ctx: EncryptionContext,
   options: EncryptOptions,
   defaults: ManifestDefaults,
-  stageWasAutoDetected: boolean,
+  stageWasDefaulted: boolean,
 ): Promise<void> {
   const credentials =
     options.credentials !== undefined
@@ -129,9 +111,9 @@ async function runHeadless(
     );
   }
 
-  if (stageWasAutoDetected) {
+  if (stageWasDefaulted) {
     process.stderr.write(
-      `Stage auto-detected from release_environments: ${ctx.stage} (pass --stage to override)\n`,
+      `No --stage given; defaulting to ${ctx.stage} encryption keys (pass --stage dev to override)\n`,
     );
   }
 
@@ -192,10 +174,7 @@ export function encryptCommand(program: Command): void {
     .option('-c, --credentials <path>', 'path to a credentials JSON file')
     .option('-a, --api-name <name>', 'plugin api_name the secret belongs to')
     .option('-v, --value <value>', 'plaintext secret value to encrypt')
-    .option(
-      '-s, --stage <stage>',
-      'which encryption API to use: dev or prod (default: auto-detected from kizen.json release_environments)',
-    )
+    .option('-s, --stage <stage>', 'which encryption API to use: dev or prod (default: prod)')
     .option('-o, --out <path>', 'also write the encrypted envelope to a file')
     .action(async (options: EncryptOptions) => {
       if (options.stage !== undefined && options.stage !== 'dev' && options.stage !== 'prod') {
@@ -203,18 +182,16 @@ export function encryptCommand(program: Command): void {
         process.exit(1);
       }
 
-      // Read kizen.json for api_name and release_environments defaults.
-      // Skip the file read entirely when both are already supplied via flags.
-      const needsDefaults = options.apiName === undefined || options.stage === undefined;
+      // Read kizen.json for the api_name default. Skip the file read entirely
+      // when api_name is already supplied via a flag.
+      const needsDefaults = options.apiName === undefined;
       const defaults = needsDefaults ? await readManifestDefaults() : {};
 
-      // If --stage was not given, derive it from release_environments in kizen.json.
-      // Fall back to 'dev' when no prod-targeting environment is listed.
-      const stageWasAutoDetected = options.stage === undefined;
+      // Default to prod when --stage isn't given (almost every plugin ships to
+      // production); pass --stage dev to override.
+      const stageWasDefaulted = options.stage === undefined;
       const stage: 'dev' | 'prod' =
-        options.stage === 'dev' || options.stage === 'prod'
-          ? options.stage
-          : autoStage(defaults.releaseEnvironments);
+        options.stage === 'dev' || options.stage === 'prod' ? options.stage : DEFAULT_STAGE;
 
       const ctx: EncryptionContext = {
         isRemote: options.remote === true,
@@ -227,7 +204,7 @@ export function encryptCommand(program: Command): void {
       // of ANSI frames.
       if (!process.stdin.isTTY || !process.stdout.isTTY) {
         try {
-          await runHeadless(ctx, options, defaults, stageWasAutoDetected);
+          await runHeadless(ctx, options, defaults, stageWasDefaulted);
         } catch (err) {
           console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
           process.exit(1);
@@ -244,7 +221,7 @@ export function encryptCommand(program: Command): void {
       const { waitUntilExit } = render(
         createElement(EncryptUI, {
           ctx,
-          stageAutoDetected: stageWasAutoDetected,
+          stageDefaulted: stageWasDefaulted,
           onDone: (value: string) => {
             envelopeValue = value;
           },

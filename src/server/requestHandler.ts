@@ -365,9 +365,13 @@ export function createRequestHandler(
 
         if (url === '/api/encryption-target' && req.method === 'GET') {
           const config = await loadConfig(outputDir);
+          // Default to 'prod' when unset. Anything that isn't an explicit 'dev'
+          // (incl. a legacy 'auto' from before the heuristic was dropped) maps to
+          // 'prod', so the API only ever returns a concrete target.
+          const target = config.encryptionTarget === 'dev' ? 'dev' : 'prod';
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-          res.end(JSON.stringify({ target: config.encryptionTarget ?? 'auto' }));
+          res.end(JSON.stringify({ target }));
 
           return;
         }
@@ -383,15 +387,16 @@ export function createRequestHandler(
           const body: { target?: string } =
             parsed !== null && typeof parsed === 'object' ? (parsed as { target?: string }) : {};
 
-          if (body.target !== 'auto' && body.target !== 'dev' && body.target !== 'prod') {
+          if (body.target !== 'dev' && body.target !== 'prod') {
             res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(JSON.stringify({ error: "target must be one of: 'auto', 'dev', 'prod'" }));
+            res.end(JSON.stringify({ error: "target must be one of: 'dev', 'prod'" }));
 
             return;
           }
 
           const currentConfig = await loadConfig(outputDir);
 
+          // body.target is narrowed to 'dev' | 'prod' by the guard above.
           await saveConfig(outputDir, { ...currentConfig, encryptionTarget: body.target });
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -597,14 +602,14 @@ export function createRequestHandler(
         }
 
         if (url.startsWith('/api/wizard')) {
-          // The viewer computes the effective dev/prod target (from the plugin's
-          // release_environments + the saved override) and sends it here; we map
-          // it to a known host. A duplicated header arrives as an array — take
-          // the first value. Default to 'dev' when absent/invalid — never route
-          // to prod keys by accident.
+          // The viewer sends the saved dev/prod target here; we map it to a known
+          // host. A duplicated header arrives as an array — take the first value.
+          // Default to 'prod' when absent/invalid: prod is the product-wide
+          // default (almost every plugin ships to production), and only an
+          // explicit 'dev' routes to the dev keys.
           const rawTarget = req.headers['x-encryption-target'];
           const targetHeader = Array.isArray(rawTarget) ? rawTarget[0] : rawTarget;
-          const target: 'dev' | 'prod' = targetHeader === 'prod' ? 'prod' : 'dev';
+          const target: 'dev' | 'prod' = targetHeader === 'dev' ? 'dev' : 'prod';
           const wizardBase = resolveWizardBase(target);
 
           // The credential headers below are forwarded to wizardBase — refuse to
