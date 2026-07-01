@@ -18,9 +18,17 @@ import {
   loadGlobalCredentials,
 } from '../lib/credentials.js';
 import { loadConfig, saveConfig } from '../lib/config.js';
+import { resolveWizardBase } from '../lib/wizardUrl.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
 import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
+import {
+  CRYPTO_ALG,
+  CRYPTO_VERSION,
+  deserializeEnvelope,
+  encrypt,
+  serializeEnvelope,
+} from '@kizenapps/packager';
 
 const SOURCE_FILE_MAX_BYTES = 2 * 1024 * 1024;
 
@@ -42,6 +50,37 @@ function isLocalHost(host: string | undefined): boolean {
 }
 
 const PROXY_ALLOWED_DOMAINS = ['kizen.com', 'kizen.dev'];
+
+/**
+ * Guards the resolved encryption-API host. The wizard proxy forwards the
+ * caller's Kizen credential headers, so a fat-fingered PLUGIN_WIZARD_URL* env
+ * var must not be able to leak them to an arbitrary origin. Allows a
+ * locally-running wizard (any localhost/loopback) plus https on a Kizen domain.
+ */
+function isAllowedWizardTarget(target: string): boolean {
+  let url: URL;
+
+  try {
+    url = new URL(target);
+  } catch {
+    return false;
+  }
+
+  const hostname = url.hostname.toLowerCase();
+
+  // URL.hostname returns IPv6 literals bracketed, e.g. '[::1]'.
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+    return true;
+  }
+
+  if (url.protocol !== 'https:') {
+    return false;
+  }
+
+  return PROXY_ALLOWED_DOMAINS.some(
+    (domain) => hostname === domain || hostname.endsWith('.' + domain),
+  );
+}
 
 function isAllowedProxyTarget(target: string): boolean {
   let url: URL;
@@ -258,8 +297,10 @@ export function createRequestHandler(
             activeProfileRef.current = profileName ?? undefined;
 
             const active = activeProfileRef.current;
+            const currentConfig = await loadConfig(outputDir);
 
             await saveConfig(outputDir, {
+              ...currentConfig,
               credentialMode: 'global',
               ...(active !== undefined && { activeCredentialProfile: active }),
             });
@@ -317,6 +358,48 @@ export function createRequestHandler(
 
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
 
+          res.end('{"ok":true}');
+
+          return;
+        }
+
+        if (url === '/api/encryption-target' && req.method === 'GET') {
+          const config = await loadConfig(outputDir);
+          // Default to 'prod' when unset. Anything that isn't an explicit 'dev'
+          // (incl. a legacy 'auto' from before the heuristic was dropped) maps to
+          // 'prod', so the API only ever returns a concrete target.
+          const target = config.encryptionTarget === 'dev' ? 'dev' : 'prod';
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ target }));
+
+          return;
+        }
+
+        if (url === '/api/encryption-target' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+          const body: { target?: string } =
+            parsed !== null && typeof parsed === 'object' ? (parsed as { target?: string }) : {};
+
+          if (body.target !== 'dev' && body.target !== 'prod') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: "target must be one of: 'dev', 'prod'" }));
+
+            return;
+          }
+
+          const currentConfig = await loadConfig(outputDir);
+
+          // body.target is narrowed to 'dev' | 'prod' by the guard above.
+          await saveConfig(outputDir, { ...currentConfig, encryptionTarget: body.target });
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
           res.end('{"ok":true}');
 
           return;
@@ -393,6 +476,204 @@ export function createRequestHandler(
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
 
           res.end('{"ok":true}');
+
+          return;
+        }
+
+        if (url === '/api/local/encrypt' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}') as {
+            publicKeyPem?: string;
+            value?: string;
+          };
+
+          if (typeof body.publicKeyPem !== 'string' || typeof body.value !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Missing required fields: publicKeyPem, value' }));
+
+            return;
+          }
+
+          try {
+            const envelope = encrypt(body.value, body.publicKeyPem);
+            const serialized = serializeEnvelope(envelope);
+
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify(serialized));
+          } catch (err) {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: (err as Error).message }));
+          }
+
+          return;
+        }
+
+        if (url === '/api/local/validate' && req.method === 'POST') {
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}') as {
+            value?: string;
+          };
+
+          if (typeof body.value !== 'string') {
+            res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: 'Missing required field: value' }));
+
+            return;
+          }
+
+          interface CheckResult {
+            label: string;
+            expected: string;
+            actual: string;
+            pass: boolean;
+          }
+
+          let envelope: ReturnType<typeof deserializeEnvelope> | undefined;
+          let parseError: string | undefined;
+
+          try {
+            envelope = deserializeEnvelope(body.value);
+          } catch (err) {
+            parseError = (err as Error).message;
+          }
+
+          if (parseError !== undefined || envelope === undefined) {
+            res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ valid: false, checks: [], error: parseError }));
+
+            return;
+          }
+
+          const bufLen = (b64: string): number => Buffer.from(b64, 'base64').length;
+
+          const checks: CheckResult[] = [
+            {
+              label: 'Version',
+              expected: String(CRYPTO_VERSION),
+              actual: String(envelope.v),
+              pass: (envelope.v as number) === CRYPTO_VERSION,
+            },
+            {
+              label: 'Algorithm',
+              expected: CRYPTO_ALG,
+              actual: envelope.alg,
+              pass: (envelope.alg as string) === CRYPTO_ALG,
+            },
+            {
+              label: 'Wrapped key',
+              expected: '384 bytes (RSA-3072)',
+              actual: `${String(bufLen(envelope.k))} bytes`,
+              pass: bufLen(envelope.k) === 384,
+            },
+            {
+              label: 'IV',
+              expected: '12 bytes',
+              actual: `${String(bufLen(envelope.iv))} bytes`,
+              pass: bufLen(envelope.iv) === 12,
+            },
+            {
+              label: 'Auth tag',
+              expected: '16 bytes',
+              actual: `${String(bufLen(envelope.tag))} bytes`,
+              pass: bufLen(envelope.tag) === 16,
+            },
+            {
+              label: 'Ciphertext',
+              expected: '≥ 1 byte',
+              actual: `${String(bufLen(envelope.ct))} bytes`,
+              pass: bufLen(envelope.ct) >= 1,
+            },
+          ];
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ valid: checks.every((c) => c.pass), checks }));
+
+          return;
+        }
+
+        if (url.startsWith('/api/wizard')) {
+          // The viewer sends the saved dev/prod target here; we map it to a known
+          // host. A duplicated header arrives as an array — take the first value.
+          // Default to 'prod' when absent/invalid: prod is the product-wide
+          // default (almost every plugin ships to production), and only an
+          // explicit 'dev' routes to the dev keys.
+          const rawTarget = req.headers['x-encryption-target'];
+          const targetHeader = Array.isArray(rawTarget) ? rawTarget[0] : rawTarget;
+          const target: 'dev' | 'prod' = targetHeader === 'dev' ? 'dev' : 'prod';
+          const wizardBase = resolveWizardBase(target);
+
+          // The credential headers below are forwarded to wizardBase — refuse to
+          // forward them anywhere but a known host.
+          if (!isAllowedWizardTarget(wizardBase)) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(
+              JSON.stringify({
+                error: `Encryption API host is not allowed: ${wizardBase}`,
+              }),
+            );
+
+            return;
+          }
+
+          const upstreamPath = url.slice('/api/wizard'.length) || '/';
+          const upstreamUrl = `${wizardBase}${upstreamPath}`;
+          const method = req.method ?? 'GET';
+
+          const chunks: Buffer[] = [];
+
+          for await (const chunk of req) {
+            chunks.push(chunk as Buffer);
+          }
+
+          const {
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            host: _wizardHost,
+            // Internal control header — don't forward it upstream.
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            'x-encryption-target': _encTarget,
+            ...wizardForwardHeaders
+          } = req.headers;
+
+          const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+          const resolvedBody = body && body.length > 0 ? body : undefined;
+
+          let upstream: Response;
+
+          try {
+            upstream = await fetch(upstreamUrl, {
+              method,
+              headers: wizardForwardHeaders as Record<string, string>,
+              ...(resolvedBody !== undefined && { body: resolvedBody }),
+            });
+          } catch (err) {
+            const message =
+              (err as NodeJS.ErrnoException).code === 'ECONNREFUSED'
+                ? `plugin-wizard is not running at ${wizardBase}`
+                : `Failed to reach plugin-wizard: ${(err as Error).message}`;
+
+            res.writeHead(503, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: message }));
+
+            return;
+          }
+
+          const wizardResponseHeaders = sanitizeUpstreamHeaders(
+            Object.fromEntries(upstream.headers),
+          );
+          const wizardBody = await upstream.arrayBuffer();
+
+          res.writeHead(upstream.status, wizardResponseHeaders);
+          res.end(Buffer.from(wizardBody));
 
           return;
         }
