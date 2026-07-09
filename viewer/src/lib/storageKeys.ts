@@ -64,3 +64,6 @@ export const sandboxObjectSettingsSelectedObjectKey = (pluginApiName: string): s
   `${getCredentialPrefix()}:kizen-sandbox:${pluginApiName}:objectSettings:selectedObject`;
 
 export const floatingFramePositionKey = (id: string): string => `floating-frame-pos-${id}`;
+
+export const blockPreviewSizeKey = (pluginApiName: string, blockApiName: string): string =>
+  `${getCredentialPrefix()}:kizen-sandbox:${pluginApiName}:block:${blockApiName}:previewSize`;

@@ -8,6 +8,7 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import type { PluginBaseConfig } from '../types.js';
+import { resolveBlockDimensions } from '../lib/blockDimensions.js';
 import { formatBytes } from '@shared/lib/formatBytes.js';
 
 export const AppDetailPage: FC = () => {
@@ -54,6 +55,7 @@ export const AppDetailPage: FC = () => {
     object_settings_menu_items: objectSettings,
     automation_action_configs: automationActions,
     calendar_sources: calendarSources,
+    custom_blocks: customBlocks,
   } = app.artifacts;
 
   const hasAnyArtifacts =
@@ -65,7 +67,8 @@ export const AppDetailPage: FC = () => {
     routeScripts.length > 0 ||
     objectSettings.length > 0 ||
     automationActions.length > 0 ||
-    calendarSources.length > 0;
+    calendarSources.length > 0 ||
+    customBlocks.length > 0;
 
   const bundleSizeBytes = bundle
     ? new TextEncoder().encode(JSON.stringify(bundle, null, 2)).length
@@ -287,6 +290,50 @@ export const AppDetailPage: FC = () => {
                     )}
                   </div>
                 ))}
+              </div>
+            </Card>
+          )}
+
+          {customBlocks.length > 0 && (
+            <Card>
+              <div className="mb-3 flex items-center gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
+                  Content Blocks
+                </span>
+                <span className="ml-auto rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-semibold text-neutral-500">
+                  {customBlocks.length}
+                </span>
+              </div>
+              <div className="mb-1 flex items-center gap-2 text-[10px] text-neutral-400">
+                <span className="min-w-0 flex-1">Block</span>
+                <span className="shrink-0">Grid (w×h)</span>
+              </div>
+              <div className="divide-y divide-black/5">
+                {customBlocks.map((block, i) => {
+                  const dims = resolveBlockDimensions(block);
+
+                  return (
+                    <div key={i} className="flex items-center gap-2 py-1.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-neutral-900">{block.name}</div>
+                        <div className="truncate font-mono text-[11px] text-neutral-400">
+                          {block.api_name}
+                        </div>
+                      </div>
+                      {(block.types ?? []).map((surface) => (
+                        <span
+                          key={surface}
+                          className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600"
+                        >
+                          {surface}
+                        </span>
+                      ))}
+                      <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
+                        {dims.minW}–{dims.maxW}×{dims.minH}–{dims.maxH}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </Card>
           )}

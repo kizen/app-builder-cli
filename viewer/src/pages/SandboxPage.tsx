@@ -14,6 +14,7 @@ import { ToolbarItem } from '../components/ToolbarItem.js';
 import { ObjectSettingsMenuItemSection } from '../components/ObjectSettingsMenuItemSection.js';
 import { ServiceSection } from '../components/ServiceSection.js';
 import { CalendarSourceSection } from '../components/CalendarSourceSection.js';
+import { PluginBlockSection } from '../components/PluginBlockSection.js';
 import { Modal } from '../components/Modal.js';
 import { useCriticalExceptionDialog } from '../hooks/useCriticalExceptionDialog.js';
 import { loadConfig, loadUserConfig, resolveEffectiveConfig } from '../lib/configStorage.js';
@@ -186,6 +187,11 @@ const SandboxPageInner: FC<{
       ({ ...source, plugin_api_name: app.api_name, args: configArgs }) as CalendarSourceConfig,
   );
 
+  // Blocks render via useCustomBlock, so unlike the other artifacts they don't
+  // need plugin_api_name merged in here — PluginBlockSection builds the engine
+  // BlockConfig (including plugin_api_name, which runBlockScript matching needs).
+  const customBlocks = app.artifacts.custom_blocks;
+
   const hasAnyControls =
     toolbarItems.length > 0 ||
     jsActions.length > 0 ||
@@ -337,6 +343,29 @@ const SandboxPageInner: FC<{
                   ) : (
                     <NotInstalledNotice />
                   )}
+                </Card>
+              )}
+
+              {customBlocks.length > 0 && (
+                <Card>
+                  <div className="mb-3">
+                    <span className="text-[11px] font-semibold uppercase tracking-widest text-neutral-600">
+                      Content Blocks
+                    </span>
+                    <p className="mt-1 text-[12px] text-neutral-400">
+                      Preview each block as it renders on a dashboard, homepage, or chart group.
+                      Resize within the block&rsquo;s declared grid constraints, or use a preset, to
+                      test how its script handles different dimensions. Dashboard-provided args
+                      (dateFilter, teamFilter, objectId) aren&rsquo;t simulated here — blocks that
+                      read them will see undefined.
+                    </p>
+                  </div>
+                  <PluginBlockSection
+                    blocks={customBlocks}
+                    pluginApiName={app.api_name}
+                    configArgs={configArgs}
+                    whenState={whenState}
+                  />
                 </Card>
               )}
             </div>
