@@ -355,7 +355,9 @@ const SandboxPageInner: FC<{
                     <p className="mt-1 text-[12px] text-neutral-400">
                       Preview each block as it renders on a dashboard, homepage, or chart group.
                       Resize within the block&rsquo;s declared grid constraints, or use a preset, to
-                      test how its script handles different dimensions.
+                      test how its script handles different dimensions. Dashboard-provided args
+                      (dateFilter, teamFilter, objectId) aren&rsquo;t simulated here — blocks that
+                      read them will see undefined.
                     </p>
                   </div>
                   <PluginBlockSection

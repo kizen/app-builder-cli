@@ -1,7 +1,6 @@
 import type { Block } from '@kizenapps/packager';
 import type { BlockConfig, UnknownJSON } from '@kizenapps/engine';
 import { useCustomBlock } from '@kizenapps/engine/react';
-import { getEnabledState } from '@kizenapps/engine/util';
 import {
   forwardRef,
   useEffect,
@@ -13,22 +12,25 @@ import {
   type FC,
 } from 'react';
 import { useLocalStorage } from '../hooks/useLocalStorage.js';
+import { useWhenEnabled } from '../hooks/useWhenEnabled.js';
+import { resolveBlockDimensions } from '../lib/blockDimensions.js';
 import { blockPreviewSizeKey } from '../lib/storageKeys.js';
 
-// The dashboard grid is GRID_COLUMNS wide with SQUARE cells: row height equals
-// column width. Both derive from the live stage width divided into GRID_COLUMNS,
-// so a max_w of 12 fills the container and an N×N block renders as a square,
-// exactly as on a real dashboard.
+// The preview grid is GRID_COLUMNS wide with SQUARE cells derived from the live
+// stage width, so a max_w of 12 fills the container. This APPROXIMATES the real
+// dashboard: react-app's DashboardGrid uses a fixed 105px row height (100px on
+// mobile), breakpoint-based column counts (12 only at the XL breakpoint), and
+// 10px margins between cells, so real pixel sizes match this preview only near
+// a ~1392px-wide dashboard.
 const GRID_COLUMNS = 12;
-
-// Fallback grid constraints mirror PLUGIN_BLOCK_DEFAULT_DIMENSIONS in react-app,
-// guarding against bundles that predate the dimension fields.
-const FALLBACK_DIMENSIONS = { minW: 2, maxW: 12, minH: 2, maxH: 24 } as const;
 
 // The packager's Block type only declares script + styles, but the engine (and
 // react-app's PluginBlockDashlet) render blocks as script | html | iframe. Mirror
 // that contract so html/iframe blocks preview correctly if a bundle includes them.
-type RenderableBlock = Block & {
+// event_scripts is re-declared optional because bundles that predate it omit the
+// field at runtime despite the packager type marking it required.
+type RenderableBlock = Omit<Block, 'event_scripts'> & {
+  event_scripts?: Block['event_scripts'];
   type?: BlockConfig['type'];
   html?: string;
   iframe_url?: string;
@@ -60,10 +62,11 @@ const computeBounds = (
   cellSize: number,
   maxHeightCap: number,
 ): PreviewBounds => {
-  const minCols = block.min_w || FALLBACK_DIMENSIONS.minW;
-  const maxCols = Math.min(block.max_w || FALLBACK_DIMENSIONS.maxW, GRID_COLUMNS);
-  const minRows = block.min_h || FALLBACK_DIMENSIONS.minH;
-  const maxRows = block.max_h || FALLBACK_DIMENSIONS.maxH;
+  const dims = resolveBlockDimensions(block);
+  const minCols = dims.minW;
+  const maxCols = Math.min(dims.maxW, GRID_COLUMNS);
+  const minRows = dims.minH;
+  const maxRows = dims.maxH;
   const minWidth = Math.round(minCols * cellSize);
   const maxWidth = Math.max(minWidth, Math.round(maxCols * cellSize));
   const minHeight = Math.round(minRows * cellSize);
@@ -131,8 +134,15 @@ const PluginBlockFrame = forwardRef<
         </div>
       )}
 
+      {/* name matches react-app's PluginBlockDashlet (the plugin api name), so an
+          iframe reading window.name behaves identically here. */}
       {type === 'iframe' && iframeURL && (
-        <iframe src={iframeURL} className="h-full w-full border-0" title={block.name} />
+        <iframe
+          src={iframeURL}
+          className="h-full w-full border-0"
+          title={block.name}
+          name={block.plugin_api_name}
+        />
       )}
     </div>
   );
@@ -169,7 +179,6 @@ const PluginBlockView: FC<{
   const [stageWidth, setStageWidth] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(window.innerHeight);
   const [reloadKey, setReloadKey] = useState(0);
-  const [whenEnabled, setWhenEnabled] = useState<boolean | null>(null);
 
   // Responsive square cell size: the grid splits the stage into GRID_COLUMNS
   // columns, and rows are the same size, so cells are square.
@@ -283,32 +292,7 @@ const PluginBlockView: FC<{
   }, []);
 
   const blockWhen = block.when;
-
-  useEffect(() => {
-    if (!blockWhen) {
-      setWhenEnabled(null);
-
-      return;
-    }
-
-    let cancelled = false;
-
-    void getEnabledState(blockWhen, whenState)
-      .then((enabled) => {
-        if (!cancelled) {
-          setWhenEnabled(enabled);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setWhenEnabled(null);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [blockWhen, whenState]);
+  const whenEnabled = useWhenEnabled(blockWhen, whenState);
 
   const blockArgs = useMemo(() => configArgs as Record<string, UnknownJSON>, [configArgs]);
 
@@ -323,10 +307,10 @@ const PluginBlockView: FC<{
       type: block.type ?? 'script',
       script: block.script,
       styles: block.styles,
-      event_scripts: block.event_scripts,
       args: blockArgs,
       // Spread conditionally: exactOptionalPropertyTypes forbids passing an
       // explicit `undefined` to these optional fields.
+      ...(block.event_scripts !== undefined ? { event_scripts: block.event_scripts } : {}),
       ...(block.html !== undefined ? { html: block.html } : {}),
       ...(block.iframe_url !== undefined ? { iframe_url: block.iframe_url } : {}),
     }),
@@ -335,9 +319,15 @@ const PluginBlockView: FC<{
 
   // Worker key for the running block instance. Folding reloadKey in gives each
   // reload a fresh worker so the block script re-runs from a clean slate.
+  // Tradeoff: the engine only terminates workers when the same workerId re-runs,
+  // so a reload mid-script lets the previous worker run to completion (its UI
+  // writes are dropped, but side effects like network calls still fire).
   const instanceId = `${pluginApiName}::${block.api_name}::${String(reloadKey)}`;
 
-  const eventScriptNames = useMemo(() => Object.keys(block.event_scripts), [block.event_scripts]);
+  const eventScriptNames = useMemo(
+    () => Object.keys(block.event_scripts ?? {}),
+    [block.event_scripts],
+  );
 
   // The frame (and therefore frameRef) only mounts once the stage is measured;
   // event-script triggers are dead until then, so disable them rather than let

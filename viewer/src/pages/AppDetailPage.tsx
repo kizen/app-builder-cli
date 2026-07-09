@@ -8,6 +8,7 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import type { PluginBaseConfig } from '../types.js';
+import { resolveBlockDimensions } from '../lib/blockDimensions.js';
 import { formatBytes } from '@shared/lib/formatBytes.js';
 
 export const AppDetailPage: FC = () => {
@@ -308,27 +309,31 @@ export const AppDetailPage: FC = () => {
                 <span className="shrink-0">Grid (w×h)</span>
               </div>
               <div className="divide-y divide-black/5">
-                {customBlocks.map((block, i) => (
-                  <div key={i} className="flex items-center gap-2 py-1.5">
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-neutral-900">{block.name}</div>
-                      <div className="truncate font-mono text-[11px] text-neutral-400">
-                        {block.api_name}
+                {customBlocks.map((block, i) => {
+                  const dims = resolveBlockDimensions(block);
+
+                  return (
+                    <div key={i} className="flex items-center gap-2 py-1.5">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-neutral-900">{block.name}</div>
+                        <div className="truncate font-mono text-[11px] text-neutral-400">
+                          {block.api_name}
+                        </div>
                       </div>
-                    </div>
-                    {(block.types ?? []).map((surface) => (
-                      <span
-                        key={surface}
-                        className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600"
-                      >
-                        {surface}
+                      {(block.types ?? []).map((surface) => (
+                        <span
+                          key={surface}
+                          className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600"
+                        >
+                          {surface}
+                        </span>
+                      ))}
+                      <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
+                        {dims.minW}–{dims.maxW}×{dims.minH}–{dims.maxH}
                       </span>
-                    ))}
-                    <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
-                      {block.min_w}–{block.max_w}×{block.min_h}–{block.max_h}
-                    </span>
-                  </div>
-                ))}
+                    </div>
+                  );
+                })}
               </div>
             </Card>
           )}

@@ -1,6 +1,6 @@
-import { useEffect, useState, type FC } from 'react';
-import { getEnabledState } from '@kizenapps/engine/util';
+import type { FC } from 'react';
 import type { UnknownJSON } from '@kizenapps/engine';
+import { useWhenEnabled } from '../hooks/useWhenEnabled.js';
 import { Tooltip } from './Tooltip.js';
 
 interface WhenBadgeProps {
@@ -9,15 +9,7 @@ interface WhenBadgeProps {
 }
 
 export const WhenBadge: FC<WhenBadgeProps> = ({ when, whenState }) => {
-  const [result, setResult] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    void getEnabledState(when, whenState)
-      .then(setResult)
-      .catch(() => {
-        setResult(null);
-      });
-  }, [when, whenState]);
+  const result = useWhenEnabled(when, whenState);
 
   if (result === null) {
     return null;
