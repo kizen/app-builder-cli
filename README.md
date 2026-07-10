@@ -47,7 +47,7 @@ this.openWindow('/some/path', '_self', { recordId: 'abc', mode: 'edit' });
 
 The engine transmits that payload out of band through `sessionStorage` and appends a `session_data_key` to the URL; the destination page reads it back with `readNavigationContext` / `consumeNavigationContext` (or the `useAppNavigationContext` React hook). The sandbox surfaces this end to end:
 
-- **Navigation Context panel** — a slide-out panel on the Routable Pages browser (toggled by the `context` button in its chrome, which shows a live event count) with a reverse-chronological log of every navigation a script triggered: target, whether a context payload rode along, its key and byte size, an expandable pretty-printed payload, and a status badge.
+- **Navigation Context panel** — a slide-out panel on the Routable Pages browser (toggled by the `context` button in its chrome, which shows a live event count) with a reverse-chronological log of every navigation that carried a context payload, plus any external `window.open` (which the engine drops context from). Each entry shows the target, whether a context payload rode along, its key and byte size, an expandable pretty-printed payload, and a status badge.
 - **Simulated destination page** — navigating to an in-app path that isn't a routable page in your plugin renders a stand-in for the real Kizen page. When the URL carries a valid context key it shows the payload and lets you **Consume**, **Clear**, or **Re-read** it, so you can confirm the destination sees exactly what the script sent (and that a re-read after consuming sees nothing).
 
 How the two navigation targets behave:

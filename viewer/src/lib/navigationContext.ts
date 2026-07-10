@@ -151,7 +151,14 @@ export function captureWindowOpen(url: string, target: string): void {
 
     if (raw !== null) {
       queueMicrotask(() => {
-        sessionStorage.setItem(sessionDataKey, raw);
+        // Best-effort: the re-insert can throw (quota exceeded, storage
+        // disabled). Swallow it — an unhandled microtask throw would break the
+        // sandbox even though the navigation itself already succeeded.
+        try {
+          sessionStorage.setItem(sessionDataKey, raw);
+        } catch {
+          // ignore: the simulated destination simply reads no context
+        }
       });
     }
 

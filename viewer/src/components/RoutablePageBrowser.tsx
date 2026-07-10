@@ -110,14 +110,23 @@ function stripQuery(path: string): string {
   return marker === -1 ? path : path.slice(0, marker);
 }
 
+// Split a plugin-provided path into location parts without `new URL()`, which
+// throws on malformed input (e.g. a stray `%`) and would crash the browser UI
+// on a tab switch. We only need the raw pathname/search/hash split.
 function toLocationParts(displayPath: string): {
   pathname: string;
   search: string;
   hash: string;
 } {
-  const url = new URL(`/${displayPath}`, window.location.origin);
+  const hashStart = displayPath.indexOf('#');
+  const hash = hashStart === -1 ? '' : displayPath.slice(hashStart);
+  const beforeHash = hashStart === -1 ? displayPath : displayPath.slice(0, hashStart);
 
-  return { pathname: url.pathname, search: url.search, hash: url.hash };
+  const searchStart = beforeHash.indexOf('?');
+  const search = searchStart === -1 ? '' : beforeHash.slice(searchStart);
+  const pathname = searchStart === -1 ? beforeHash : beforeHash.slice(0, searchStart);
+
+  return { pathname: `/${pathname}`, search, hash };
 }
 
 // Body of a dynamic (non-routable-page) tab: an iframe for real http urls, a
