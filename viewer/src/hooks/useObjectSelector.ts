@@ -67,6 +67,12 @@ export function useObjectSelector(storageKey: string): ObjectSelectorResult {
 
       const res = await request(`/custom-objects?${params.toString()}`);
 
+      // Non-OK responses carry an error body with no `results`; fail the query
+      // instead of letting the malformed shape reach consumers.
+      if (!res.ok) {
+        throw new Error(`Failed to fetch custom objects (${String(res.status)})`);
+      }
+
       return (await res.json()) as PaginatedResponse<CustomObjectRecord>;
     },
     enabled: apiKey !== '' && debouncedObjectSearch.length >= 1,

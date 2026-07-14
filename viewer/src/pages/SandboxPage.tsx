@@ -18,6 +18,7 @@ import { PluginBlockSection } from '../components/PluginBlockSection.js';
 import { Modal } from '../components/Modal.js';
 import { useCriticalExceptionDialog } from '../hooks/useCriticalExceptionDialog.js';
 import { loadConfig, loadUserConfig, resolveEffectiveConfig } from '../lib/configStorage.js';
+import { captureSelfNavigation, captureWindowOpen } from '../lib/navigationContext.js';
 import { createKizenApiClient } from '../lib/kizenApiClient.js';
 import type { PluginBaseConfig } from '../types.js';
 import type {
@@ -438,8 +439,15 @@ export const SandboxPage: FC = () => {
   useEffect(() => {
     const original = window.open;
 
-    window.open = (url?: string | URL): null => {
-      browserRef.current?.openNewTab(String(url ?? ''));
+    window.open = (url?: string | URL, target?: string): null => {
+      const finalUrl = String(url ?? '');
+
+      // Capture before opening: for a _blank navigation with context the engine
+      // deletes the sessionStorage entry synchronously right after this returns,
+      // so the payload must be snapshotted (and re-inserted) here.
+      captureWindowOpen(finalUrl, typeof target === 'string' && target ? target : '_blank');
+
+      browserRef.current?.openNewTab(finalUrl);
 
       return null;
     };
@@ -565,6 +573,10 @@ export const SandboxPage: FC = () => {
       }
       teamMember={bootstrap.team}
       onNavigate={(path, options) => {
+        // _self capture: the engine keeps the context in this tab's
+        // sessionStorage across the navigation, so read (don't consume) it here.
+        captureSelfNavigation(path);
+
         browserRef.current?.navigate(path, options);
       }}
       performFileUpload={({ file }) => {

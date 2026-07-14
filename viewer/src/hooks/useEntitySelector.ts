@@ -82,6 +82,13 @@ export function useEntitySelector(pluginApiName: string, variant = ''): EntitySe
         body: '{}',
       });
 
+      // Non-OK responses (e.g. a 403 for an object this API key can't read)
+      // carry an error body with no `results`; fail the query instead of
+      // letting the malformed shape reach consumers.
+      if (!res.ok) {
+        throw new Error(`Failed to search records (${String(res.status)})`);
+      }
+
       return (await res.json()) as PaginatedResponse<EntityRecord>;
     },
     enabled: apiKey !== '' && selectedObject !== null,
