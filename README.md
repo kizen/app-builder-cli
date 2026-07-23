@@ -20,11 +20,13 @@ Scaffolds a new plugin project. Interactive — prompts for the plugin name, API
 
 ### `@kizenapps/cli build`
 
-Reads the plugin in the current directory, minifies sources, and writes `.kizenapp/bundle.json`. No flags. Run this if you want to produce a bundle without starting the dev server.
+Reads the plugin in the current directory, validates it against the same rules enforced by the Kizen platform and Plugin Wizard, minifies sources, and writes `.kizenapp/bundle.json`. No flags. Run this if you want to produce a bundle without starting the dev server.
+
+If validation finds any errors (for example an `api_name` containing hyphens, which the platform rejects) the build fails and prints each issue grouped by file. Fix the reported issues and re-run.
 
 ### `@kizenapps/cli dev`
 
-Starts the dev server and opens the viewer. Watches your plugin directory and rebuilds + hot-reloads the viewer on every change.
+Starts the dev server and opens the viewer. Watches your plugin directory and rebuilds + hot-reloads the viewer on every change. Each rebuild runs the same validation as `build`; if it fails, the error is shown in the TUI and the viewer keeps the last good bundle until you fix it.
 
 | Flag                       | Default | Purpose                                                          |
 | -------------------------- | ------- | ---------------------------------------------------------------- |
@@ -32,6 +34,8 @@ Starts the dev server and opens the viewer. Watches your plugin directory and re
 | `-c, --credentials <path>` | —       | Use a specific credentials JSON file instead of a stored profile |
 | `-d, --debug`              | off     | Show a CDP event panel in the TUI                                |
 | `-v, --verbose`            | off     | Log every CDP event (implies `--debug`)                          |
+| `--no-viewer`              | off     | Don't auto-launch the viewer on startup (press `v` to launch it) |
+| `--no-cache`               | off     | Disable the network proxy cache (always fetch upstream)          |
 
 On first run you'll be prompted to set up credentials — either stored globally at `~/.kizenappbuilder/` or kept locally in your browser instance in `.kizenapp/`. Subsequent runs read from the stored profile silently. Press `c` in the TUI at any time to switch profiles.
 

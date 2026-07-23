@@ -43,6 +43,7 @@ export function devCommand(program: Command): void {
     .option('-d, --debug', 'Enable CDP lifecycle logs in the TUI')
     .option('-v, --verbose', 'Log every CDP event and handled error (implies --debug)')
     .option('--no-viewer', "Don't auto-launch the viewer on startup (press [v] to launch manually)")
+    .option('--no-cache', 'Disable the network proxy cache (always fetch upstream)')
     .action(
       async (options: {
         port: string;
@@ -50,6 +51,7 @@ export function devCommand(program: Command): void {
         debug?: boolean;
         verbose?: boolean;
         viewer?: boolean;
+        cache?: boolean;
       }) => {
         const port = parseInt(options.port, 10);
         const pluginDir = process.cwd();
@@ -117,6 +119,7 @@ export function devCommand(program: Command): void {
         const verbose = options.verbose === true;
         const debug = verbose || options.debug === true;
         const autoViewer = options.viewer !== false;
+        const cacheEnabled = options.cache !== false;
 
         const { waitUntilExit } = render(
           createElement(DevUI, {
@@ -130,6 +133,7 @@ export function devCommand(program: Command): void {
             debug,
             verbose,
             autoViewer,
+            cacheEnabled,
           }),
           { exitOnCtrlC: false },
         );
