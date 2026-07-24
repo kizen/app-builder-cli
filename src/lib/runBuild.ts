@@ -1,62 +1,20 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { minifyFiles, packagePlugin, transformDeployablePlugin } from '@kizenapps/packager';
+import {
+  PluginValidationError,
+  minifyFiles,
+  packagePlugin,
+  parseManifestFromFiles,
+  transformDeployablePlugin,
+  validatePluginApp,
+} from '@kizenapps/packager';
 import type { DeployablePlugin } from '@kizenapps/packager';
 import { readLocalFiles } from './readFiles.js';
-
-const REQUIRED_MANIFEST_FIELDS = ['name', 'api_name', 'version', 'entry'] as const;
-
-type ParsedManifest = Parameters<typeof packagePlugin>[1];
-
-function validateManifestObject(manifest: Record<string, unknown>, index?: number): void {
-  const label = index === undefined ? 'kizen.json' : `kizen.json entry #${String(index + 1)}`;
-
-  for (const field of REQUIRED_MANIFEST_FIELDS) {
-    const value = manifest[field];
-
-    if (typeof value !== 'string' || value === '') {
-      throw new Error(
-        `${label} is missing required field "${field}" (expected a non-empty string).`,
-      );
-    }
-  }
-}
-
-function parseManifest(content: string): ParsedManifest {
-  let parsed: unknown;
-
-  try {
-    parsed = JSON.parse(content);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-
-    throw new Error(`kizen.json is not valid JSON: ${detail}`);
-  }
-
-  if (Array.isArray(parsed)) {
-    parsed.forEach((entry, i) => {
-      if (typeof entry !== 'object' || entry === null) {
-        throw new Error(`kizen.json entry #${String(i + 1)} is not a JSON object.`);
-      }
-
-      validateManifestObject(entry as Record<string, unknown>, i);
-    });
-
-    return parsed as ParsedManifest;
-  }
-
-  if (typeof parsed !== 'object' || parsed === null) {
-    throw new Error('kizen.json must be a JSON object (or array of objects).');
-  }
-
-  validateManifestObject(parsed as Record<string, unknown>);
-
-  return parsed as ParsedManifest;
-}
 
 export type BuildStepName =
   | 'creating-dir'
   | 'reading-files'
+  | 'validating'
   | 'minifying'
   | 'packaging'
   | 'writing-bundle';
@@ -97,19 +55,21 @@ export async function runBuild(
 
   const files = await readLocalFiles(pluginDir);
 
+  onStep?.('validating');
+
+  const issues = validatePluginApp(files);
+
+  if (issues.some((issue) => issue.severity === 'error')) {
+    throw new PluginValidationError(issues);
+  }
+
   onStep?.('minifying');
 
   const minified = await minifyFiles(files);
 
   onStep?.('packaging');
 
-  const manifestFile = minified.find((f) => f.path === 'kizen.json');
-
-  if (!manifestFile) {
-    throw new Error('kizen.json not found in plugin directory.');
-  }
-
-  const manifests = parseManifest(manifestFile.content);
+  const manifests = parseManifestFromFiles(minified);
   const packaged = packagePlugin(minified, manifests);
   const deployable = Object.values(packaged).map(transformDeployablePlugin);
 

@@ -91,6 +91,9 @@ export interface ProxyCache {
 
 export interface ProxyCacheOptions {
   onChange?: (size: number) => void;
+  // When false, the cache becomes a pass-through: every request hits upstream
+  // and nothing is stored. Used by `appbuilder dev --no-cache`.
+  enabled?: boolean;
 }
 
 interface CacheEntry {
@@ -98,9 +101,30 @@ interface CacheEntry {
   promise: Promise<CachedResponse>;
 }
 
+async function toCachedResponse(response: Response): Promise<CachedResponse> {
+  const headers = sanitizeUpstreamHeaders(Object.fromEntries(response.headers));
+  const body = await readBodyWithLimit(response, MAX_PROXY_BYTES);
+
+  return { status: response.status, headers, body };
+}
+
 export function createProxyCache(options: ProxyCacheOptions = {}): ProxyCache {
+  const { onChange, enabled = true } = options;
+
+  if (!enabled) {
+    return {
+      async get(_key, fetcher) {
+        const response = await toCachedResponse(await fetcher());
+
+        return { response, fromCache: false };
+      },
+      clear() {
+        // Nothing is stored, so there is nothing to clear.
+      },
+    };
+  }
+
   const cache = new Map<string, CacheEntry>();
-  const { onChange } = options;
   const emitChange = (): void => {
     onChange?.(cache.size);
   };
@@ -138,12 +162,7 @@ export function createProxyCache(options: ProxyCacheOptions = {}): ProxyCache {
       }
 
       const pending = fetcher()
-        .then(async (response): Promise<CachedResponse> => {
-          const headers = sanitizeUpstreamHeaders(Object.fromEntries(response.headers));
-          const body = await readBodyWithLimit(response, MAX_PROXY_BYTES);
-
-          return { status: response.status, headers, body };
-        })
+        .then(toCachedResponse)
         .catch((error: unknown) => {
           evict(key);
           throw error;

@@ -1,6 +1,8 @@
 import type { FC } from 'react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import { PluginValidationError } from '@kizenapps/packager';
+import type { ValidationIssue } from '@kizenapps/packager';
 import { watch } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import { createServer } from 'node:http';
@@ -25,6 +27,7 @@ import { CredentialSetupUI } from './CredentialSetupUI.js';
 import type { CredentialMode, CredentialSetupResult } from './CredentialSetupUI.js';
 import { AppHeader } from './AppHeader.js';
 import { Spinner } from './Spinner.js';
+import { ValidationIssues } from './ValidationIssues.js';
 
 type ServerStatus = 'starting' | 'running' | 'error';
 type BuildStatus = 'pending' | 'building' | 'done' | 'error';
@@ -42,6 +45,7 @@ interface DevUIProps {
   debug?: boolean;
   verbose?: boolean;
   autoViewer?: boolean;
+  cacheEnabled?: boolean;
 }
 
 export const DevUI: FC<DevUIProps> = ({
@@ -55,6 +59,7 @@ export const DevUI: FC<DevUIProps> = ({
   debug = false,
   verbose = false,
   autoViewer = true,
+  cacheEnabled = true,
 }) => {
   const credentialsRef = useRef<Credentials | null>(initialCredentials);
   const activeProfileRef = useRef<string | undefined>(initialActiveProfile);
@@ -72,6 +77,7 @@ export const DevUI: FC<DevUIProps> = ({
   const [proxyLogHistory, setProxyLogHistory] = useState<string[]>([]);
   const [buildStatus, setBuildStatus] = useState<BuildStatus>('pending');
   const [buildError, setBuildError] = useState<string | null>(null);
+  const [buildIssues, setBuildIssues] = useState<ValidationIssue[] | null>(null);
   const [lastBuilt, setLastBuilt] = useState<Date | null>(null);
   const [lastBundleSize, setLastBundleSize] = useState<number | null>(null);
   const [wsClientCount, setWsClientCount] = useState(0);
@@ -238,6 +244,7 @@ export const DevUI: FC<DevUIProps> = ({
     buildingRef.current = true;
     setBuildStatus('building');
     setBuildError(null);
+    setBuildIssues(null);
     createBuildLog('Build started');
 
     void runBuild(pluginDir, outputDir)
@@ -250,9 +257,14 @@ export const DevUI: FC<DevUIProps> = ({
         broadcast({ type: 'rebuild' });
       })
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
+        if (err instanceof PluginValidationError) {
+          setBuildIssues(err.issues);
+          setBuildError(null);
+        } else {
+          setBuildError(err instanceof Error ? err.message : String(err));
+          setBuildIssues(null);
+        }
 
-        setBuildError(message);
         setBuildStatus('error');
       })
       .finally(() => {
@@ -321,6 +333,7 @@ export const DevUI: FC<DevUIProps> = ({
         setProxyCacheSize,
         lastPathRef,
         pluginDir,
+        cacheEnabled,
       );
       const server: Server = createServer(handler);
       const wss = new WebSocketServer({ server });
@@ -358,7 +371,7 @@ export const DevUI: FC<DevUIProps> = ({
         server.close();
       };
     });
-  }, [port, createServerLog, createProxyLog, broadcast, outputDir, pluginDir]);
+  }, [port, createServerLog, createProxyLog, broadcast, outputDir, pluginDir, cacheEnabled]);
 
   if (credMode === 'editing') {
     return (
@@ -382,6 +395,9 @@ export const DevUI: FC<DevUIProps> = ({
       : elapsedSeconds < 5
         ? ' (just now)'
         : ` (${String(elapsedSeconds)}s ago)`;
+
+  const buildErrorCount =
+    buildIssues?.filter((issue) => issue.severity === 'error').length ?? 0;
 
   return (
     <Box flexDirection="column" paddingY={1} paddingX={2}>
@@ -414,8 +430,16 @@ export const DevUI: FC<DevUIProps> = ({
               )}
             </Box>
           )}
-          {buildStatus === 'error' && <Text color="red">✗ {buildError ?? 'unknown error'}</Text>}
+          {buildStatus === 'error' &&
+            (buildIssues !== null ? (
+              <Text color="red">
+                ✗ {buildErrorCount} validation {buildErrorCount === 1 ? 'error' : 'errors'}
+              </Text>
+            ) : (
+              <Text color="red">✗ {buildError ?? 'unknown error'}</Text>
+            ))}
         </Box>
+        {buildIssues !== null && <ValidationIssues issues={buildIssues} />}
         <Box
           flexDirection="column"
           height={LOG_DISPLAY + 2}
@@ -471,8 +495,9 @@ export const DevUI: FC<DevUIProps> = ({
           </Text>
           <Text color="green">✓ Active</Text>
           <Text dimColor>
-            ● {proxyCacheSize} key{proxyCacheSize !== 1 ? 's' : ''} in the network cache ·{' '}
-            {proxyCacheHits} hit · {proxyCacheMisses} miss
+            {cacheEnabled
+              ? `● ${String(proxyCacheSize)} key${proxyCacheSize !== 1 ? 's' : ''} in the network cache · ${String(proxyCacheHits)} hit · ${String(proxyCacheMisses)} miss`
+              : `● network cache disabled · ${String(proxyCacheMisses)} request${proxyCacheMisses !== 1 ? 's' : ''}`}
           </Text>
         </Box>
         <Box

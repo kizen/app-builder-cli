@@ -217,8 +217,9 @@ export function createRequestHandler(
   onProxyCacheChange: (size: number) => void,
   lastPathRef: { current: string | undefined },
   pluginDir: string,
+  cacheEnabled: boolean,
 ): (req: IncomingMessage, res: ServerResponse) => void {
-  const proxyCache = createProxyCache({ onChange: onProxyCacheChange });
+  const proxyCache = createProxyCache({ onChange: onProxyCacheChange, enabled: cacheEnabled });
   // Resolve the plugin dir once so every source-path check compares against
   // the canonical path (handles macOS /var → /private/var, pnpm workspace
   // symlinks, etc.). Done synchronously at handler creation since pluginDir
