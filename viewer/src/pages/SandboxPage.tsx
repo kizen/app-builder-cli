@@ -33,9 +33,7 @@ import { AppEngineProvider } from '@kizenapps/engine/react';
 import { useBootstrap } from '../BootstrapContext.js';
 import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useCredentials } from '../CredentialsContext.js';
-import { ToastContext } from '../ToastContext.js';
-import { PluginToast } from '../components/PluginToast.js';
-import { usePluginToast, type PluginToast as PluginToastPayload } from '../hooks/usePluginToast.js';
+import { ToastProvider, useToastController } from '../ToastContext.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner, faCircleInfo } from '@fortawesome/free-solid-svg-icons';
 
@@ -49,12 +47,11 @@ const NotInstalledNotice: FC = () => (
 );
 
 const SandboxPageInner: FC<{
-  showingToast: PluginToastPayload | null;
   browserRef: RefObject<BrowserHandle | null>;
   routablePages: RoutablePageConfig[];
   configArgs: Record<string, unknown>;
   whenState: Record<string, UnknownJSON>;
-}> = ({ showingToast, browserRef, routablePages, configArgs, whenState }) => {
+}> = ({ browserRef, routablePages, configArgs, whenState }) => {
   const { apiName } = useParams({ strict: false });
 
   const sidebarWidth = useSidebarWidth();
@@ -146,8 +143,6 @@ const SandboxPageInner: FC<{
 
   return (
     <>
-      <PluginToast toast={showingToast} />
-
       <div style={{ paddingRight: floatingFrames.length > 0 ? GUTTER_WIDTH : 0 }}>
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-6 xl:flex-row xl:items-start">
@@ -357,8 +352,8 @@ const SandboxPageInner: FC<{
   );
 };
 
-export const SandboxPage: FC = () => {
-  const { toast: showingToast, showToast, clearToasts } = usePluginToast();
+const SandboxEngineHost: FC = () => {
+  const { showToast, clearToasts } = useToastController();
   const [showing, setShowing] = useState(false);
   const [show, setShow] = useState(false);
   const browserRef = useRef<BrowserHandle>(null);
@@ -487,9 +482,8 @@ export const SandboxPage: FC = () => {
       clearToasts={clearToasts}
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
-        <ToastContext.Provider value={showToast}>
+        <>
           <SandboxPageInner
-            showingToast={showingToast}
             browserRef={browserRef}
             routablePages={routablePages}
             configArgs={configArgs}
@@ -504,8 +498,14 @@ export const SandboxPage: FC = () => {
             pages={routablePages}
           />
           {criticalExceptionDialog}
-        </ToastContext.Provider>
+        </>
       )}
     </AppEngineProvider>
   );
 };
+
+export const SandboxPage: FC = () => (
+  <ToastProvider>
+    <SandboxEngineHost />
+  </ToastProvider>
+);

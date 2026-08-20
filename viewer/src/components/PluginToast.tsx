@@ -1,5 +1,9 @@
 import type { FC } from 'react';
-import type { PluginToast as PluginToastPayload } from '../hooks/usePluginToast.js';
+
+export interface PluginToastPayload {
+  message: string;
+  variant?: string;
+}
 
 const VARIANT_CLASSES: Record<string, string> = {
   success: 'bg-green-100 text-green-700',

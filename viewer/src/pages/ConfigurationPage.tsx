@@ -17,9 +17,7 @@ import { SetupAssistantRow } from '../components/setup-assistant/SetupAssistantR
 import { JsonConfigEditor } from '../components/setup-assistant/JsonConfigEditor.js';
 import { ConfigJsonDialog } from '../components/setup-assistant/ConfigJsonDialog.js';
 import { Modal } from '../components/Modal.js';
-import { PluginToast } from '../components/PluginToast.js';
-import { ToastContext } from '../ToastContext.js';
-import { usePluginToast } from '../hooks/usePluginToast.js';
+import { ToastProvider, useToastController } from '../ToastContext.js';
 import { PluginViewContent, usePluginView } from '../components/PluginViewContent.js';
 import {
   loadConfig,
@@ -195,9 +193,7 @@ const SetupCardDescription: FC<{ level: CompleteSetupLevel; isViewBased: boolean
 };
 
 interface SetupSurfaceProps extends SetupAssistantFormProps {
-  /** Which store `this.completeSetup` writes when the script passes no level. */
   level: CompleteSetupLevel;
-  /** The plugin's packaged views/pages, so a view-based assistant can be resolved. */
   views: RoutablePageConfig[];
   userConfigs: PluginUserConfig[];
   onConfigWrite: () => void;
@@ -225,7 +221,7 @@ const SetupSurface: FC<SetupSurfaceProps> = ({
 
   const { onMonitoringException, dialog: criticalExceptionDialog } = useCriticalExceptionDialog();
 
-  const { toast, showToast, clearToasts } = usePluginToast();
+  const { showToast, clearToasts } = useToastController();
 
   const onCompleteSetup = useCompleteSetup(level, onConfigWrite);
 
@@ -281,8 +277,7 @@ const SetupSurface: FC<SetupSurfaceProps> = ({
       clearToasts={clearToasts}
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
-        <ToastContext.Provider value={showToast}>
-          <PluginToast toast={toast} />
+        <>
           {viewApiName === undefined ? (
             <SetupAssistantFormInner
               config={config}
@@ -303,13 +298,13 @@ const SetupSurface: FC<SetupSurfaceProps> = ({
             pages={views}
           />
           {criticalExceptionDialog}
-        </ToastContext.Provider>
+        </>
       )}
     </AppEngineProvider>
   );
 };
 
-export const ConfigurationPage: FC = () => {
+const ConfigurationPageContent: FC = () => {
   const { apiName } = useParams({ strict: false });
   const { data: bundle, isLoading, isError } = useQuery(bundleQueryOptions);
   const [jsonDialog, setJsonDialog] = useState<'business' | 'user' | null>(null);
@@ -485,3 +480,9 @@ export const ConfigurationPage: FC = () => {
     </div>
   );
 };
+
+export const ConfigurationPage: FC = () => (
+  <ToastProvider>
+    <ConfigurationPageContent />
+  </ToastProvider>
+);
