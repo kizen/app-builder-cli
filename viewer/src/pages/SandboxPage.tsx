@@ -17,7 +17,8 @@ import { CalendarSourceSection } from '../components/CalendarSourceSection.js';
 import { PluginBlockSection } from '../components/PluginBlockSection.js';
 import { Modal } from '../components/Modal.js';
 import { useCriticalExceptionDialog } from '../hooks/useCriticalExceptionDialog.js';
-import { loadConfig, loadUserConfig, resolveEffectiveConfig } from '../lib/configStorage.js';
+import { useCompleteSetup } from '../hooks/useCompleteSetup.js';
+import { usePluginConfig } from '../hooks/usePluginConfig.js';
 import { captureSelfNavigation, captureWindowOpen } from '../lib/navigationContext.js';
 import { createKizenApiClient } from '../lib/kizenApiClient.js';
 import type { PluginBaseConfig } from '../types.js';
@@ -28,12 +29,13 @@ import type {
   ToolbarItemConfig,
   UnknownJSON,
 } from '@kizenapps/engine';
-import { mergeConfig } from '@kizenapps/engine/util';
 import { AppEngineProvider } from '@kizenapps/engine/react';
 import { useBootstrap } from '../BootstrapContext.js';
 import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useCredentials } from '../CredentialsContext.js';
-import { ToastContext, type ShowToastFn } from '../ToastContext.js';
+import { ToastContext } from '../ToastContext.js';
+import { PluginToast } from '../components/PluginToast.js';
+import { usePluginToast, type PluginToast as PluginToastPayload } from '../hooks/usePluginToast.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { faSpinner, faCircleInfo } from '@fortawesome/free-solid-svg-icons';
 
@@ -47,10 +49,12 @@ const NotInstalledNotice: FC = () => (
 );
 
 const SandboxPageInner: FC<{
-  showingToast: { message: string; variant?: string } | null;
+  showingToast: PluginToastPayload | null;
   browserRef: RefObject<BrowserHandle | null>;
   routablePages: RoutablePageConfig[];
-}> = ({ showingToast, browserRef, routablePages }) => {
+  configArgs: Record<string, unknown>;
+  whenState: Record<string, UnknownJSON>;
+}> = ({ showingToast, browserRef, routablePages, configArgs, whenState }) => {
   const { apiName } = useParams({ strict: false });
 
   const sidebarWidth = useSidebarWidth();
@@ -65,57 +69,6 @@ const SandboxPageInner: FC<{
   const { data: bundle, isLoading, isError } = useQuery(bundleQueryOptions);
 
   const bootstrap = useBootstrap();
-
-  const effectiveConfig = useMemo(() => {
-    if (!apiName || !bundle) {
-      return null;
-    }
-
-    const matched = bundle.find((a) => a.api_name === apiName);
-
-    return resolveEffectiveConfig(apiName, matched?.config_template);
-  }, [apiName, bundle]);
-
-  const whenState = useMemo((): Record<string, UnknownJSON> => {
-    if (!apiName || !bundle) {
-      return {};
-    }
-
-    const app = bundle.find((a) => a.api_name === apiName);
-
-    if (!app) {
-      return {};
-    }
-
-    const baseConfig = app.base_config as PluginBaseConfig | undefined;
-    const stored = loadConfig(apiName);
-    const storedUser = loadUserConfig(apiName);
-
-    const mergedConfig = mergeConfig(
-      (stored?.__kizen_clean_config ?? {}) as Record<string, UnknownJSON>,
-      [],
-      (stored?.__kizen_setup_assistant_values ?? {}) as Record<string, UnknownJSON>,
-      baseConfig?.setup_assistant?.fields,
-    );
-    const mergedUserConfig = mergeConfig(
-      (storedUser?.__kizen_clean_config ?? {}) as Record<string, UnknownJSON>,
-      [],
-      (storedUser?.__kizen_setup_assistant_values ?? {}) as Record<string, UnknownJSON>,
-      baseConfig?.user_setup_assistant?.fields,
-    );
-
-    const state: Record<string, UnknownJSON> = {};
-
-    for (const [k, v] of Object.entries(mergedConfig)) {
-      state[`config__${k}`] = v;
-    }
-
-    for (const [k, v] of Object.entries(mergedUserConfig)) {
-      state[`userConfig__${k}`] = v;
-    }
-
-    return state;
-  }, [apiName, bundle]);
 
   if (isLoading) {
     return (
@@ -145,17 +98,6 @@ const SandboxPageInner: FC<{
       </Card>
     );
   }
-
-  const baseConfig = app.base_config as PluginBaseConfig | undefined;
-  const hasSetupAssistant =
-    (baseConfig?.setup_assistant?.fields?.length ?? 0) > 0 ||
-    (baseConfig?.user_setup_assistant?.fields?.length ?? 0) > 0;
-
-  const configArgs: Record<string, unknown> = effectiveConfig
-    ? hasSetupAssistant
-      ? { __kizen_clean_config: effectiveConfig }
-      : { ...effectiveConfig }
-    : {};
 
   const floatingFrames = app.artifacts.floating_frames.map(
     (frame) =>
@@ -204,20 +146,7 @@ const SandboxPageInner: FC<{
 
   return (
     <>
-      {showingToast && (
-        <div
-          className={`fixed top-4 left-1/2 -translate-x-1/2 z-20 rounded px-4 py-2 text-sm font-medium ${
-            {
-              success: 'bg-green-100 text-green-700',
-              error: 'bg-red-100 text-red-700',
-              failure: 'bg-red-100 text-red-700',
-              alert: 'bg-amber-100 text-amber-700',
-            }[showingToast.variant ?? 'success'] ?? 'bg-green-100 text-green-700'
-          }`}
-        >
-          {showingToast.message}
-        </div>
-      )}
+      <PluginToast toast={showingToast} />
 
       <div style={{ paddingRight: floatingFrames.length > 0 ? GUTTER_WIDTH : 0 }}>
         <div className="flex flex-col gap-6">
@@ -429,9 +358,7 @@ const SandboxPageInner: FC<{
 };
 
 export const SandboxPage: FC = () => {
-  const [showingToast, setShowingToast] = useState<{ message: string; variant?: string } | null>(
-    null,
-  );
+  const { toast: showingToast, showToast, clearToasts } = usePluginToast();
   const [showing, setShowing] = useState(false);
   const [show, setShow] = useState(false);
   const browserRef = useRef<BrowserHandle>(null);
@@ -457,20 +384,6 @@ export const SandboxPage: FC = () => {
     };
   }, []);
 
-  useEffect(() => {
-    if (!showingToast) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      setShowingToast(null);
-    }, 5000);
-
-    return () => {
-      clearTimeout(timer);
-    };
-  }, [showingToast]);
-
   const { apiName } = useParams({ strict: false });
   const { data: bundle } = useQuery(bundleQueryOptions);
   const bootstrap = useBootstrap();
@@ -479,52 +392,27 @@ export const SandboxPage: FC = () => {
   const { environment } = useCredentials();
   const baseUrl = BASE_URLS[environment];
 
-  const userConfigs = useMemo(() => {
-    if (!apiName) {
-      return [];
-    }
+  const app = useMemo(() => bundle?.find((a) => a.api_name === apiName), [bundle, apiName]);
+  const baseConfig = app?.base_config as PluginBaseConfig | undefined;
 
-    const stored = loadUserConfig(apiName);
+  const { configArgs, userConfigs, whenState, refreshConfig } = usePluginConfig(
+    apiName,
+    baseConfig,
+    app?.config_template,
+  );
 
-    if (!stored?.__kizen_clean_config) {
-      return [];
-    }
-
-    return [
-      {
-        api_name: apiName,
-        config: { __kizen_clean_config: stored.__kizen_clean_config } as UnknownJSON,
-      },
-    ];
-  }, [apiName]);
+  const onCompleteSetup = useCompleteSetup('business', refreshConfig);
 
   const routablePages = useMemo((): RoutablePageConfig[] => {
-    if (!bundle || !apiName) {
-      return [];
-    }
-
-    const app = bundle.find((a) => a.api_name === apiName);
-
     if (!app) {
       return [];
     }
-
-    const baseConfig = app.base_config as PluginBaseConfig | undefined;
-    const hasSetupAssistant =
-      (baseConfig?.setup_assistant?.fields?.length ?? 0) > 0 ||
-      (baseConfig?.user_setup_assistant?.fields?.length ?? 0) > 0;
-    const effectiveConfig = resolveEffectiveConfig(apiName, app.config_template);
-    const configArgs: Record<string, unknown> = effectiveConfig
-      ? hasSetupAssistant
-        ? { __kizen_clean_config: effectiveConfig }
-        : { ...effectiveConfig }
-      : {};
 
     return app.artifacts.routable_pages.map(
       (page) =>
         ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
     );
-  }, [bundle, apiName]);
+  }, [app, configArgs]);
 
   const showPrompt = (): void => {
     setShowing(true);
@@ -545,10 +433,6 @@ export const SandboxPage: FC = () => {
   };
 
   const { onMonitoringException, dialog: criticalExceptionDialog } = useCriticalExceptionDialog();
-
-  const showToast: ShowToastFn = ({ message, variant }) => {
-    setShowingToast({ message, variant: variant ?? 'success' });
-  };
 
   if (!bootstrap) {
     return <FontAwesomeIcon icon={faSpinner} className="animate-spin text-neutral-400" size="2x" />;
@@ -597,11 +481,10 @@ export const SandboxPage: FC = () => {
       }}
       monitoringExceptionHelper={onMonitoringException}
       performRequest={kizenRequestHandler(apiClient)}
+      onCompleteSetup={onCompleteSetup}
       modal={{ showing, show, showPrompt, onConfirm, onHide }}
       showToast={showToast}
-      clearToasts={() => {
-        setShowingToast(null);
-      }}
+      clearToasts={clearToasts}
     >
       {({ showPluginModal, derivedModalState, pluginApiName }) => (
         <ToastContext.Provider value={showToast}>
@@ -609,6 +492,8 @@ export const SandboxPage: FC = () => {
             showingToast={showingToast}
             browserRef={browserRef}
             routablePages={routablePages}
+            configArgs={configArgs}
+            whenState={whenState}
           />
           <Modal
             show={showPluginModal}

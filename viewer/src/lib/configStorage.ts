@@ -15,6 +15,7 @@ function makeStorageAccessors(key: (apiName: string) => string): {
     setupAssistantConfig: SetupAssistantConfig,
   ) => void;
   saveRaw: (apiName: string, jsonObj: Record<string, unknown>) => void;
+  replaceClean: (apiName: string, cleanConfig: Record<string, unknown>) => void;
   clear: (apiName: string) => void;
 } {
   function load(apiName: string): StoredConfig | null {
@@ -54,11 +55,20 @@ function makeStorageAccessors(key: (apiName: string) => string): {
     localStorage.setItem(key(apiName), JSON.stringify(stored));
   }
 
+  function replaceClean(apiName: string, cleanConfig: Record<string, unknown>): void {
+    const stored: StoredConfig = {
+      __kizen_setup_assistant_values: load(apiName)?.__kizen_setup_assistant_values ?? {},
+      __kizen_clean_config: cleanConfig,
+    };
+
+    localStorage.setItem(key(apiName), JSON.stringify(stored));
+  }
+
   function clear(apiName: string): void {
     localStorage.removeItem(key(apiName));
   }
 
-  return { load, save, saveRaw, clear };
+  return { load, save, saveRaw, replaceClean, clear };
 }
 
 const systemStorage = makeStorageAccessors(pluginConfigKey);
@@ -67,21 +77,10 @@ const userStorage = makeStorageAccessors(pluginUserConfigKey);
 export const loadConfig = systemStorage.load;
 export const saveConfig = systemStorage.save;
 export const saveRawConfig = systemStorage.saveRaw;
+export const replaceCleanConfig = systemStorage.replaceClean;
 export const clearConfig = systemStorage.clear;
 
 export const loadUserConfig = userStorage.load;
 export const saveUserConfig = userStorage.save;
+export const replaceCleanUserConfig = userStorage.replaceClean;
 export const clearUserConfig = userStorage.clear;
-
-export function resolveEffectiveConfig(
-  apiName: string,
-  configTemplate?: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const stored = systemStorage.load(apiName)?.__kizen_clean_config;
-
-  if (stored) {
-    return stored;
-  }
-
-  return configTemplate ?? null;
-}

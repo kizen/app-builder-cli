@@ -12,7 +12,7 @@ import { reportCommand } from './commands/report.js';
 const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
 const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version: string };
 
-program.name('appbuilder').description('Kizen plugin app builder').version(pkg.version);
+program.name('npx @kizenapps/cli').description('Kizen plugin app builder').version(pkg.version);
 
 createCommand(program);
 

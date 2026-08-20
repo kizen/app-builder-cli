@@ -152,6 +152,15 @@ function mdLang(path: string): string {
   return LANG_MAP[fileExt(path)] ?? '';
 }
 
+// A fenced block must be delimited by more backticks than the longest run inside
+// it, or content that is itself markdown (a README with a code sample) escapes
+// its wrapper and corrupts the rest of the document.
+function mdFence(content: string): string {
+  const longestRun = [...content.matchAll(/`+/g)].reduce((max, m) => Math.max(max, m[0].length), 0);
+
+  return '`'.repeat(Math.max(3, longestRun + 1));
+}
+
 function renderTextTree(node: TreeNode, prefix = ''): string {
   const sorted = [...node.children.values()].sort((a, b) => {
     if (a.isFile !== b.isFile) {
@@ -176,8 +185,12 @@ function renderTextTree(node: TreeNode, prefix = ''): string {
     .join('\n');
 }
 
+const LICENSE_FILE = /(^|\/)licen[cs]e(\.md|\.txt)?$/i;
+
 function filterSourceFiles(files: FileContent[]): FileContent[] {
-  return files.filter((f) => f.path !== 'kizen.json' && f.path !== 'plugin-report.html');
+  return files.filter(
+    (f) => f.path !== 'kizen.json' && f.path !== 'plugin-report.html' && !LICENSE_FILE.test(f.path),
+  );
 }
 
 function buildFilteredConfig(manifest: Record<string, unknown>): Record<string, unknown> {
@@ -202,13 +215,16 @@ function generateMarkdown(manifest: Record<string, unknown>, files: FileContent[
     lines.push('', description);
   }
 
+  const configJson = JSON.stringify(filtered, null, 2);
+  const configFence = mdFence(configJson);
+
   lines.push(
     '',
     '## Configuration (`kizen.json`)',
     '',
-    '```json',
-    JSON.stringify(filtered, null, 2),
-    '```',
+    `${configFence}json`,
+    configJson,
+    configFence,
   );
 
   lines.push('', '## File Tree', '', '```', renderTextTree(buildTree(sourceFiles)), '```');
@@ -223,7 +239,9 @@ function generateMarkdown(manifest: Record<string, unknown>, files: FileContent[
     } else if (file.binaryData !== undefined) {
       lines.push(`[Binary file: ${String(file.binaryData.length)} bytes]`);
     } else {
-      lines.push(`\`\`\`${mdLang(file.path)}`, file.content, '```');
+      const fence = mdFence(file.content);
+
+      lines.push(`${fence}${mdLang(file.path)}`, file.content, fence);
     }
   }
 
@@ -334,7 +352,7 @@ export function reportCommand(program: Command): void {
       const htmlPath = options.output ?? join(EXAMPLES_DIR, `${apiName}.html`);
       const mdPath = htmlPath.replace(/\.html$/, '.md');
 
-      const files = await readLocalFiles(pluginDir);
+      const files = await readLocalFiles(pluginDir, { detectBinaryByContent: true });
 
       await mkdir(join(htmlPath, '..'), { recursive: true });
 

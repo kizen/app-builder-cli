@@ -8,8 +8,59 @@ import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import type { PluginBaseConfig } from '../types.js';
+import type { SetupAssistantConfig } from '@kizenapps/engine';
 import { resolveBlockDimensions } from '../lib/blockDimensions.js';
+import { hasSetupAssistant, setupAssistantView } from '../lib/setupAssistant.js';
 import { formatBytes } from '@shared/lib/formatBytes.js';
+
+const SetupAssistantSummary: FC<{ title: string; config: SetupAssistantConfig }> = ({
+  title,
+  config,
+}) => {
+  const view = setupAssistantView(config);
+  const fields = config.fields ?? [];
+
+  return (
+    <Card>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
+          {title}
+        </span>
+        <span className="ml-auto rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-semibold text-neutral-500">
+          {view === undefined ? fields.length : 'view'}
+        </span>
+      </div>
+      {view === undefined ? (
+        <>
+          <div className="mb-1 flex items-center gap-2 text-[10px] text-neutral-400">
+            <span className="min-w-0 flex-1">Field</span>
+            <span className="shrink-0">Type</span>
+          </div>
+          <div className="divide-y divide-black/5">
+            {fields.map((field, i: number) => (
+              <div key={i} className="flex items-center gap-2 py-1.5">
+                <span className="min-w-0 flex-1 truncate text-neutral-900">
+                  {'label' in field ? (field.label ?? field.key) : field.type}
+                </span>
+                <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
+                  {field.type}
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="mb-1 text-[10px] text-neutral-400">View</div>
+          <div className="truncate py-1.5 font-mono text-[11px] text-neutral-900">{view}</div>
+          <p className="m-0 mt-1 text-[12px] text-neutral-400">
+            This assistant declares no fields. The view renders setup and saves its own config.
+          </p>
+        </>
+      )}
+    </Card>
+  );
+};
 
 export const AppDetailPage: FC = () => {
   const { apiName } = useParams({ strict: false });
@@ -75,8 +126,10 @@ export const AppDetailPage: FC = () => {
     : null;
 
   const baseConfig = app.base_config as PluginBaseConfig | undefined;
-  const setupFields = baseConfig?.setup_assistant?.fields ?? [];
-  const userSetupFields = baseConfig?.user_setup_assistant?.fields ?? [];
+  const setupAssistant = baseConfig?.setup_assistant;
+  const userSetupAssistant = baseConfig?.user_setup_assistant;
+  const hasBusinessSetup = hasSetupAssistant(setupAssistant);
+  const hasUserSetup = hasSetupAssistant(userSetupAssistant);
 
   return (
     <div className="space-y-4 text-[13px]">
@@ -173,10 +226,7 @@ export const AppDetailPage: FC = () => {
       </Card>
 
       {/* Artifact Sections */}
-      {hasAnyArtifacts ||
-      setupFields.length > 0 ||
-      userSetupFields.length > 0 ||
-      app.releaseNotes ? (
+      {hasAnyArtifacts || hasBusinessSetup || hasUserSetup || app.releaseNotes ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {floatingFrames.length > 0 && (
             <Card>
@@ -547,62 +597,12 @@ export const AppDetailPage: FC = () => {
               </div>
             </Card>
           )}
-          {setupFields.length > 0 && (
-            <Card>
-              <div className="mb-3 flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
-                  Setup Assistant
-                </span>
-                <span className="ml-auto rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-semibold text-neutral-500">
-                  {setupFields.length}
-                </span>
-              </div>
-              <div className="mb-1 flex items-center gap-2 text-[10px] text-neutral-400">
-                <span className="min-w-0 flex-1">Field</span>
-                <span className="shrink-0">Type</span>
-              </div>
-              <div className="divide-y divide-black/5">
-                {setupFields.map((field, i: number) => (
-                  <div key={i} className="flex items-center gap-2 py-1.5">
-                    <span className="min-w-0 flex-1 truncate text-neutral-900">
-                      {'label' in field ? (field.label ?? field.key) : field.type}
-                    </span>
-                    <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
-                      {field.type}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </Card>
+          {hasBusinessSetup && setupAssistant && (
+            <SetupAssistantSummary title="Setup Assistant" config={setupAssistant} />
           )}
 
-          {userSetupFields.length > 0 && (
-            <Card>
-              <div className="mb-3 flex items-center gap-2">
-                <span className="text-[11px] font-semibold uppercase tracking-widest text-neutral-400">
-                  User Setup Assistant
-                </span>
-                <span className="ml-auto rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] font-semibold text-neutral-500">
-                  {userSetupFields.length}
-                </span>
-              </div>
-              <div className="mb-1 flex items-center gap-2 text-[10px] text-neutral-400">
-                <span className="min-w-0 flex-1">Field</span>
-                <span className="shrink-0">Type</span>
-              </div>
-              <div className="divide-y divide-black/5">
-                {userSetupFields.map((field, i: number) => (
-                  <div key={i} className="flex items-center gap-2 py-1.5">
-                    <span className="min-w-0 flex-1 truncate text-neutral-900">
-                      {'label' in field ? (field.label ?? field.key) : field.type}
-                    </span>
-                    <span className="shrink-0 rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[10px] text-neutral-500">
-                      {field.type}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </Card>
+          {hasUserSetup && userSetupAssistant && (
+            <SetupAssistantSummary title="User Setup Assistant" config={userSetupAssistant} />
           )}
 
           {app.releaseNotes && (

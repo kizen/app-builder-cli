@@ -131,7 +131,7 @@ async function runHeadless(
     if (process.stdin.isTTY) {
       throw new Error(
         'No secret provided and stdin is a terminal. Pass --value, or pipe the secret in ' +
-          '(e.g. `printf %s "$SECRET" | appbuilder encrypt …`).',
+          '(e.g. `printf %s "$SECRET" | npx --yes @kizenapps/cli encrypt …`).',
       );
     }
 

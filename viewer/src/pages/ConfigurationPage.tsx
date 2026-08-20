@@ -5,6 +5,8 @@ import { bundleQueryOptions } from '../bundleQuery.js';
 import { Card } from '../components/Card.js';
 import type { DeployablePlugin } from '@kizenapps/packager';
 import type {
+  CompleteSetupLevel,
+  RoutablePageConfig,
   SetupAssistantConfig,
   ValueStore,
   UnknownJSON,
@@ -14,6 +16,11 @@ import { AppEngineProvider, SetupAssistantController } from '@kizenapps/engine/r
 import { SetupAssistantRow } from '../components/setup-assistant/SetupAssistantRow.js';
 import { JsonConfigEditor } from '../components/setup-assistant/JsonConfigEditor.js';
 import { ConfigJsonDialog } from '../components/setup-assistant/ConfigJsonDialog.js';
+import { Modal } from '../components/Modal.js';
+import { PluginToast } from '../components/PluginToast.js';
+import { ToastContext } from '../ToastContext.js';
+import { usePluginToast } from '../hooks/usePluginToast.js';
+import { PluginViewContent, usePluginView } from '../components/PluginViewContent.js';
 import {
   loadConfig,
   saveConfig,
@@ -23,11 +30,15 @@ import {
   clearUserConfig,
   type StoredConfig,
 } from '../lib/configStorage.js';
+import { PLUGIN_IFRAME_ALLOW } from '../lib/constants.js';
+import { hasSetupAssistant, setupAssistantView } from '../lib/setupAssistant.js';
 import { createKizenApiClient } from '../lib/kizenApiClient.js';
 import { useApi, BASE_URLS, kizenRequestHandler } from '../api.js';
 import { useBootstrap } from '../BootstrapContext.js';
 import { useObjectLookups } from '../hooks/useObjectLookups.js';
 import { useCriticalExceptionDialog } from '../hooks/useCriticalExceptionDialog.js';
+import { useCompleteSetup } from '../hooks/useCompleteSetup.js';
+import { usePluginConfig, type PluginUserConfig } from '../hooks/usePluginConfig.js';
 import { useCredentials } from '../CredentialsContext.js';
 import type { PluginBaseConfig } from '../types.js';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
@@ -120,12 +131,88 @@ const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
   );
 };
 
-const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
+const Code: FC<{ children: string }> = ({ children }) => (
+  <code className="rounded bg-neutral-100 px-1 font-mono text-[11px]">{children}</code>
+);
+
+// A view-based assistant owns setup end to end: it saves through
+// `this.completeSetup` and ships its own buttons, so nothing here adds a Save.
+const SetupAssistantViewInner: FC<{
+  page: RoutablePageConfig | undefined;
+  viewApiName: string;
+}> = ({ page, viewApiName }) => {
+  if (!page) {
+    return (
+      <p className="m-0 rounded border border-dashed border-amber-300 bg-amber-50 px-3 py-2.5 text-[12px] text-amber-800">
+        This setup assistant delegates to view <Code>{viewApiName}</Code>, which this plugin does
+        not define. Add a <Code>{`views/${viewApiName}/`}</Code> component, or drop{' '}
+        <Code>view</Code> from the manifest to go back to the declarative assistant.
+      </p>
+    );
+  }
+
+  return (
+    <PluginViewContent
+      page={page}
+      className="h-[520px] w-full overflow-hidden rounded border border-black/10"
+      iframeAllow={PLUGIN_IFRAME_ALLOW}
+    />
+  );
+};
+
+const SetupCardDescription: FC<{ level: CompleteSetupLevel; isViewBased: boolean }> = ({
+  level,
+  isViewBased,
+}) => {
+  const accessor = level === 'user' ? 'this.userConfig' : 'this.config';
+
+  if (isViewBased) {
+    return (
+      <>
+        Setup for this plugin is a view, so it saves its own{' '}
+        {level === 'user' ? 'per-user' : 'business-level'} config by calling{' '}
+        <Code>this.completeSetup()</Code> — there is no form or Save button here. Whatever it writes
+        becomes <Code>{accessor}</Code>; use View JSON to inspect it.
+      </>
+    );
+  }
+
+  if (level === 'user') {
+    return (
+      <>
+        Configure the per-user setup assistant fields. These values are scoped to the logged-in user
+        and exposed to plugin scripts at <Code>{accessor}</Code>.
+      </>
+    );
+  }
+
+  return (
+    <>
+      Configure the business-level setup assistant fields. These values are shared across the whole
+      business and exposed to plugin scripts at <Code>{accessor}</Code>.
+    </>
+  );
+};
+
+interface SetupSurfaceProps extends SetupAssistantFormProps {
+  /** Which store `this.completeSetup` writes when the script passes no level. */
+  level: CompleteSetupLevel;
+  /** The plugin's packaged views/pages, so a view-based assistant can be resolved. */
+  views: RoutablePageConfig[];
+  userConfigs: PluginUserConfig[];
+  onConfigWrite: () => void;
+}
+
+const SetupSurface: FC<SetupSurfaceProps> = ({
   config,
   apiName,
   loadFn,
   saveFn,
   clearFn,
+  level,
+  views,
+  userConfigs,
+  onConfigWrite,
 }) => {
   const bootstrap = useBootstrap();
   const request = useApi();
@@ -138,6 +225,13 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
 
   const { onMonitoringException, dialog: criticalExceptionDialog } = useCriticalExceptionDialog();
 
+  const { toast, showToast, clearToasts } = usePluginToast();
+
+  const onCompleteSetup = useCompleteSetup(level, onConfigWrite);
+
+  const viewApiName = setupAssistantView(config);
+  const setupView = usePluginView(views, viewApiName);
+
   if (!bootstrap) {
     return <FontAwesomeIcon icon={faSpinner} className="animate-spin text-neutral-400" />;
   }
@@ -147,6 +241,7 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
       appPath={baseUrl}
       user={{ id: bootstrap.team.user, crm_client_id: '' }}
       business={bootstrap.business}
+      userConfigs={userConfigs}
       clientObject={
         bootstrap.business.client_object
           ? {
@@ -162,6 +257,7 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
       performFileUpload={() => Promise.resolve({ url: '' })}
       monitoringExceptionHelper={onMonitoringException}
       performRequest={kizenRequestHandler(apiClient)}
+      onCompleteSetup={onCompleteSetup}
       modal={{
         showing,
         show,
@@ -181,24 +277,33 @@ const SetupAssistantForm: FC<SetupAssistantFormProps> = ({
           setShow(false);
         },
       }}
-      showToast={() => {
-        /* no-op */
-      }}
-      clearToasts={() => {
-        /* no-op */
-      }}
+      showToast={showToast}
+      clearToasts={clearToasts}
     >
-      {() => (
-        <>
-          <SetupAssistantFormInner
-            config={config}
-            apiName={apiName}
-            loadFn={loadFn}
-            saveFn={saveFn}
-            clearFn={clearFn}
+      {({ showPluginModal, derivedModalState, pluginApiName }) => (
+        <ToastContext.Provider value={showToast}>
+          <PluginToast toast={toast} />
+          {viewApiName === undefined ? (
+            <SetupAssistantFormInner
+              config={config}
+              apiName={apiName}
+              loadFn={loadFn}
+              saveFn={saveFn}
+              clearFn={clearFn}
+            />
+          ) : (
+            <SetupAssistantViewInner page={setupView} viewApiName={viewApiName} />
+          )}
+          <Modal
+            show={showPluginModal}
+            config={derivedModalState.config}
+            pluginApiName={pluginApiName}
+            onConfirm={derivedModalState.props.onConfirm}
+            onHide={derivedModalState.props.onHide}
+            pages={views}
           />
           {criticalExceptionDialog}
-        </>
+        </ToastContext.Provider>
       )}
     </AppEngineProvider>
   );
@@ -208,6 +313,30 @@ export const ConfigurationPage: FC = () => {
   const { apiName } = useParams({ strict: false });
   const { data: bundle, isLoading, isError } = useQuery(bundleQueryOptions);
   const [jsonDialog, setJsonDialog] = useState<'business' | 'user' | null>(null);
+
+  const app = useMemo(
+    () => bundle?.find((a) => a.api_name === apiName) as DeployablePlugin | undefined,
+    [bundle, apiName],
+  );
+
+  const baseConfig = app?.base_config as PluginBaseConfig | undefined;
+
+  const { configArgs, userConfigs, refreshConfig } = usePluginConfig(
+    apiName,
+    baseConfig,
+    app?.config_template,
+  );
+
+  const views = useMemo((): RoutablePageConfig[] => {
+    if (!app) {
+      return [];
+    }
+
+    return app.artifacts.routable_pages.map(
+      (page) =>
+        ({ ...page, plugin_api_name: app.api_name, args: configArgs }) as RoutablePageConfig,
+    );
+  }, [app, configArgs]);
 
   if (isLoading) {
     return (
@@ -225,8 +354,6 @@ export const ConfigurationPage: FC = () => {
     );
   }
 
-  const app = bundle?.find((a) => a.api_name === apiName) as DeployablePlugin | undefined;
-
   if (!app) {
     return (
       <Card>
@@ -238,11 +365,10 @@ export const ConfigurationPage: FC = () => {
     );
   }
 
-  const baseConfig = app.base_config as PluginBaseConfig | undefined;
   const setupAssistant = baseConfig?.setup_assistant;
   const userSetupAssistant = baseConfig?.user_setup_assistant;
-  const hasBusinessSetup = (setupAssistant?.fields?.length ?? 0) > 0;
-  const hasUserSetup = (userSetupAssistant?.fields?.length ?? 0) > 0;
+  const hasBusinessSetup = hasSetupAssistant(setupAssistant);
+  const hasUserSetup = hasSetupAssistant(userSetupAssistant);
 
   if (!hasBusinessSetup && !hasUserSetup) {
     return (
@@ -271,12 +397,10 @@ export const ConfigurationPage: FC = () => {
                   Business Configuration
                 </h2>
                 <p className="text-[12px] text-neutral-400 m-0 mt-1">
-                  Configure the business-level setup assistant fields. These values are shared
-                  across the whole business and exposed to plugin scripts at{' '}
-                  <code className="rounded bg-neutral-100 px-1 font-mono text-[11px]">
-                    this.config
-                  </code>
-                  .
+                  <SetupCardDescription
+                    level="business"
+                    isViewBased={setupAssistantView(setupAssistant) !== undefined}
+                  />
                 </p>
               </div>
               <button
@@ -288,12 +412,16 @@ export const ConfigurationPage: FC = () => {
                 View JSON
               </button>
             </div>
-            <SetupAssistantForm
+            <SetupSurface
               config={setupAssistant}
               apiName={apiName ?? ''}
               loadFn={loadConfig}
               saveFn={saveConfig}
               clearFn={clearConfig}
+              level="business"
+              views={views}
+              userConfigs={userConfigs}
+              onConfigWrite={refreshConfig}
             />
           </div>
         </Card>
@@ -306,12 +434,10 @@ export const ConfigurationPage: FC = () => {
               <div className="min-w-0">
                 <h2 className="text-[15px] font-bold text-neutral-900 m-0">User Configuration</h2>
                 <p className="text-[12px] text-neutral-400 m-0 mt-1">
-                  Configure the per-user setup assistant fields. These values are scoped to the
-                  logged-in user and exposed to plugin scripts at{' '}
-                  <code className="rounded bg-neutral-100 px-1 font-mono text-[11px]">
-                    this.userConfig
-                  </code>
-                  .
+                  <SetupCardDescription
+                    level="user"
+                    isViewBased={setupAssistantView(userSetupAssistant) !== undefined}
+                  />
                 </p>
               </div>
               <button
@@ -323,12 +449,16 @@ export const ConfigurationPage: FC = () => {
                 View JSON
               </button>
             </div>
-            <SetupAssistantForm
+            <SetupSurface
               config={userSetupAssistant}
               apiName={apiName ?? ''}
               loadFn={loadUserConfig}
               saveFn={saveUserConfig}
               clearFn={clearUserConfig}
+              level="user"
+              views={views}
+              userConfigs={userConfigs}
+              onConfigWrite={refreshConfig}
             />
           </div>
         </Card>
