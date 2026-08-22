@@ -1,5 +1,4 @@
 import type { RoutablePageConfig } from '@kizenapps/engine';
-import { useAppPage } from '@kizenapps/engine/react';
 import {
   useState,
   useCallback,
@@ -13,6 +12,7 @@ import {
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { VALID_ICONS } from '@shared/lib/validIcons.js';
 import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
+import { PLUGIN_IFRAME_ALLOW } from '../lib/constants.js';
 import {
   getNavigationEvents,
   parseSessionDataKey,
@@ -20,60 +20,20 @@ import {
 } from '../lib/navigationContext.js';
 import { NavigationDestination } from './NavigationDestination.js';
 import { NavigationLogSection } from './NavigationLogSection.js';
-
-const ROUTABLE_IFRAME_ALLOW =
-  'microphone; speaker-selection; autoplay; camera; display-capture; hid';
+import { PluginViewContent } from './PluginViewContent.js';
 
 const RoutablePageView: FC<{ page: RoutablePageConfig; isActive: boolean }> = ({
   page,
   isActive,
-}) => {
-  const {
-    scriptUIRef,
-    outputUIRef,
-    scopedCss,
-    sanitizedHtml,
-    interactableScriptRef,
-    iframeURL,
-    pending,
-  } = useAppPage(page);
-
-  return (
-    <div style={{ display: isActive ? 'block' : 'none' }} className="relative h-full w-full">
-      {pending && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
-          loading…
-        </div>
-      )}
-
-      {page.type === 'script' && (
-        <>
-          <div ref={scriptUIRef} className="h-full w-full overflow-auto p-3" />
-          <style>{scopedCss}</style>
-        </>
-      )}
-
-      {page.type === 'html' && (
-        <div ref={interactableScriptRef} className="h-full overflow-auto p-3">
-          {sanitizedHtml && (
-            <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
-          )}
-          <div ref={outputUIRef} />
-          <style>{scopedCss}</style>
-        </div>
-      )}
-
-      {page.type === 'iframe' && iframeURL && (
-        <iframe
-          src={iframeURL}
-          className="h-full w-full border-0"
-          title={page.name}
-          allow={ROUTABLE_IFRAME_ALLOW}
-        />
-      )}
-    </div>
-  );
-};
+}) => (
+  <PluginViewContent
+    page={page}
+    style={{ display: isActive ? 'block' : 'none' }}
+    className="h-full w-full"
+    contentClassName="p-3"
+    iframeAllow={PLUGIN_IFRAME_ALLOW}
+  />
+);
 
 export interface BrowserHandle {
   navigate: (path: string, options?: { replace?: boolean }) => void;
@@ -140,7 +100,7 @@ const DynamicTabContent: FC<{ tab: DynamicTab }> = ({ tab }) => {
         src={tab.url}
         className="h-full w-full border-0"
         title={tab.title}
-        allow={ROUTABLE_IFRAME_ALLOW}
+        allow={PLUGIN_IFRAME_ALLOW}
       />
     );
   }

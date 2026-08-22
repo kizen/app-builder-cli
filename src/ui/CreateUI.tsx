@@ -446,7 +446,7 @@ export const CreateUI: FC<CreateUIProps> = ({ parentDir, defaultBusinessId }) =>
           <Text>
             {'  '}cd {phase.targetDir}
           </Text>
-          <Text>{'  '}appbuilder dev</Text>
+          <Text>{'  '}npx --yes @kizenapps/cli dev</Text>
         </Box>
         <Hint text="Enter or Esc to exit" />
       </Box>

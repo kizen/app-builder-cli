@@ -11,11 +11,9 @@ import { ExecutionResultPanel, type ExecutionResult } from '../components/Execut
 import { useLocalStorage } from '../hooks/useLocalStorage.js';
 import { executeRemoteStep } from '../remoteRunner.js';
 import type { DeployablePlugin } from '@kizenapps/packager';
-import { loadConfig, loadUserConfig } from '../lib/configStorage.js';
+import { usePluginConfig } from '../hooks/usePluginConfig.js';
 import { WhenBadge } from '../components/WhenBadge.js';
 import type { PluginBaseConfig } from '../types.js';
-import type { UnknownJSON } from '@kizenapps/engine';
-import { mergeConfig } from '@kizenapps/engine/util';
 
 export const CodeStepsPage: FC = () => {
   const { apiName, stepApiName } = useParams({ strict: false });
@@ -38,45 +36,16 @@ export const CodeStepsPage: FC = () => {
     'local',
   );
 
-  const app = bundle?.find((a) => a.api_name === apiName) as DeployablePlugin | undefined;
+  const app = useMemo(
+    () => bundle?.find((a) => a.api_name === apiName) as DeployablePlugin | undefined,
+    [bundle, apiName],
+  );
 
   const steps = useMemo(() => app?.artifacts.automation_action_configs ?? [], [app]);
   const selectedStep = steps.find((s) => s.action_step_api_name === stepApiName) ?? steps[0];
 
-  const whenState = useMemo((): Record<string, UnknownJSON> => {
-    if (!apiName || !app) {
-      return {};
-    }
-
-    const baseConfig = app.base_config as PluginBaseConfig | undefined;
-    const stored = loadConfig(apiName);
-    const storedUser = loadUserConfig(apiName);
-
-    const mergedConfig = mergeConfig(
-      (stored?.__kizen_clean_config ?? {}) as Record<string, UnknownJSON>,
-      [],
-      (stored?.__kizen_setup_assistant_values ?? {}) as Record<string, UnknownJSON>,
-      baseConfig?.setup_assistant?.fields,
-    );
-    const mergedUserConfig = mergeConfig(
-      (storedUser?.__kizen_clean_config ?? {}) as Record<string, UnknownJSON>,
-      [],
-      (storedUser?.__kizen_setup_assistant_values ?? {}) as Record<string, UnknownJSON>,
-      baseConfig?.user_setup_assistant?.fields,
-    );
-
-    const state: Record<string, UnknownJSON> = {};
-
-    for (const [k, v] of Object.entries(mergedConfig)) {
-      state[`config__${k}`] = v;
-    }
-
-    for (const [k, v] of Object.entries(mergedUserConfig)) {
-      state[`userConfig__${k}`] = v;
-    }
-
-    return state;
-  }, [apiName, app]);
+  const baseConfig = app?.base_config as PluginBaseConfig | undefined;
+  const { whenState } = usePluginConfig(apiName, baseConfig, app?.config_template);
 
   // Auto-redirect to first step when no step is selected
   useEffect(() => {

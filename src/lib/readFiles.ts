@@ -6,7 +6,25 @@ const IMAGE_EXTENSIONS = new Set(['.png', '.svg']);
 const BINARY_EXTENSIONS = new Set(['.kzn']);
 const SKIP_FILES = new Set(['.DS_Store']);
 
-export const SKIP_DIRS = new Set(['node_modules', '.git', '.kizenapp', '.github']);
+export const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  '.kizenapp',
+  '.github',
+  '.claude',
+  '__pycache__',
+]);
+
+// a NUL in the first 8 KB means binary
+const BINARY_SNIFF_BYTES = 8000;
+
+function looksBinary(buf: Buffer): boolean {
+  return buf.subarray(0, BINARY_SNIFF_BYTES).includes(0);
+}
+
+export interface ReadLocalFilesOptions {
+  detectBinaryByContent?: boolean;
+}
 
 async function walk(dir: string, rootDir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
@@ -29,7 +47,10 @@ async function walk(dir: string, rootDir: string): Promise<string[]> {
   return paths;
 }
 
-export async function readLocalFiles(rootDir: string): Promise<FileContent[]> {
+export async function readLocalFiles(
+  rootDir: string,
+  { detectBinaryByContent = false }: ReadLocalFilesOptions = {},
+): Promise<FileContent[]> {
   const absolutePaths = await walk(rootDir, rootDir);
 
   return Promise.all(
@@ -44,15 +65,13 @@ export async function readLocalFiles(rootDir: string): Promise<FileContent[]> {
         return { path: relPath, content: '', base64Image: buf.toString('base64') };
       }
 
-      if (BINARY_EXTENSIONS.has(ext)) {
-        const buf = await readFile(absPath);
+      const buf = await readFile(absPath);
 
+      if (BINARY_EXTENSIONS.has(ext) || (detectBinaryByContent && looksBinary(buf))) {
         return { path: relPath, content: '', binaryData: buf };
       }
 
-      const content = await readFile(absPath, 'utf-8');
-
-      return { path: relPath, content };
+      return { path: relPath, content: buf.toString('utf-8') };
     }),
   );
 }

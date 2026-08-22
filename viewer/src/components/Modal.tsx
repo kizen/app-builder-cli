@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, forwardRef, type FC, useMemo } from 'react';
+import { useState, useCallback, useRef, type FC } from 'react';
 import type {
   AssistantField,
   ModalConfig,
@@ -10,11 +10,8 @@ import type {
 import { DynamicModalContent, type DynamicModalContentHandle } from './DynamicModalContent.js';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { Dialog, DialogHeader } from './Dialog.js';
-import {
-  useAppPage,
-  useRegisterFormDataCollection,
-  type ModalCustomContentHandle,
-} from '@kizenapps/engine/react';
+import { PluginViewContent, usePluginView } from './PluginViewContent.js';
+import type { ModalCustomContentHandle } from '@kizenapps/engine/react';
 
 // The engine sends richer block types than ModalBlock declares (number, boolean, select).
 // We model the full superset here rather than casting everywhere.
@@ -278,73 +275,6 @@ const ModalField: FC<FieldProps> = ({ block, values, onChange }) => {
   return null;
 };
 
-const ModalCustomContent = forwardRef<
-  ModalCustomContentHandle,
-  {
-    pages?: RoutablePageConfig[] | undefined;
-    viewId?: string | undefined;
-    args?: UnknownJSON | undefined;
-  }
->(({ pages, viewId, args }, ref) => {
-  const view = useMemo(() => {
-    if (!pages || !viewId) {
-      return undefined;
-    }
-
-    const found = pages.find((p) => p.api_name === viewId);
-
-    if (!found) {
-      return undefined;
-    }
-
-    return args ? ({ ...found, args } as RoutablePageConfig) : found;
-  }, [pages, viewId, args]);
-
-  const {
-    scriptUIRef,
-    outputUIRef,
-    scopedCss,
-    sanitizedHtml,
-    interactableScriptRef,
-    iframeURL,
-    pending,
-    collectFormData,
-  } = useAppPage(view);
-
-  useRegisterFormDataCollection(ref, collectFormData);
-
-  return (
-    <div className="relative h-full w-full overflow-hidden rounded-lg">
-      {pending && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 font-mono text-[11px] text-neutral-400">
-          loading…
-        </div>
-      )}
-
-      {view?.type === 'script' && (
-        <>
-          <div ref={scriptUIRef} className="h-full w-full overflow-y-auto" />
-          <style>{scopedCss}</style>
-        </>
-      )}
-
-      {view?.type === 'html' && (
-        <div ref={interactableScriptRef} className="h-full overflow-auto">
-          {sanitizedHtml && (
-            <div className="h-full" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
-          )}
-          <div ref={outputUIRef} />
-          <style>{scopedCss}</style>
-        </div>
-      )}
-
-      {view?.type === 'iframe' && iframeURL && (
-        <iframe src={iframeURL} className="h-full w-full border-0" title={view.name} />
-      )}
-    </div>
-  );
-});
-
 interface ModalProps {
   show: boolean;
   config: ModalConfig;
@@ -378,6 +308,7 @@ export const Modal: FC<ModalProps> = ({
   const customContentRef = useRef<ModalCustomContentHandle>(null);
 
   const isCustomView = Boolean(config.viewId);
+  const customView = usePluginView(pages, config.viewId, config.args);
 
   const handleChange = useCallback((key: string, value: unknown) => {
     setFieldValues((prev) => ({ ...prev, [key]: value }));
@@ -455,11 +386,10 @@ export const Modal: FC<ModalProps> = ({
     >
       {isCustomView ? (
         <div className="min-h-0 flex-1">
-          <ModalCustomContent
+          <PluginViewContent
             ref={customContentRef}
-            pages={pages}
-            viewId={config.viewId}
-            args={config.args}
+            page={customView}
+            className="h-full w-full overflow-hidden rounded-lg"
           />
         </div>
       ) : isDynamic ? (

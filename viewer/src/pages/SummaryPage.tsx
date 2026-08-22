@@ -43,8 +43,8 @@ export const SummaryPage: FC = () => {
       <Card>
         <p className="m-0 text-[13px] text-yellow-700">
           bundle.json is empty. Run{' '}
-          <code className="rounded bg-neutral-100 px-1 py-0.5">appbuilder build</code> to generate
-          it.
+          <code className="rounded bg-neutral-100 px-1 py-0.5">npx --yes @kizenapps/cli build</code>{' '}
+          to generate it.
         </p>
       </Card>
     );
