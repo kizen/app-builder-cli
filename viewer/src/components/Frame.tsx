@@ -9,12 +9,8 @@ import { isKnownIconName } from './IconNameBadge.js';
 import { floatingFramePositionKey } from '../lib/storageKeys.js';
 import { Tooltip } from './Tooltip.js';
 
-// Built once — constructing a Segmenter per render is needlessly expensive.
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
-// The first user-perceived character. Neither `value[0]` nor `[...value][0]`
-// will do: the former splits surrogate pairs, and the latter splits grapheme
-// clusters such as emoji ZWJ sequences and combining marks.
 const firstGrapheme = (value: string): string | undefined => {
   for (const { segment } of GRAPHEMES.segment(value)) {
     return segment;
@@ -39,7 +35,6 @@ interface CircleTriggerProps {
   whenEnabled?: boolean | null;
 }
 
-// Renders into the anchor div managed by SandboxPage so each trigger stacks independently
 const CircleTrigger = ({
   frameId,
   side,
@@ -57,10 +52,6 @@ const CircleTrigger = ({
     return null;
   }
 
-  // A data-image CustomIcon supersedes the configured name, so only speak to
-  // the name when the viewer is actually falling back to it. The other icon
-  // surfaces flag an unknown name in amber; a coloured circle has nowhere to
-  // put that, so the tooltip carries the signal instead.
   const iconName = CustomIcon ? '' : circleIcon;
   const title = !iconName
     ? 'Open frame'
@@ -90,9 +81,6 @@ const CircleTrigger = ({
       {CustomIcon ? (
         <CustomIcon className="h-6 w-6 rounded-full object-cover" />
       ) : (
-        // A named icon is drawn by the Kizen app at runtime, so the viewer
-        // shows a neutral initial rather than a stand-in glyph. The configured
-        // name is in the button's tooltip.
         <span className="font-mono text-[11px] uppercase text-white">
           {firstGrapheme(iconName) ?? '▲'}
         </span>

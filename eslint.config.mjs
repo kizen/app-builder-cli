@@ -41,8 +41,7 @@ export default tseslint.config(
           patterns: [
             {
               group: ['@fortawesome/pro-*'],
-              message:
-                'FontAwesome Pro was removed for licensing reasons (KZN-17427); use free-solid or no icon.',
+              message: 'FontAwesome Pro should not be distributed in this package.',
             },
           ],
         },

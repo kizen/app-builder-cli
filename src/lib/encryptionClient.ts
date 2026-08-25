@@ -39,10 +39,6 @@ function isConnRefused(err: unknown): boolean {
   return e.code === 'ECONNREFUSED' || e.cause?.code === 'ECONNREFUSED';
 }
 
-/**
- * The auth headers every wizard endpoint requires: x-api-key, x-user-id,
- * x-business-id, and x-auth-environment.
- */
 function authHeaders(credentials: Credentials): Record<string, string> {
   return {
     'Content-Type': 'application/json',
