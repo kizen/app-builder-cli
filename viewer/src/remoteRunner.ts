@@ -6,8 +6,6 @@ import type {
 } from './components/ExecutionResultPanel.js';
 
 const SUPPORTED_RUNTIMES = ['python-3-12', 'python-3-13'] as const;
-// Matches the remote code-runner default (apps/code_runner/configs.py:
-// DEFAULT_RUNTIME = "python-3-13").
 const DEFAULT_RUNTIME = 'python-3-13';
 
 export interface RemoteExecuteParams {

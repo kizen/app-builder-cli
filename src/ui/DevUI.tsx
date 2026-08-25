@@ -396,8 +396,7 @@ export const DevUI: FC<DevUIProps> = ({
         ? ' (just now)'
         : ` (${String(elapsedSeconds)}s ago)`;
 
-  const buildErrorCount =
-    buildIssues?.filter((issue) => issue.severity === 'error').length ?? 0;
+  const buildErrorCount = buildIssues?.filter((issue) => issue.severity === 'error').length ?? 0;
 
   return (
     <Box flexDirection="column" paddingY={1} paddingX={2}>

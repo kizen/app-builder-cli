@@ -39,7 +39,10 @@ function isConnRefused(err: unknown): boolean {
   return e.code === 'ECONNREFUSED' || e.cause?.code === 'ECONNREFUSED';
 }
 
-/** The auth headers every wizard endpoint requires (see secretsCommon.ts). */
+/**
+ * The auth headers every wizard endpoint requires: x-api-key, x-user-id,
+ * x-business-id, and x-auth-environment.
+ */
 function authHeaders(credentials: Credentials): Record<string, string> {
   return {
     'Content-Type': 'application/json',
@@ -64,11 +67,11 @@ async function wizardFetch(wizardBase: string, path: string, init: RequestInit):
 }
 
 /**
- * Parses a wizard JSON response without throwing on a non-JSON body. The
- * deployed wizard sits behind a gateway/Lambda that can return HTML 502s,
- * plain-text 429s, or an auth-middleware 401 before the JSON handler runs —
- * calling res.json() on those would throw an opaque SyntaxError and hide the
- * real status. Returning {} lets callers fall back to a clear HTTP-status error.
+ * Parses a wizard JSON response without throwing on a non-JSON body. Upstream
+ * errors can arrive as HTML 502 pages, plain-text 429s, or an auth 401 raised
+ * before the JSON handler runs — calling res.json() on those would throw an
+ * opaque SyntaxError and hide the real status. Returning {} lets callers fall
+ * back to a clear HTTP-status error.
  */
 async function readJsonSafe(res: Response): Promise<Record<string, unknown>> {
   const text = await res.text();
