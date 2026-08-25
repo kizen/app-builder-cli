@@ -59,6 +59,16 @@ export function buildTree(files: FileContent[]): TreeNode {
   return root;
 }
 
+function sortTreeChildren(node: TreeNode): TreeNode[] {
+  return [...node.children.values()].sort((a, b) => {
+    if (a.isFile !== b.isFile) {
+      return a.isFile ? 1 : -1;
+    }
+
+    return a.name.localeCompare(b.name);
+  });
+}
+
 export function fileId(path: string): string {
   return 'file-' + path.replace(/[^a-zA-Z0-9]/g, '-');
 }
@@ -113,13 +123,7 @@ export function mdFence(content: string): string {
 }
 
 export function renderTextTree(node: TreeNode, prefix = ''): string {
-  const sorted = [...node.children.values()].sort((a, b) => {
-    if (a.isFile !== b.isFile) {
-      return a.isFile ? 1 : -1;
-    }
-
-    return a.name.localeCompare(b.name);
-  });
+  const sorted = sortTreeChildren(node);
 
   return sorted
     .map((child, i) => {
@@ -162,13 +166,7 @@ const IMAGE_MIME: Record<string, string> = {
 };
 
 function renderTree(node: TreeNode): string {
-  const sorted = [...node.children.values()].sort((a, b) => {
-    if (a.isFile !== b.isFile) {
-      return a.isFile ? 1 : -1;
-    }
-
-    return a.name.localeCompare(b.name);
-  });
+  const sorted = sortTreeChildren(node);
   const items = sorted.map((child) => {
     if (child.isFile) {
       return `<li class="tf"><a href="#${fileId(child.filePath)}" data-id="${fileId(child.filePath)}">${esc(child.name)}</a></li>`;
