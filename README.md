@@ -221,8 +221,8 @@ How the two navigation targets behave:
 
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for repository layout, build scripts, and the FontAwesome Pro token required to install dependencies.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for repository layout and build scripts.
 
 ## License
 
-GPL-3.0. See [LICENSE.md](./LICENSE.md).
+GPL-3.0-only. See [LICENSE.md](./LICENSE.md).

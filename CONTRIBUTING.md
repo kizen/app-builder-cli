@@ -2,27 +2,9 @@
 
 Thanks for your interest in `@kizenapps/cli`. This document covers what you need to build and test the CLI itself. For using the published CLI, see the [README](./README.md).
 
-## Before you start: FontAwesome Pro token
+## Prerequisites
 
-**`pnpm install` will fail without a FontAwesome Pro license.** The viewer uses FontAwesome Pro icon packages, and `.npmrc` points the `@fortawesome` scope at the private FontAwesome registry using an auth token read from the environment:
-
-```ini
-@fortawesome:registry=https://npm.fontawesome.com/
-//npm.fontawesome.com/:_authToken=${FONTAWESOME_TOKEN}
-```
-
-You must export a token from your own FontAwesome Pro account before installing:
-
-```sh
-export FONTAWESOME_TOKEN=<your-fontawesome-pro-token>
-pnpm install
-```
-
-Without it, the install fails on the `@fortawesome/pro-*` packages with a 401. There is currently no free-icon fallback build, so contributors without a FontAwesome Pro license cannot build the project locally. If that blocks you, please open an issue describing the change you wanted to make — we would rather review a patch we build ourselves than lose the contribution.
-
-The same limitation applies to CI: pull requests from forks run without repository secrets, so the install step of the checks workflow fails and their status checks show red regardless of the change's correctness. A maintainer will run the checks on your behalf during review.
-
-Node.js 20 or newer and pnpm 9 are required. CI runs on Node 24.
+Node.js 20 or newer and pnpm 9 are required. CI runs on Node 24. Every dependency resolves from the public npm registry, so `pnpm install` is all you need to get started.
 
 ## Repository layout
 
@@ -36,16 +18,18 @@ Because `viewer/` compiles under a separate tsconfig, `pnpm typecheck` runs `tsc
 
 ## Scripts
 
-| Command          | What it does                                                              |
-| ---------------- | ------------------------------------------------------------------------- |
-| `pnpm build`     | Builds the CLI (`tsup`) and then the viewer (`vite build`).               |
-| `pnpm watch`     | Runs both builds in watch mode, concurrently.                             |
-| `pnpm typecheck` | `tsc --noEmit` for the CLI and for `viewer/tsconfig.json`.                |
-| `pnpm lint`      | ESLint over `src`, `shared`, and `viewer/src`. `pnpm lint:fix` autofixes. |
-| `pnpm test`      | Runs the test suite (vitest).                                             |
-| `pnpm format`    | Prettier over the repo. `pnpm format:check` verifies without writing.     |
+| Command          | What it does                                                                             |
+| ---------------- | ---------------------------------------------------------------------------------------- |
+| `pnpm build`     | Builds the CLI (`tsup`), the viewer (`vite build`), then `dist/THIRD-PARTY-NOTICES.txt`. |
+| `pnpm watch`     | Runs both builds in watch mode, concurrently.                                            |
+| `pnpm typecheck` | `tsc --noEmit` for the CLI and for `viewer/tsconfig.json`.                               |
+| `pnpm lint`      | ESLint over `src`, `shared`, and `viewer/src`. `pnpm lint:fix` autofixes.                |
+| `pnpm test`      | Runs the test suite (vitest).                                                            |
+| `pnpm format`    | Prettier over the repo. `pnpm format:check` verifies without writing.                    |
 
-CI (`.github/workflows/checks.yml`) runs lint, typecheck, and test on every pull request. Run those three plus `pnpm format:check` locally before pushing.
+CI (`.github/workflows/checks.yml`) runs lint, typecheck, test, and build on every pull request. Run those four plus `pnpm format:check` locally before pushing.
+
+Adding a dependency has a licensing consequence worth knowing about before you reach for one. The viewer is a real bundle, so any package whose code lands in `dist/viewer` must have its license reproduced in `dist/THIRD-PARTY-NOTICES.txt`, which `pnpm build` derives from the actual module graph rather than from a hand-maintained list. A package that declares no license, declares `UNLICENSED`, or is a proprietary FontAwesome Pro package fails the build outright. Prefer dependencies under a permissive or GPL-compatible license, and run `pnpm build` after adding one.
 
 ## Trying your changes against a real plugin
 
@@ -57,4 +41,4 @@ Publishing is automated. Every push to `main` publishes a prerelease to the `nex
 
 ## License
 
-By contributing, you agree that your contributions are licensed under the GPL-3.0 license that covers this project. See [LICENSE.md](./LICENSE.md).
+By contributing, you agree that your contributions are licensed under the GPL-3.0-only license that covers this project. See [LICENSE.md](./LICENSE.md).

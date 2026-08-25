@@ -35,6 +35,18 @@ export default tseslint.config(
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
       '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@fortawesome/pro-*'],
+              message:
+                'FontAwesome Pro was removed for licensing reasons (KZN-17427); use free-solid or no icon.',
+            },
+          ],
+        },
+      ],
       '@typescript-eslint/switch-exhaustiveness-check': 'error',
       '@typescript-eslint/no-misused-promises': [
         'error',

@@ -2,13 +2,26 @@ import type { FloatingFrameConfig } from '@kizenapps/engine';
 import type { UnknownJSON } from '@kizenapps/engine';
 import { useFloatingFrame } from '@kizenapps/engine/react';
 import { getEnabledState } from '@kizenapps/engine/util';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useSidebarWidth } from '../SidebarContext.js';
-import { ICON_MAP } from '../lib/iconMap.js';
+import { isKnownIconName } from './IconNameBadge.js';
 import { floatingFramePositionKey } from '../lib/storageKeys.js';
 import { Tooltip } from './Tooltip.js';
+
+// Built once — constructing a Segmenter per render is needlessly expensive.
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+// The first user-perceived character. Neither `value[0]` nor `[...value][0]`
+// will do: the former splits surrogate pairs, and the latter splits grapheme
+// clusters such as emoji ZWJ sequences and combining marks.
+const firstGrapheme = (value: string): string | undefined => {
+  for (const { segment } of GRAPHEMES.segment(value)) {
+    return segment;
+  }
+
+  return undefined;
+};
 
 const FRAME_HEADER_SIZE = 36;
 const DEFAULT_POSITION_GAP = 20;
@@ -44,7 +57,16 @@ const CircleTrigger = ({
     return null;
   }
 
-  const faIcon = !CustomIcon && circleIcon ? ICON_MAP[circleIcon] : undefined;
+  // A data-image CustomIcon supersedes the configured name, so only speak to
+  // the name when the viewer is actually falling back to it. The other icon
+  // surfaces flag an unknown name in amber; a coloured circle has nowhere to
+  // put that, so the tooltip carries the signal instead.
+  const iconName = CustomIcon ? '' : circleIcon;
+  const title = !iconName
+    ? 'Open frame'
+    : isKnownIconName(iconName)
+      ? `Open frame — icon: ${iconName}`
+      : `Open frame — “${iconName}” is not a recognized icon name`;
 
   const dot =
     when && whenEnabled !== null && whenEnabled !== undefined ? (
@@ -63,14 +85,17 @@ const CircleTrigger = ({
       onPointerDown={(e) => {
         e.stopPropagation();
       }}
-      title="Open frame"
+      title={title}
     >
       {CustomIcon ? (
         <CustomIcon className="h-6 w-6 rounded-full object-cover" />
-      ) : faIcon ? (
-        <FontAwesomeIcon icon={faIcon} className="text-[16px] text-white" />
       ) : (
-        <span className="font-mono text-[11px] text-white">▲</span>
+        // A named icon is drawn by the Kizen app at runtime, so the viewer
+        // shows a neutral initial rather than a stand-in glyph. The configured
+        // name is in the button's tooltip.
+        <span className="font-mono text-[11px] uppercase text-white">
+          {firstGrapheme(iconName) ?? '▲'}
+        </span>
       )}
       {dot}
     </button>,

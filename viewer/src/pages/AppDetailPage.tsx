@@ -4,9 +4,7 @@ import type { FC } from 'react';
 import { bundleQueryOptions } from '../bundleQuery.js';
 import { Card } from '../components/Card.js';
 import type { DeployablePlugin } from '@kizenapps/packager';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
-import { VALID_ICONS } from '@shared/lib/validIcons.js';
+import { IconNameBadge } from '../components/IconNameBadge.js';
 import type { PluginBaseConfig } from '../types.js';
 import type { SetupAssistantConfig } from '@kizenapps/engine';
 import { resolveBlockDimensions } from '../lib/blockDimensions.js';
@@ -285,19 +283,12 @@ export const AppDetailPage: FC = () => {
                         style={{ backgroundColor: adornment.config.color }}
                       />
                     )}
-                    {adornment.config.icon &&
-                      (ICON_MAP[adornment.config.icon] ? (
-                        <FontAwesomeIcon
-                          icon={ICON_MAP[adornment.config.icon]}
-                          className="shrink-0 text-[12px] text-neutral-500"
-                        />
-                      ) : (
-                        <span
-                          className={`shrink-0 rounded px-1 font-mono text-[10px] ${VALID_ICONS.has(adornment.config.icon) || CUSTOM_ICON_NAMES.has(adornment.config.icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-                        >
-                          {adornment.config.icon}
-                        </span>
-                      ))}
+                    {adornment.config.icon && (
+                      <IconNameBadge
+                        name={adornment.config.icon}
+                        className="shrink-0 text-[10px]"
+                      />
+                    )}
                     <div className="min-w-0 flex-1 truncate text-neutral-900">
                       {adornment.config.tooltip || adornment.field_type}
                     </div>
@@ -417,19 +408,9 @@ export const AppDetailPage: FC = () => {
                         {item.api_name}
                       </div>
                     </div>
-                    {item.icon &&
-                      (ICON_MAP[item.icon] ? (
-                        <FontAwesomeIcon
-                          icon={ICON_MAP[item.icon]}
-                          className="shrink-0 text-[12px] text-neutral-400"
-                        />
-                      ) : (
-                        <span
-                          className={`shrink-0 rounded px-1 font-mono text-[10px] ${VALID_ICONS.has(item.icon) || CUSTOM_ICON_NAMES.has(item.icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-                        >
-                          {item.icon}
-                        </span>
-                      ))}
+                    {item.icon && (
+                      <IconNameBadge name={item.icon} className="shrink-0 text-[10px]" />
+                    )}
                   </div>
                 ))}
               </div>

@@ -1,5 +1,4 @@
 import { useState, type FC } from 'react';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { LoadingOverlay } from './LoadingOverlay.js';
 import { useRecordDetailCustomScript } from '@kizenapps/engine/react';
 import type { DataAdornment } from '@kizenapps/packager';
@@ -7,8 +6,7 @@ import type { UnknownJSON } from '@kizenapps/engine';
 import { useCredentials } from '../CredentialsContext.js';
 import { Typeahead } from './Typeahead.js';
 import { useEntitySelector } from '../hooks/useEntitySelector.js';
-import { VALID_ICONS } from '@shared/lib/validIcons.js';
-import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
+import { IconNameBadge } from './IconNameBadge.js';
 import { WhenBadge } from './WhenBadge.js';
 import { ScriptResultPill, toErrorMessage, type ScriptResult } from './ScriptResultPill.js';
 
@@ -79,19 +77,9 @@ const DataAdornmentItem: FC<DataAdornmentItemProps> = ({
             style={{ backgroundColor: adornment.config.color }}
           />
         )}
-        {adornment.config.icon &&
-          (ICON_MAP[adornment.config.icon] ? (
-            <FontAwesomeIcon
-              icon={ICON_MAP[adornment.config.icon]}
-              className="text-[12px] text-neutral-500"
-            />
-          ) : (
-            <span
-              className={`rounded px-1 font-mono text-[10px] ${VALID_ICONS.has(adornment.config.icon) || CUSTOM_ICON_NAMES.has(adornment.config.icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-            >
-              {adornment.config.icon}
-            </span>
-          ))}
+        {adornment.config.icon && (
+          <IconNameBadge name={adornment.config.icon} className="text-[10px]" />
+        )}
         {adornment.config.tooltip || adornment.field_type}
       </span>
       <span className="font-mono text-[10px] text-neutral-400">{adornment.field_type}</span>

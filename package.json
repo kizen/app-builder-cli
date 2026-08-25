@@ -2,7 +2,7 @@
   "name": "@kizenapps/cli",
   "version": "1.10.0",
   "description": "CLI tool for running Kizen plugin apps locally",
-  "license": "GPL-3.0",
+  "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kizen/app-builder-cli.git"
@@ -29,8 +29,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "pnpm run build:cli && pnpm run build:viewer",
+    "build": "pnpm run build:cli && pnpm run build:viewer && pnpm run build:notices",
     "build:cli": "tsup",
+    "build:notices": "node scripts/generate-third-party-notices.js",
     "watch": "concurrently -n cli,viewer -c cyan,magenta \"tsup --watch\" \"vite build --watch --config viewer/vite.config.ts\"",
     "build:viewer": "vite build --config viewer/vite.config.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p viewer/tsconfig.json",
@@ -75,8 +76,6 @@
   "devDependencies": {
     "@fortawesome/fontawesome-svg-core": "^7.2.0",
     "@fortawesome/free-solid-svg-icons": "^7.2.0",
-    "@fortawesome/pro-light-svg-icons": "^7.2.0",
-    "@fortawesome/pro-regular-svg-icons": "^7.2.0",
     "@fortawesome/react-fontawesome": "^3.3.0",
     "@fullcalendar/core": "^6.1.20",
     "@fullcalendar/daygrid": "^6.1.20",

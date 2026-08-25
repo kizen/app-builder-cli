@@ -15,12 +15,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (
-            id.includes('@fortawesome/pro-light-svg-icons') ||
-            id.includes('@fortawesome/pro-regular-svg-icons')
-          ) {
-            return 'fa-pro-icons';
-          }
           if (id.includes('@fortawesome')) {
             return 'fa-core';
           }

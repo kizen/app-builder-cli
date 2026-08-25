@@ -9,9 +9,7 @@ import {
   useImperativeHandle,
   type FC,
 } from 'react';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
-import { VALID_ICONS } from '@shared/lib/validIcons.js';
-import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
+import { IconNameBadge } from './IconNameBadge.js';
 import { PLUGIN_IFRAME_ALLOW } from '../lib/constants.js';
 import {
   getNavigationEvents,
@@ -392,19 +390,9 @@ export const RoutablePageBrowser = forwardRef<BrowserHandle, { pages: RoutablePa
                       : 'text-neutral-500 hover:bg-black/5'
                   }`}
                 >
-                  {page.toolbar_icon &&
-                    (ICON_MAP[page.toolbar_icon] ? (
-                      <FontAwesomeIcon
-                        icon={ICON_MAP[page.toolbar_icon]}
-                        className="mr-1 text-[10px] text-neutral-400"
-                      />
-                    ) : (
-                      <span
-                        className={`mr-1 rounded px-1 font-mono text-[9px] ${VALID_ICONS.has(page.toolbar_icon) || CUSTOM_ICON_NAMES.has(page.toolbar_icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-                      >
-                        {page.toolbar_icon}
-                      </span>
-                    ))}
+                  {page.toolbar_icon && (
+                    <IconNameBadge name={page.toolbar_icon} className="mr-1 text-[9px]" />
+                  )}
                   {page.name}
                 </button>
               ))}
