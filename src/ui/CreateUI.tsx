@@ -9,30 +9,17 @@ import {
   precheckTargetDir,
 } from '../lib/createPlugin.js';
 import type { PrecheckResult } from '../lib/createPlugin.js';
+import {
+  emptyValues,
+  FIELD_LABELS,
+  FIELDS,
+  inferApiName,
+  normalizeFieldValue,
+  REQUIRED_FIELDS,
+  validateField,
+} from '../lib/createForm.js';
+import type { FieldValues } from '../lib/createForm.js';
 import { AppHeader } from './AppHeader.js';
-
-const FIELDS = ['name', 'apiName', 'externalLink', 'description', 'developerBusinessId'] as const;
-
-type FieldName = (typeof FIELDS)[number];
-
-const FIELD_LABELS: Record<FieldName, string> = {
-  name: 'Name',
-  apiName: 'API name',
-  externalLink: 'External link',
-  description: 'Description',
-  developerBusinessId: 'Business ID',
-};
-
-const REQUIRED_FIELDS: readonly FieldName[] = ['name', 'apiName'];
-
-function inferApiName(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-}
-
-type FieldValues = Record<FieldName, string>;
 
 type Mode = 'in-place' | 'sub-dir';
 
@@ -52,16 +39,6 @@ interface CreateUIProps {
 }
 
 const Hint: FC<{ text: string }> = ({ text }) => <Text dimColor>{text}</Text>;
-
-function emptyValues(defaultBusinessId: string): FieldValues {
-  return {
-    name: '',
-    apiName: '',
-    externalLink: '',
-    description: '',
-    developerBusinessId: defaultBusinessId,
-  };
-}
 
 export const CreateUI: FC<CreateUIProps> = ({ parentDir, defaultBusinessId }) => {
   const app = useApp();
@@ -202,21 +179,15 @@ export const CreateUI: FC<CreateUIProps> = ({ parentDir, defaultBusinessId }) =>
       }
 
       if (key.return || key.tab || key.downArrow) {
-        const buffer = inputBuffer.trim();
-        const isRequired = REQUIRED_FIELDS.includes(fieldName);
+        const fieldError = validateField(fieldName, inputBuffer);
 
-        if (isRequired && !buffer) {
-          setPhase({
-            type: 'field-entry',
-            field,
-            values: current,
-            fieldError: `${FIELD_LABELS[fieldName]} is required`,
-          });
+        if (fieldError !== undefined) {
+          setPhase({ type: 'field-entry', field, values: current, fieldError });
 
           return;
         }
 
-        const valueToStore = fieldName === 'description' ? inputBuffer : buffer;
+        const valueToStore = normalizeFieldValue(fieldName, inputBuffer);
         const updated = { ...current, [fieldName]: valueToStore };
 
         setValues(updated);

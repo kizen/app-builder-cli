@@ -76,9 +76,8 @@ export const SecretsPage: FC = () => {
   // Encryption routing — defaults to 'prod' (almost every plugin ships to
   // production); the user can switch to 'dev' and we persist the choice per
   // project. The setting maps 1:1 to the dev/prod target. (KZN-16467)
-  const [encryptionTarget, setEncryptionTarget] = useState<EncryptionTargetSetting>(
-    DEFAULT_ENCRYPTION_TARGET,
-  );
+  const [encryptionTarget, setEncryptionTarget] =
+    useState<EncryptionTargetSetting>(DEFAULT_ENCRYPTION_TARGET);
   const [encryptionSettingLoaded, setEncryptionSettingLoaded] = useState(false);
 
   // Local (in-process) vs remote (plugin-wizard API) encryption. Persisted across

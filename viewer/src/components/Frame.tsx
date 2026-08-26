@@ -2,13 +2,22 @@ import type { FloatingFrameConfig } from '@kizenapps/engine';
 import type { UnknownJSON } from '@kizenapps/engine';
 import { useFloatingFrame } from '@kizenapps/engine/react';
 import { getEnabledState } from '@kizenapps/engine/util';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useSidebarWidth } from '../SidebarContext.js';
-import { ICON_MAP } from '../lib/iconMap.js';
+import { isKnownIconName } from './IconNameBadge.js';
 import { floatingFramePositionKey } from '../lib/storageKeys.js';
 import { Tooltip } from './Tooltip.js';
+
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
+const firstGrapheme = (value: string): string | undefined => {
+  for (const { segment } of GRAPHEMES.segment(value)) {
+    return segment;
+  }
+
+  return undefined;
+};
 
 const FRAME_HEADER_SIZE = 36;
 const DEFAULT_POSITION_GAP = 20;
@@ -26,7 +35,6 @@ interface CircleTriggerProps {
   whenEnabled?: boolean | null;
 }
 
-// Renders into the anchor div managed by SandboxPage so each trigger stacks independently
 const CircleTrigger = ({
   frameId,
   side,
@@ -44,7 +52,12 @@ const CircleTrigger = ({
     return null;
   }
 
-  const faIcon = !CustomIcon && circleIcon ? ICON_MAP[circleIcon] : undefined;
+  const iconName = CustomIcon ? '' : circleIcon;
+  const title = !iconName
+    ? 'Open frame'
+    : isKnownIconName(iconName)
+      ? `Open frame — icon: ${iconName}`
+      : `Open frame — “${iconName}” is not a recognized icon name`;
 
   const dot =
     when && whenEnabled !== null && whenEnabled !== undefined ? (
@@ -63,14 +76,14 @@ const CircleTrigger = ({
       onPointerDown={(e) => {
         e.stopPropagation();
       }}
-      title="Open frame"
+      title={title}
     >
       {CustomIcon ? (
         <CustomIcon className="h-6 w-6 rounded-full object-cover" />
-      ) : faIcon ? (
-        <FontAwesomeIcon icon={faIcon} className="text-[16px] text-white" />
       ) : (
-        <span className="font-mono text-[11px] text-white">▲</span>
+        <span className="font-mono text-[11px] uppercase text-white">
+          {firstGrapheme(iconName) ?? '▲'}
+        </span>
       )}
       {dot}
     </button>,

@@ -2,7 +2,22 @@
   "name": "@kizenapps/cli",
   "version": "1.10.0",
   "description": "CLI tool for running Kizen plugin apps locally",
-  "license": "GPL-3.0",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kizen/app-builder-cli.git"
+  },
+  "homepage": "https://github.com/kizen/app-builder-cli#readme",
+  "bugs": {
+    "url": "https://github.com/kizen/app-builder-cli/issues"
+  },
+  "keywords": [
+    "kizen",
+    "plugin",
+    "cli",
+    "appbuilder",
+    "plugin-apps"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -14,17 +29,21 @@
     "dist"
   ],
   "scripts": {
-    "build": "pnpm run build:cli && pnpm run build:viewer",
+    "build": "pnpm run build:cli && pnpm run build:viewer && pnpm run build:notices",
     "build:cli": "tsup",
+    "build:notices": "node scripts/generate-third-party-notices.js",
     "watch": "concurrently -n cli,viewer -c cyan,magenta \"tsup --watch\" \"vite build --watch --config viewer/vite.config.ts\"",
     "build:viewer": "vite build --config viewer/vite.config.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p viewer/tsconfig.json",
-    "lint": "eslint src viewer/src",
-    "lint:fix": "eslint src viewer/src --fix",
+    "lint": "eslint src shared viewer/src",
+    "lint:fix": "eslint src shared viewer/src --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "start": "appbuilder",
-    "prepublishOnly": "pnpm run typecheck && pnpm run lint && pnpm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build",
     "version:prerelease": "node scripts/version-prerelease.js",
     "version:check": "node scripts/version-release.js"
   },
@@ -57,8 +76,6 @@
   "devDependencies": {
     "@fortawesome/fontawesome-svg-core": "^7.2.0",
     "@fortawesome/free-solid-svg-icons": "^7.2.0",
-    "@fortawesome/pro-light-svg-icons": "^7.2.0",
-    "@fortawesome/pro-regular-svg-icons": "^7.2.0",
     "@fortawesome/react-fontawesome": "^3.3.0",
     "@fullcalendar/core": "^6.1.20",
     "@fullcalendar/daygrid": "^6.1.20",
@@ -74,6 +91,7 @@
     "@types/react-dom": "^19.0.0",
     "@types/ws": "^8.5.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "@vitest/coverage-v8": "^4.1.11",
     "concurrently": "^9.2.1",
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^7.0.1",
@@ -83,6 +101,7 @@
     "tsup": "^8.0.0",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.8"
+    "vite": "^8.0.8",
+    "vitest": "^4.1.11"
   }
 }

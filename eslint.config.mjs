@@ -35,6 +35,17 @@ export default tseslint.config(
         { prefer: 'type-imports', fixStyle: 'inline-type-imports' },
       ],
       '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@fortawesome/pro-*'],
+              message: 'FontAwesome Pro should not be distributed in this package.',
+            },
+          ],
+        },
+      ],
       '@typescript-eslint/switch-exhaustiveness-check': 'error',
       '@typescript-eslint/no-misused-promises': [
         'error',

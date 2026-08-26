@@ -1,0 +1,22 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`help output > matches the published help text 1`] = `
+"Usage: appbuilder [options] [command]
+
+Kizen plugin app builder
+
+Options:
+  -V, --version      output the version number
+  -h, --help         display help for command
+
+Commands:
+  create             Scaffold a new Kizen plugin project
+  build              Bundle the plugin app into .kizenapp directory
+  dev [options]      Start the plugin viewer dev server
+  encrypt [options]  Encrypt a secret for a plugin against its encryption keys
+  report [options]   Generate a self-contained HTML report of the plugin
+  icons              List all valid icon names accepted by toolbar items, pages,
+                     and adornments
+  help [command]     display help for command
+"
+`;

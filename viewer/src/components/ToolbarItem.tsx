@@ -2,10 +2,8 @@ import { useGenericAppCustomScript } from '@kizenapps/engine/react';
 import type { ToolbarItemConfig, UnknownJSON } from '@kizenapps/engine';
 import type { GenericPluginConfig } from '@kizenapps/engine';
 import { useState, type FC } from 'react';
-import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import { LoadingOverlay } from './LoadingOverlay.js';
-import { VALID_ICONS } from '@shared/lib/validIcons.js';
-import { ICON_MAP, CUSTOM_ICON_NAMES } from '../lib/iconMap.js';
+import { IconNameBadge } from './IconNameBadge.js';
 import { WhenBadge } from './WhenBadge.js';
 import { ScriptResultPill, toErrorMessage, type ScriptResult } from './ScriptResultPill.js';
 
@@ -56,16 +54,7 @@ export const ToolbarItem: FC<{
             style={{ backgroundColor: item.color }}
           />
         )}
-        {item.icon &&
-          (ICON_MAP[item.icon] ? (
-            <FontAwesomeIcon icon={ICON_MAP[item.icon]} className="text-[12px] text-neutral-500" />
-          ) : (
-            <span
-              className={`rounded px-1 font-mono text-[10px] ${VALID_ICONS.has(item.icon) || CUSTOM_ICON_NAMES.has(item.icon) ? 'bg-neutral-100 text-neutral-400' : 'bg-amber-100 text-amber-600'}`}
-            >
-              {item.icon}
-            </span>
-          ))}
+        {item.icon && <IconNameBadge name={item.icon} className="text-[10px]" />}
         <span>{item.label}</span>
       </span>
       {when && whenState && <WhenBadge when={when} whenState={whenState} />}

@@ -3,6 +3,7 @@ import { writeFile, rm, mkdtemp, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import requirementsTxt from './python-requirements.txt';
+import { parseRequirementsFile, resolvePythonBinary } from '../lib/pythonRuntime.js';
 import { type ExecutionResult, type HttpRequests } from '../../shared/lib/execution.js';
 export type {
   ExecutionResult,
@@ -193,30 +194,18 @@ export interface ExecuteStepParams {
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
 
-// The remote code-runner only ships these Lambda images
-// (apps/code_runner/Dockerfile.python-3-12, Dockerfile.python-3-13). Reject any
-// other runtime locally so a bad or unsupported "runtime" in a step's
-// config.json fails fast here instead of silently running on whatever
-// interpreter happens to be around — and behaving differently on deploy.
+// The production Kizen code-runner service only ships python-3-12 and
+// python-3-13 runtime images. Reject any other runtime locally so a bad or
+// unsupported "runtime" in a step's config.json fails fast
 const SUPPORTED_RUNTIMES = ['python-3-12', 'python-3-13'] as const;
 
 function isSupportedRuntime(runtime: string): boolean {
   return (SUPPORTED_RUNTIMES as readonly string[]).includes(runtime);
 }
 
-// Parse a pip requirements file: strip blank lines, full-line comments, and
-// inline comments (e.g. `requests  # HTTP library`) so that every element is
-// a clean specifier that pip accepts as a positional argument.
-function parseRequirementsFile(content: string): string[] {
-  return content
-    .split('\n')
-    .map((line) => line.trim().replace(/\s+#.*$/, ''))
-    .filter((line) => line.length > 0 && !line.startsWith('#'));
-}
-
 // ./python-requirements.txt is the single source of truth for packages.
-// Keep it in sync with the remote code-runner:
-//   webapp/apps/code_runner/runtimes/python/requirements.txt
+// Keep it in sync with the Python dependency set installed by the production
+// Kizen code-runner service, so local runs match deployed ones.
 const VENV_PACKAGES = parseRequirementsFile(requirementsTxt);
 
 if (VENV_PACKAGES.length === 0) {
@@ -237,21 +226,6 @@ function meetsMinimum([major, minor]: [number, number]): boolean {
 
 function formatVersion(version: readonly [number, number]): string {
   return `${String(version[0])}.${String(version[1])}`;
-}
-
-function resolvePythonBinary(runtime: string): string {
-  // Deployed plugin steps carry the runtime in hyphen form ("python-3-13");
-  // callers without a runtime fall back to dot form ("python-3.13"). Accept
-  // both and map to the interpreter name, e.g. "python3.13".
-  const match = /^python-(\d+)[.-](\d+)$/.exec(runtime);
-  const major = match?.[1];
-  const minor = match?.[2];
-
-  if (major !== undefined && minor !== undefined) {
-    return `python${major}.${minor}`;
-  }
-
-  return 'python3';
 }
 
 // Probe an interpreter for its (major, minor) version. Resolves null if the
