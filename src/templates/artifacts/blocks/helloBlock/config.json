@@ -1,0 +1,5 @@
+{
+  "name": "Hello Block",
+  "api_name": "hello_block",
+  "types": ["dashboards"]
+}

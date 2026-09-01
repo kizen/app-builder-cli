@@ -1,3 +1,6 @@
+import { ARTIFACT_TYPES } from './createArtifacts.js';
+import type { ArtifactType } from './createArtifacts.js';
+
 export const FIELDS = [
   'name',
   'apiName',
@@ -16,7 +19,7 @@ export const FIELD_LABELS: Record<FieldName, string> = {
   developerBusinessId: 'Business ID',
 };
 
-export const REQUIRED_FIELDS: readonly FieldName[] = ['name', 'apiName'];
+export const REQUIRED_FIELDS: readonly FieldName[] = ['name', 'apiName', 'description'];
 
 export type FieldValues = Record<FieldName, string>;
 
@@ -47,4 +50,23 @@ export function validateField(fieldName: FieldName, inputBuffer: string): string
 
 export function normalizeFieldValue(fieldName: FieldName, inputBuffer: string): string {
   return fieldName === 'description' ? inputBuffer : inputBuffer.trim();
+}
+
+/**
+ * Toggles one artifact type in the picker's selection, preserving
+ * ARTIFACT_TYPES order so the rendered list never reshuffles under the cursor.
+ */
+export function toggleArtifactSelection(
+  selected: readonly ArtifactType[],
+  type: ArtifactType,
+): ArtifactType[] {
+  const next = new Set(selected);
+
+  if (next.has(type)) {
+    next.delete(type);
+  } else {
+    next.add(type);
+  }
+
+  return ARTIFACT_TYPES.filter((candidate) => next.has(candidate));
 }

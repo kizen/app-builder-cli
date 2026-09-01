@@ -1,0 +1,41 @@
+/* The packager ships this file as the page's `css`; the host injects it when
+   the page renders. */
+
+.hello-page {
+  padding: 24px;
+  font-family: system-ui, sans-serif;
+}
+
+.hello-page__title {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.hello-page__body {
+  margin: 0 0 16px;
+  color: #555;
+}
+
+.hello-page__loading {
+  margin: 0;
+  color: #94a3b8;
+}
+
+.hello-page__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hello-page__button {
+  padding: 6px 12px;
+  font: inherit;
+  color: #0f172a;
+  background: #e2e8f0;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.hello-page__button:hover {
+  background: #cbd5e1;
+}

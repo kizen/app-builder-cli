@@ -10,7 +10,7 @@ Options:
   -h, --help         display help for command
 
 Commands:
-  create             Scaffold a new Kizen plugin project
+  create [options]   Scaffold a new Kizen plugin project
   build              Bundle the plugin app into .kizenapp directory
   dev [options]      Start the plugin viewer dev server
   encrypt [options]  Encrypt a secret for a plugin against its encryption keys

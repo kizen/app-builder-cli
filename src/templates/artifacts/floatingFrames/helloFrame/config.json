@@ -1,0 +1,9 @@
+{
+  "name": "Hello Frame",
+  "api_name": "hello_frame",
+  "title": "Hello Frame",
+  "default_position": "bottom-right",
+  "minimized_style": "circle",
+  "height": 320,
+  "width": 280
+}

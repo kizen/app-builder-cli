@@ -28,6 +28,7 @@ function validInput(overrides: Partial<CreatePluginInput> = {}): CreatePluginInp
     externalLink: 'https://example.com/my-plugin',
     description: 'Does a useful thing.',
     developerBusinessId: '11111111-2222-3333-4444-555555555555',
+    developerEnvironment: 'go',
     ...overrides,
   };
 }
@@ -47,7 +48,7 @@ describe('buildManifest', () => {
       release_environments: ['prod'],
       config_template: {},
       base_config: {},
-      developer_business_id: '11111111-2222-3333-4444-555555555555',
+      developer_business_id: { go: '11111111-2222-3333-4444-555555555555' },
     });
   });
 
@@ -62,7 +63,77 @@ describe('buildManifest', () => {
 
     expect(manifest.api_name).toBe('other_api_name');
     expect(manifest.external_link).toBe('https://example.com/other');
-    expect(manifest.developer_business_id).toBe('biz-9');
+    expect(manifest.developer_business_id).toEqual({ go: 'biz-9' });
+  });
+
+  // An absent `developer_business_id` validates fine, but an empty string is a
+  // hard `manifest/developer-business-id` error in @kizenapps/packager, so a
+  // scaffold with no configured id must omit the key rather than blank it.
+  it('omits developer_business_id entirely when no id is configured', () => {
+    expect(buildManifest(validInput({ developerBusinessId: '' }))).not.toHaveProperty(
+      'developer_business_id',
+    );
+  });
+
+  it('omits developer_business_id when the configured id is only whitespace', () => {
+    expect(buildManifest(validInput({ developerBusinessId: '   ' }))).not.toHaveProperty(
+      'developer_business_id',
+    );
+  });
+
+  // The object form is keyed by concrete environment. A bare string alongside
+  // `release_environments: ['prod']` (which resolves to go + fmo) would trip the
+  // `manifest/developer-business-id-environments` warning.
+  it.each(['go', 'fmo', 'staging', 'integration', 'test1'] as const)(
+    'keys the business id by the %s environment',
+    (environment) => {
+      const manifest = buildManifest(
+        validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
+      );
+
+      expect(manifest.developer_business_id).toEqual({ [environment]: 'biz-1' });
+    },
+  );
+
+  it('never emits a bare-string developer_business_id', () => {
+    const manifest = buildManifest(validInput());
+
+    expect(typeof manifest.developer_business_id).not.toBe('string');
+  });
+
+  // A preview deploy resolves `prod` to go + fmo and skips any environment the
+  // developer_business_id map doesn't cover. An id issued for `integration`
+  // paired with ['prod'] therefore publishes NOWHERE, so the manifest is
+  // retargeted at the environment the id actually belongs to.
+  it.each(['integration', 'staging', 'test1'] as const)(
+    'targets %s when the business id was issued there',
+    (environment) => {
+      const manifest = buildManifest(
+        validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
+      );
+
+      expect(manifest.release_environments).toEqual([environment]);
+      expect(manifest.developer_business_id).toEqual({ [environment]: 'biz-1' });
+    },
+  );
+
+  // 'prod' already resolves to go + fmo, so those ids need no retargeting and
+  // the documented default is preserved.
+  it.each(['go', 'fmo'] as const)('keeps the prod default for a %s business id', (environment) => {
+    const manifest = buildManifest(
+      validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
+    );
+
+    expect(manifest.release_environments).toEqual(['prod']);
+  });
+
+  it('keeps the prod default when there is no business id to target', () => {
+    const manifest = buildManifest(
+      validInput({ developerBusinessId: '', developerEnvironment: 'integration' }),
+    );
+
+    expect(manifest.release_environments).toEqual(['prod']);
+    expect(manifest).not.toHaveProperty('developer_business_id');
   });
 
   it('never leaks targetDir into the manifest', () => {
@@ -180,6 +251,33 @@ describe('createPlugin', () => {
     const gitignore = await readFile(join(input.targetDir, '.gitignore'), 'utf-8');
 
     expect(gitignore.split('\n').map((line) => line.trim())).toContain('.kizenapp/');
+  });
+
+  it('scaffolds the Copilot instruction files', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    for (const file of [
+      '.github/copilot-instructions.md',
+      '.github/instructions/security.instructions.md',
+      '.github/instructions/version-discipline.instructions.md',
+    ]) {
+      const content = await readFile(join(input.targetDir, ...file.split('/')), 'utf-8');
+
+      expect(content.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('scaffolds a thumbnail inside the entry directory, as a real PNG', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    const bytes = await readFile(join(input.targetDir, 'src', 'thumbnail.png'));
+
+    // PNG magic number: a truncated or text-encoded file would publish broken.
+    expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 
   it('writes the manifest with a trailing newline', async () => {
