@@ -7,6 +7,7 @@ import { createPlugin, precheckTargetDir } from '../lib/createPlugin.js';
 import { runHeadlessCreate } from '../lib/createHeadless.js';
 import type { CreateOptions } from '../lib/createHeadless.js';
 import { ARTIFACT_TYPES } from '../lib/createArtifacts.js';
+import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
 
 export function createCommand(program: Command): void {
   program
@@ -17,6 +18,10 @@ export function createCommand(program: Command): void {
     .option('-d, --description <text>', 'plugin description')
     .option('-l, --external-link <url>', 'external link shown on the plugin listing')
     .option('-b, --business-id <id>', 'developer business id (defaults to saved credentials)')
+    .option(
+      '-e, --environment <env>',
+      `environment the business id belongs to: ${ENVIRONMENTS.join(', ')} (defaults to saved credentials)`,
+    )
     .option(
       '--artifacts <list>',
       `comma-separated artifact types, or "all" / "none" (default: all). Types: ${ARTIFACT_TYPES.join(', ')}`,

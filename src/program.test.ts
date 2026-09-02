@@ -29,6 +29,7 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-d, --description <text>',
     '-l, --external-link <url>',
     '-b, --business-id <id>',
+    '-e, --environment <env>',
     '--artifacts <list>',
   ],
   build: [],

@@ -31,8 +31,8 @@ export interface CreatePluginInput {
   developerEnvironment: Environment;
   /**
    * Artifact types to scaffold under `src/`. An empty list (the default)
-   * reproduces the old behaviour of an empty `src/`, which builds to a plugin
-   * with no artifacts at all.
+   * writes no artifact directories, so `src/` holds only the generated
+   * thumbnail and the build produces a plugin with no artifacts.
    */
   artifacts?: readonly ArtifactType[];
 }

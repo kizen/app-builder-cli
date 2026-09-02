@@ -83,6 +83,46 @@ describe('resolveHeadlessInput', () => {
     expect(input.developerEnvironment).toBe('go');
   });
 
+  it('uses --environment to key the business id', () => {
+    const input = resolveHeadlessInput(
+      { name: 'My Plugin', businessId: 'biz-2', environment: 'staging' },
+      defaults,
+      '/tmp/x',
+    );
+
+    expect(input.developerBusinessId).toBe('biz-2');
+    expect(input.developerEnvironment).toBe('staging');
+  });
+
+  it('rejects an unknown --environment by name', () => {
+    expect(() =>
+      resolveHeadlessInput({ name: 'My Plugin', environment: 'prod' }, defaults, '/tmp/x'),
+    ).toThrow(/Unknown environment "prod"/);
+  });
+
+  // With saved credentials, an overriding id is assumed to belong to the same
+  // environment; without them there is nothing to borrow, and guessing `go`
+  // would key the id to an environment that never issued it.
+  it('borrows the saved environment for an overriding --business-id', () => {
+    const input = resolveHeadlessInput(
+      { name: 'My Plugin', businessId: 'biz-2' },
+      defaults,
+      '/tmp/x',
+    );
+
+    expect(input.developerEnvironment).toBe('go');
+  });
+
+  it('requires --environment with --business-id when nothing is saved', () => {
+    expect(() =>
+      resolveHeadlessInput(
+        { name: 'My Plugin', businessId: 'biz-2' },
+        { businessId: '', environment: 'go' },
+        '/tmp/x',
+      ),
+    ).toThrow(/--environment is required/);
+  });
+
   it('scaffolds every artifact type by default', () => {
     expect(resolveHeadlessInput({ name: 'My Plugin' }, defaults, '/tmp/x').artifacts).toEqual([
       ...ARTIFACT_TYPES,

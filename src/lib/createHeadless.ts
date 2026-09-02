@@ -7,8 +7,9 @@
  */
 import { ARTIFACT_TYPES } from './createArtifacts.js';
 import type { ArtifactType } from './createArtifacts.js';
-import { inferApiName } from './createForm.js';
+import { API_NAME_HINT, API_NAME_PATTERN, inferApiName } from './createForm.js';
 import type { CreatePluginInput, PrecheckResult } from './createPlugin.js';
+import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
 import type { Environment } from '../../shared/lib/credentials.js';
 
 /**
@@ -18,18 +19,13 @@ import type { Environment } from '../../shared/lib/credentials.js';
  */
 export const PLACEHOLDER_DESCRIPTION = 'A hello-world Kizen plugin.';
 
-/** Same rule the packager enforces as `manifest/api-name-format`. */
-const API_NAME_PATTERN = /^[a-z_][a-z0-9_]+$/;
-
-const API_NAME_HINT =
-  'must start with a letter or underscore and contain only lowercase letters, numbers, or underscores (minimum 2 characters)';
-
 export interface CreateOptions {
   name?: string;
   apiName?: string;
   description?: string;
   externalLink?: string;
   businessId?: string;
+  environment?: string;
   artifacts?: string;
 }
 
@@ -91,6 +87,9 @@ export function resolveHeadlessInput(
 
   const description = options.description?.trim();
 
+  const developerBusinessId = options.businessId?.trim() ?? defaults.businessId;
+  const developerEnvironment = resolveEnvironment(options, defaults);
+
   return {
     targetDir,
     name,
@@ -98,10 +97,43 @@ export function resolveHeadlessInput(
     externalLink: options.externalLink?.trim() ?? '',
     description:
       description === undefined || description === '' ? PLACEHOLDER_DESCRIPTION : description,
-    developerBusinessId: options.businessId?.trim() ?? defaults.businessId,
-    developerEnvironment: defaults.environment,
+    developerBusinessId,
+    developerEnvironment,
     artifacts: parseArtifactSelection(options.artifacts),
   };
+}
+
+function isEnvironment(value: string): value is Environment {
+  return (ENVIRONMENTS as readonly string[]).includes(value);
+}
+
+/**
+ * A business id is only valid in the environment that issued it, and the
+ * manifest keys the id by that environment. `--environment` sets it directly.
+ * Without the flag we borrow the saved credentials' environment, which is only
+ * a safe guess when the id came from those same credentials, so an explicit
+ * `--business-id` with nothing saved has to say where it belongs.
+ */
+function resolveEnvironment(options: CreateOptions, defaults: HeadlessDefaults): Environment {
+  const requested = options.environment?.trim();
+
+  if (requested !== undefined && requested !== '') {
+    if (!isEnvironment(requested)) {
+      throw new Error(
+        `Unknown environment "${requested}". Valid environments: ${ENVIRONMENTS.join(', ')}.`,
+      );
+    }
+
+    return requested;
+  }
+
+  if (options.businessId !== undefined && defaults.businessId === '') {
+    throw new Error(
+      '--environment is required alongside --business-id when no credentials are saved, so the id is keyed to the environment that issued it.',
+    );
+  }
+
+  return defaults.environment;
 }
 
 export interface HeadlessDeps {

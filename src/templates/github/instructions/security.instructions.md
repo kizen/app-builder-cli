@@ -1,5 +1,5 @@
 ---
-applyTo: "src/**/*.js"
+applyTo: "src/**/*.js,kizen.json"
 ---
 
 # Security review rules for plugin scripts

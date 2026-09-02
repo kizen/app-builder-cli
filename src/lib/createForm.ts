@@ -23,6 +23,12 @@ export const REQUIRED_FIELDS: readonly FieldName[] = ['name', 'apiName', 'descri
 
 export type FieldValues = Record<FieldName, string>;
 
+/** Same rule the packager enforces as `manifest/api-name-format`. */
+export const API_NAME_PATTERN = /^[a-z_][a-z0-9_]+$/;
+
+export const API_NAME_HINT =
+  'must start with a letter or underscore and contain only lowercase letters, numbers, or underscores (minimum 2 characters)';
+
 export function inferApiName(name: string): string {
   return name
     .toLowerCase()
@@ -41,8 +47,16 @@ export function emptyValues(defaultBusinessId: string): FieldValues {
 }
 
 export function validateField(fieldName: FieldName, inputBuffer: string): string | undefined {
-  if (REQUIRED_FIELDS.includes(fieldName) && !inputBuffer.trim()) {
+  const value = inputBuffer.trim();
+
+  if (REQUIRED_FIELDS.includes(fieldName) && !value) {
     return `${FIELD_LABELS[fieldName]} is required`;
+  }
+
+  // Without this the prompt accepts any non-blank name and the scaffold fails
+  // its first build on `manifest/api-name-format`.
+  if (fieldName === 'apiName' && !API_NAME_PATTERN.test(value)) {
+    return `${FIELD_LABELS[fieldName]} ${API_NAME_HINT}`;
   }
 
   return undefined;

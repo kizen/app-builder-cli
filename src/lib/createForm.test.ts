@@ -80,6 +80,22 @@ describe('validateField', () => {
   });
 });
 
+describe('validateField api_name format', () => {
+  // The packager rejects these as manifest/api-name-format; catching them in
+  // the prompt is what keeps the interactive scaffold buildable.
+  it.each(['Bad-Name', 'x', '1abc', 'has space', 'UPPER'])('rejects %j', (value) => {
+    expect(validateField('apiName', value)).toMatch(/API name must start with/);
+  });
+
+  it.each(['my_plugin', '_private', 'ab', 'a1'])('accepts %j', (value) => {
+    expect(validateField('apiName', value)).toBeUndefined();
+  });
+
+  it('still reports the required-field error first when blank', () => {
+    expect(validateField('apiName', '   ')).toBe('API name is required');
+  });
+});
+
 describe('normalizeFieldValue', () => {
   it('trims every field except description', () => {
     for (const field of FIELDS) {

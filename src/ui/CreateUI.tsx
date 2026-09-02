@@ -503,7 +503,7 @@ export const CreateUI: FC<CreateUIProps> = ({
         <Box flexDirection="column" gap={0}>
           <Text bold>Artifacts</Text>
           {phase.artifacts.length === 0 ? (
-            <Text dimColor>{'  '}none — src/ will be empty</Text>
+            <Text dimColor>{'  '}none (src/ will hold only thumbnail.png)</Text>
           ) : (
             phase.artifacts.map((type) => (
               <Text key={type} dimColor>
