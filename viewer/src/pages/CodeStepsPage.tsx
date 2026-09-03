@@ -14,6 +14,7 @@ import type { DeployablePlugin } from '@kizenapps/packager';
 import { usePluginConfig } from '../hooks/usePluginConfig.js';
 import { WhenBadge } from '../components/WhenBadge.js';
 import type { PluginBaseConfig } from '../types.js';
+import { buildStepInputs } from '@shared/lib/execution.js';
 
 export const CodeStepsPage: FC = () => {
   const { apiName, stepApiName } = useParams({ strict: false });
@@ -117,8 +118,9 @@ export const CodeStepsPage: FC = () => {
     setResult(null);
 
     try {
-      const definedInputs = Object.fromEntries(
-        selectedStep.inputs.map((i) => [i.name, inputValues[i.name] ?? '']),
+      const definedInputs = buildStepInputs(
+        selectedStep.inputs.map((i) => i.name),
+        inputValues,
       );
 
       let data: ExecutionResult;

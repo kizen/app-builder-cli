@@ -22,6 +22,7 @@ import { resolveWizardBase } from '../lib/wizardUrl.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
 import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
+import { normalizeStepInputs } from '../../shared/lib/execution.js';
 import {
   CRYPTO_ALG,
   CRYPTO_VERSION,
@@ -416,7 +417,7 @@ export function createRequestHandler(
           const body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}') as {
             script?: string;
             scriptRuntime?: string;
-            inputs?: Record<string, string>;
+            inputs?: Record<string, unknown>;
             secrets?: Record<string, string>;
             timeout?: number;
           };
@@ -435,7 +436,7 @@ export function createRequestHandler(
             // ("python-3-13"). Only used when a caller omits a runtime; real
             // plugin steps send their own "python-3-NN" value.
             scriptRuntime: body.scriptRuntime ?? 'python-3-13',
-            inputs: body.inputs ?? {},
+            inputs: normalizeStepInputs(body.inputs),
             secrets: body.secrets ?? {},
             onInstallProgress: (event) => {
               if (event.kind === 'start') {

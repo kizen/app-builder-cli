@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import requirementsTxt from './python-requirements.txt';
 import { parseRequirementsFile, resolvePythonBinary } from '../lib/pythonRuntime.js';
-import { type ExecutionResult, type HttpRequests } from '../../shared/lib/execution.js';
+import {
+  type ExecutionResult,
+  type HttpRequests,
+  type StepInputValue,
+} from '../../shared/lib/execution.js';
 export type {
   ExecutionResult,
   HttpRequests,
@@ -186,7 +190,7 @@ export type VenvInstallListener = (event: VenvInstallEvent) => void;
 export interface ExecuteStepParams {
   script: string;
   scriptRuntime: string;
-  inputs: Record<string, string>;
+  inputs: Record<string, StepInputValue>;
   secrets: Record<string, string>;
   timeout?: number;
   onInstallProgress?: VenvInstallListener;

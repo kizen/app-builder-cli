@@ -1,4 +1,5 @@
 import type { useApi } from './api.js';
+import { type StepInputValue, toStepInputValue } from '@shared/lib/execution.js';
 import type {
   ExecutionResult,
   HttpRequestEntry,
@@ -12,7 +13,7 @@ const DEFAULT_RUNTIME = 'python-3-13';
 export interface RemoteExecuteParams {
   script: string;
   scriptRuntime: string;
-  inputs: Record<string, string>;
+  inputs: Record<string, StepInputValue>;
   inputTypes: Record<string, string>;
   outputTypes: Record<string, string>;
   secretNames: string[];
@@ -76,7 +77,7 @@ function isSupportedRuntime(runtime: string): boolean {
 }
 
 function encodeInputs(
-  inputs: Record<string, string>,
+  inputs: Record<string, StepInputValue>,
   inputTypes: Record<string, string>,
 ): Record<string, KizenEncodedValue> | null {
   const keys = Object.keys(inputs);
@@ -90,7 +91,7 @@ function encodeInputs(
   for (const key of keys) {
     encoded[key] = {
       t: toKizenType(inputTypes[key] ?? 'string'),
-      v: inputs[key],
+      v: toStepInputValue(inputs[key]),
     };
   }
 
