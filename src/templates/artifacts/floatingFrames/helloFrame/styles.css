@@ -1,7 +1,3 @@
-/* The packager ships this file as the frame's `css`; the host injects it when
-   the frame renders. Keep class names specific to this artifact so they can't
-   collide with another artifact's. */
-
 .hello-frame {
   padding: 16px;
   font-family: system-ui, sans-serif;

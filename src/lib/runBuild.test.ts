@@ -166,12 +166,6 @@ describe('runBuild', () => {
       });
     });
 
-    /**
-     * runBuild only throws on `severity === 'error'`, and BuildUI renders issues
-     * solely from that thrown error, so packager warnings never reach the
-     * developer. Assert on the issues array directly: a scaffold that merely
-     * avoids errors isn't good enough for KZN-17594, which wants a clean shell.
-     */
     it('scaffolds a plugin with no validation errors and no warnings', async () => {
       await bootstrapPlugin();
 
@@ -196,11 +190,6 @@ describe('runBuild', () => {
       expect(issues).toEqual([]);
     });
 
-    /**
-     * The whole point of KZN-17594: a scaffold carrying one of every artifact
-     * type must still validate and build cleanly, with no errors and no
-     * warnings.
-     */
     it('builds a full artifact scaffold with no errors and no warnings', async () => {
       await createPlugin({
         targetDir: pluginDir,
@@ -220,16 +209,6 @@ describe('runBuild', () => {
       await expect(runBuild(pluginDir, outputDir)).resolves.toBeDefined();
     });
 
-    /**
-     * The packager silently coerces bad artifact config rather than erroring, so
-     * a green build proves nothing about publishability. webapp's
-     * PublishPluginAppSerializer is the real gate: it creates each artifact with
-     * `Model.objects.create(**item_data)` and no defaulting, so any field the
-     * packager didn't emit is absent and the publish 400s.
-     *
-     * Note `type` for frames and pages is not in config.json at all — the
-     * packager supplies it. That coupling is exactly why it's asserted here.
-     */
     it('emits every webapp-required artifact field, non-blank', async () => {
       const required: Record<string, readonly string[]> = {
         floating_frames: ['api_name', 'name', 'title', 'type'],
@@ -271,12 +250,6 @@ describe('runBuild', () => {
       }
     });
 
-    /**
-     * The thumbnail lives at src/thumbnail.png, INSIDE `entry` — the packager
-     * only considers files matching `startsWith(entryPrefix)` and strips that
-     * prefix before matching the filename, so a repo-root thumbnail is
-     * invisible and publish fails with "Thumbnail is required for publishing".
-     */
     it('carries the scaffolded thumbnail into the bundle', async () => {
       await bootstrapPlugin();
       await runBuild(pluginDir, outputDir);
@@ -286,14 +259,6 @@ describe('runBuild', () => {
       expect(entry?.thumbnail).not.toBeNull();
     });
 
-    /**
-     * styles.css and eventScripts/ are picked up by filename and directory
-     * position, not by anything in config.json, so a misplaced file is silently
-     * dropped rather than reported. These assertions are what catch that.
-     *
-     * Note the packager reads the stylesheet into a differently-named field per
-     * artifact type: `css` on frames and pages, `styles` on blocks.
-     */
     it('carries stylesheets and event scripts into the bundle', async () => {
       await createPlugin({
         targetDir: pluginDir,
@@ -325,8 +290,6 @@ describe('runBuild', () => {
 
       expect(page.css).toBeTruthy();
 
-      // Dispatched by `data-script="greet"` and by runEventScript('greet'), so
-      // the key has to survive as exactly that name.
       expect(Object.keys(page.event_scripts as Record<string, string>)).toEqual(['greet']);
       expect((page.event_scripts as Record<string, string>).greet).toBeTruthy();
     });
@@ -337,9 +300,6 @@ describe('runBuild', () => {
 
       const [entry] = await readBundle();
 
-      // The thumbnail is no longer null for any scaffold: KZN-17594 ships a
-      // placeholder because publish rejects a plugin without one. kznFile has
-      // no such requirement and stays absent.
       expect(entry?.kznFile).toBeNull();
 
       for (const [collection, items] of Object.entries(entry?.artifacts ?? {})) {

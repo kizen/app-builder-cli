@@ -4,10 +4,6 @@ import { encodePng, THUMBNAIL_SIZE, thumbnailBytes, thumbnailStyle } from './cre
 
 const PNG_SIGNATURE = [137, 80, 78, 71, 13, 10, 26, 10];
 
-/**
- * Independent CRC-32 so the encoder's checksum is verified against a second
- * implementation rather than itself.
- */
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
 
@@ -53,11 +49,9 @@ function readChunks(png: Buffer): Chunk[] {
 interface DecodedImage {
   width: number;
   height: number;
-  /** Straight RGBA, filter bytes stripped. */
   rgba: Buffer;
 }
 
-/** Decodes the narrow PNG subset the encoder emits: 8-bit RGBA, filter None. */
 function decode(png: Buffer): DecodedImage {
   const chunks = readChunks(png);
   const ihdr = chunks.find((chunk) => chunk.type === 'IHDR');
@@ -141,8 +135,6 @@ describe('thumbnailStyle', () => {
     }
   });
 
-  // The whole point of deriving the style from the name: neighbouring
-  // scaffolds in the Marketplace should not all look identical.
   it('spreads different names across hues', () => {
     const hues = new Set(
       ['smoke_test', 'my_plugin', 'hello_world', 'postgres', 'slack_notifier', 'kitchen_sink'].map(
@@ -168,8 +160,6 @@ describe('thumbnailBytes', () => {
     expect(image.height).toBe(THUMBNAIL_SIZE);
   });
 
-  // The host renders thumbnails on white tiles; an opaque background would
-  // show as a coloured block. Corners are far outside the glyph.
   it('leaves the background fully transparent', () => {
     const edge = THUMBNAIL_SIZE - 1;
 
@@ -220,7 +210,6 @@ describe('thumbnailBytes', () => {
     expect(thumbnailBytes('hello_world').equals(png)).toBe(false);
   });
 
-  // The scaffold is checked into every new plugin repo; keep it small.
   it('stays under 16 KB', () => {
     expect(png.length).toBeLessThan(16 * 1024);
   });

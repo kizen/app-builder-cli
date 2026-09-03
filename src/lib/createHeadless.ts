@@ -1,10 +1,3 @@
-/**
- * Non-interactive `appbuilder create` (KZN-17594, AC 2.2 / 3.1).
- *
- * Mirrors the `encrypt` command's split: all decision logic lives here as pure,
- * dependency-injected functions so it can be tested without Ink or a TTY, and
- * `src/commands/create.ts` only wires real I/O into it.
- */
 import { ARTIFACT_TYPES } from './createArtifacts.js';
 import type { ArtifactType } from './createArtifacts.js';
 import { API_NAME_HINT, API_NAME_PATTERN, inferApiName } from './createForm.js';
@@ -12,11 +5,6 @@ import type { CreatePluginInput, PrecheckResult } from './createPlugin.js';
 import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
 import type { Environment } from '../../shared/lib/credentials.js';
 
-/**
- * Placeholder used when a non-interactive run supplies no description. The
- * manifest schema rejects an empty description, and a headless caller has no
- * way to be prompted for one.
- */
 export const PLACEHOLDER_DESCRIPTION = 'A hello-world Kizen plugin.';
 
 export interface CreateOptions {
@@ -34,10 +22,6 @@ export interface HeadlessDefaults {
   environment: Environment;
 }
 
-/**
- * Resolves `--artifacts`. Omitted means "one of each type", which is what makes
- * a headless run produce a deployable shell rather than an empty `src/`.
- */
 export function parseArtifactSelection(raw: string | undefined): ArtifactType[] {
   if (raw === undefined || raw.trim() === '' || raw.trim() === 'all') {
     return [...ARTIFACT_TYPES];
@@ -63,11 +47,6 @@ export function parseArtifactSelection(raw: string | undefined): ArtifactType[] 
   return [...new Set(requested as ArtifactType[])];
 }
 
-/**
- * Builds the createPlugin input from flags, filling in the defaults a prompt
- * would otherwise collect. Throws with an actionable message when a value the
- * scaffold genuinely cannot invent is missing.
- */
 export function resolveHeadlessInput(
   options: CreateOptions,
   defaults: HeadlessDefaults,
@@ -107,13 +86,6 @@ function isEnvironment(value: string): value is Environment {
   return (ENVIRONMENTS as readonly string[]).includes(value);
 }
 
-/**
- * A business id is only valid in the environment that issued it, and the
- * manifest keys the id by that environment. `--environment` sets it directly.
- * Without the flag we borrow the saved credentials' environment, which is only
- * a safe guess when the id came from those same credentials, so an explicit
- * `--business-id` with nothing saved has to say where it belongs.
- */
 function resolveEnvironment(options: CreateOptions, defaults: HeadlessDefaults): Environment {
   const requested = options.environment?.trim();
 
@@ -144,10 +116,6 @@ export interface HeadlessDeps {
   setExitCode: (code: number) => void;
 }
 
-/**
- * Runs a full non-interactive scaffold. Returns without throwing on expected
- * failures (bad flags, occupied directory); the exit code carries the result.
- */
 export async function runHeadlessCreate(
   options: CreateOptions,
   defaults: HeadlessDefaults,
@@ -183,10 +151,6 @@ export async function runHeadlessCreate(
   try {
     await deps.createPlugin(input);
   } catch (err) {
-    // Real I/O failures (permission denied, disk full, the directory vanishing
-    // between the precheck and the write) get the same clean treatment as bad
-    // flags, rather than escaping as an unhandled rejection with a stack trace
-    // and no exit code of our own.
     deps.writeStderr(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
 
     deps.setExitCode(1);
@@ -201,14 +165,11 @@ export async function runHeadlessCreate(
 
   deps.writeStdout(`Artifacts: ${artifactSummary}\n`);
 
-  // Generated so the shell can publish at all; nobody has chosen artwork yet.
   deps.writeStdout(
     'Thumbnail: src/thumbnail.png (generated placeholder; replace it before publishing)\n',
   );
 
   if (input.developerBusinessId.trim() === '') {
-    // Not fatal: a business id is only required to preview-publish, and it's a
-    // real per-developer value the scaffold can't fabricate.
     deps.writeStderr(
       'Warning: no developer_business_id configured, so this plugin cannot be preview-published yet.\n',
     );

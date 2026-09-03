@@ -23,7 +23,6 @@ export const REQUIRED_FIELDS: readonly FieldName[] = ['name', 'apiName', 'descri
 
 export type FieldValues = Record<FieldName, string>;
 
-/** Same rule the packager enforces as `manifest/api-name-format`. */
 export const API_NAME_PATTERN = /^[a-z_][a-z0-9_]+$/;
 
 export const API_NAME_HINT =
@@ -53,8 +52,6 @@ export function validateField(fieldName: FieldName, inputBuffer: string): string
     return `${FIELD_LABELS[fieldName]} is required`;
   }
 
-  // Without this the prompt accepts any non-blank name and the scaffold fails
-  // its first build on `manifest/api-name-format`.
   if (fieldName === 'apiName' && !API_NAME_PATTERN.test(value)) {
     return `${FIELD_LABELS[fieldName]} ${API_NAME_HINT}`;
   }
@@ -66,10 +63,6 @@ export function normalizeFieldValue(fieldName: FieldName, inputBuffer: string): 
   return fieldName === 'description' ? inputBuffer : inputBuffer.trim();
 }
 
-/**
- * Toggles one artifact type in the picker's selection, preserving
- * ARTIFACT_TYPES order so the rendered list never reshuffles under the cursor.
- */
 export function toggleArtifactSelection(
   selected: readonly ArtifactType[],
   type: ArtifactType,

@@ -1,3 +1,2 @@
 pnpm-lock.yaml
-# Scaffolded verbatim into new plugin repos; keep the Markdown as authored.
 src/templates/**/*.md

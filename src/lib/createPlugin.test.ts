@@ -66,9 +66,6 @@ describe('buildManifest', () => {
     expect(manifest.developer_business_id).toEqual({ go: 'biz-9' });
   });
 
-  // An absent `developer_business_id` validates fine, but an empty string is a
-  // hard `manifest/developer-business-id` error in @kizenapps/packager, so a
-  // scaffold with no configured id must omit the key rather than blank it.
   it('omits developer_business_id entirely when no id is configured', () => {
     expect(buildManifest(validInput({ developerBusinessId: '' }))).not.toHaveProperty(
       'developer_business_id',
@@ -81,9 +78,6 @@ describe('buildManifest', () => {
     );
   });
 
-  // The object form is keyed by concrete environment. A bare string alongside
-  // `release_environments: ['prod']` (which resolves to go + fmo) would trip the
-  // `manifest/developer-business-id-environments` warning.
   it.each(['go', 'fmo', 'staging', 'integration', 'test1'] as const)(
     'keys the business id by the %s environment',
     (environment) => {
@@ -101,10 +95,6 @@ describe('buildManifest', () => {
     expect(typeof manifest.developer_business_id).not.toBe('string');
   });
 
-  // A preview deploy resolves `prod` to go + fmo and skips any environment the
-  // developer_business_id map doesn't cover. An id issued for `integration`
-  // paired with ['prod'] therefore publishes NOWHERE, so the manifest is
-  // retargeted at the environment the id actually belongs to.
   it.each(['integration', 'staging', 'test1'] as const)(
     'targets %s when the business id was issued there',
     (environment) => {
@@ -117,8 +107,6 @@ describe('buildManifest', () => {
     },
   );
 
-  // 'prod' already resolves to go + fmo, so those ids need no retargeting and
-  // the documented default is preserved.
   it.each(['go', 'fmo'] as const)('keeps the prod default for a %s business id', (environment) => {
     const manifest = buildManifest(
       validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
@@ -276,7 +264,6 @@ describe('createPlugin', () => {
 
     const bytes = await readFile(join(input.targetDir, 'src', 'thumbnail.png'));
 
-    // PNG magic number: a truncated or text-encoded file would publish broken.
     expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
   });
 

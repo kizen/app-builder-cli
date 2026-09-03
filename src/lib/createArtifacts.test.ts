@@ -9,8 +9,6 @@ describe('artifactFiles', () => {
     expect(names).toContain('script.js');
   });
 
-  // config.json is inlined verbatim from a template file, so a stray comma
-  // there would only surface as a packager error at build time.
   it.each(ARTIFACT_TYPES)('%s config.json is valid JSON', (type) => {
     const config = artifactFiles(type).find((file) => file.path.endsWith('/config.json'));
 
@@ -19,8 +17,6 @@ describe('artifactFiles', () => {
     }).not.toThrow();
   });
 
-  // Toolbar and object-settings items need a non-blank script at webapp; keep
-  // every starter script non-empty so the rule holds uniformly.
   it.each(ARTIFACT_TYPES)('%s script.js is not blank', (type) => {
     const script = artifactFiles(type).find((file) => file.path.endsWith('/script.js'));
 

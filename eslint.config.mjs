@@ -5,14 +5,7 @@ import stylistic from '@stylistic/eslint-plugin';
 
 export default tseslint.config(
   {
-    ignores: [
-      'dist/**',
-      'node_modules/**',
-      'src/electron/preload.cjs',
-      // Scaffold templates are plugin-runtime scripts (implicit `this`), not
-      // CLI source; they are formatted by prettier but not linted as TS.
-      'src/templates/**',
-    ],
+    ignores: ['dist/**', 'node_modules/**', 'src/electron/preload.cjs', 'src/templates/**'],
   },
   ...tseslint.configs.strictTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,

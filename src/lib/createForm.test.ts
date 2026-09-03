@@ -81,8 +81,6 @@ describe('validateField', () => {
 });
 
 describe('validateField api_name format', () => {
-  // The packager rejects these as manifest/api-name-format; catching them in
-  // the prompt is what keeps the interactive scaffold buildable.
   it.each(['Bad-Name', 'x', '1abc', 'has space', 'UPPER'])('rejects %j', (value) => {
     expect(validateField('apiName', value)).toMatch(/API name must start with/);
   });
@@ -156,8 +154,6 @@ describe('toggleArtifactSelection', () => {
     expect(toggleArtifactSelection(['block'], 'block')).toEqual([]);
   });
 
-  // The picker renders ARTIFACT_TYPES in a fixed order; if toggling reordered
-  // the selection, rows would shuffle under the cursor mid-edit.
   it('keeps ARTIFACT_TYPES order regardless of toggle order', () => {
     const selected = toggleArtifactSelection(toggleArtifactSelection([], 'jsAction'), 'block');
 

@@ -1,6 +1,3 @@
-/* The packager ships this file as the page's `css`; the host injects it when
-   the page renders. */
-
 .hello-page {
   padding: 24px;
   font-family: system-ui, sans-serif;

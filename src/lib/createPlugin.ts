@@ -7,18 +7,8 @@ import { copilotFiles } from './createCopilotFiles.js';
 import { thumbnailBytes } from './createThumbnail.js';
 import type { Environment } from '../../shared/lib/credentials.js';
 
-/**
- * The thumbnail must sit inside `entry`, not at the repo root: the packager
- * only considers files matching `path.startsWith(entryPrefix)` and then strips
- * that prefix before matching `thumbnail.png`. At the root it is invisible, and
- * publish fails with "Thumbnail is required for publishing".
- */
 const THUMBNAIL_PATH = 'src/thumbnail.png';
 
-/**
- * Environments the `prod` alias resolves to. A business id issued for either of
- * these is already covered by the default `release_environments: ['prod']`.
- */
 const PROD_ENVIRONMENTS: readonly Environment[] = ['go', 'fmo'];
 
 export interface CreatePluginInput {
@@ -29,11 +19,6 @@ export interface CreatePluginInput {
   description: string;
   developerBusinessId: string;
   developerEnvironment: Environment;
-  /**
-   * Artifact types to scaffold under `src/`. An empty list (the default)
-   * writes no artifact directories, so `src/` holds only the generated
-   * thumbnail and the build produces a plugin with no artifacts.
-   */
   artifacts?: readonly ArtifactType[];
 }
 
@@ -82,12 +67,6 @@ export async function findAvailableSubDir(parentDir: string, baseName: string): 
 export function buildManifest(input: CreatePluginInput): Record<string, unknown> {
   const businessId = input.developerBusinessId.trim();
 
-  // A business id only exists in the environment it was issued for. Pairing an
-  // id keyed to, say, `integration` with the default `['prod']` (which resolves
-  // to go + fmo) leaves a preview deploy with no covered target, so it skips
-  // every environment and publishes nothing. Retarget the manifest at the
-  // environment we actually have an id for. go/fmo ids are already covered by
-  // 'prod', so the common case keeps the documented default.
   const targetEnvironments =
     businessId !== '' && !PROD_ENVIRONMENTS.includes(input.developerEnvironment)
       ? [input.developerEnvironment]
@@ -106,21 +85,10 @@ export function buildManifest(input: CreatePluginInput): Record<string, unknown>
     release_environments: targetEnvironments,
     config_template: {},
     base_config: {},
-    // `developer_business_id` is optional, but an empty string is a hard
-    // `manifest/developer-business-id` error while an absent key is fine, so
-    // omit it entirely when nothing is configured. When we do have an id, use
-    // the per-environment object form: a bare string alongside
-    // `release_environments: ['prod']` (which resolves to both `go` and `fmo`)
-    // trips the `manifest/developer-business-id-environments` warning, because
-    // one business id generally only exists in one environment.
     ...(businessId ? { developer_business_id: { [input.developerEnvironment]: businessId } } : {}),
   };
 }
 
-/**
- * Writes scaffolded text files. Directories are created first so the file
- * writes can run concurrently without racing on a shared parent.
- */
 async function writeScaffoldedFiles(
   targetDir: string,
   scaffolded: readonly ScaffoldedFile[],

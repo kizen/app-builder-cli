@@ -1,6 +1,3 @@
-/* The packager ships this file as the block's `styles`; the host injects it
-   when the block renders. */
-
 .hello-block {
   padding: 16px;
   font-family: system-ui, sans-serif;

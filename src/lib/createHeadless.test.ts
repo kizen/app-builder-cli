@@ -11,8 +11,6 @@ import { ARTIFACT_TYPES } from './createArtifacts.js';
 const defaults = { businessId: 'biz-1', environment: 'go' } as const;
 
 describe('parseArtifactSelection', () => {
-  // Omitting --artifacts is the common CI case, and it must produce a real
-  // shell rather than an empty src/.
   it('defaults to one of every type', () => {
     expect(parseArtifactSelection(undefined)).toEqual([...ARTIFACT_TYPES]);
   });
@@ -57,8 +55,6 @@ describe('resolveHeadlessInput', () => {
     ).toThrow(/invalid/);
   });
 
-  // An empty description is a hard manifest/required-field error, and a
-  // headless caller has no prompt to fill it in.
   it('substitutes placeholder text for a missing description', () => {
     const input = resolveHeadlessInput({ name: 'My Plugin' }, defaults, '/tmp/x');
 
@@ -100,9 +96,6 @@ describe('resolveHeadlessInput', () => {
     ).toThrow(/Unknown environment "prod"/);
   });
 
-  // With saved credentials, an overriding id is assumed to belong to the same
-  // environment; without them there is nothing to borrow, and guessing `go`
-  // would key the id to an environment that never issued it.
   it('borrows the saved environment for an overriding --business-id', () => {
     const input = resolveHeadlessInput(
       { name: 'My Plugin', businessId: 'biz-2' },
@@ -171,8 +164,6 @@ describe('runHeadlessCreate', () => {
     expect(deps.codes).toEqual([1]);
   });
 
-  // Refusing to write over an existing plugin matters more headlessly than
-  // interactively, because there is no confirmation step.
   it.each(['has-manifest', 'has-kizenapp'] as const)(
     'refuses to overwrite a directory reporting %s',
     async (reason) => {

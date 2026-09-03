@@ -30,18 +30,8 @@ export function createCommand(program: Command): void {
       const parentDir = process.cwd();
       const globalCreds = await loadGlobalCredentials();
       const defaultBusinessId = globalCreds?.businessId ?? '';
-      // The business id is only valid in the environment it was issued for, so
-      // the manifest keys it by that environment rather than emitting a bare
-      // string. `parseCredentials` already defaults this to 'go'.
       const defaultEnvironment = globalCreds?.environment ?? 'go';
 
-      // ink's interactive UI needs a TTY for raw-mode input AND a TTY stdout to
-      // render into. If either is redirected/piped (CI, `| tee`), fall back to
-      // the headless flow, as `encrypt` does.
-      //
-      // ANY flag also counts as scripted intent. Checking only --name would let
-      // `create --api-name foo` open a prompt that silently discards the flag;
-      // going headless instead surfaces a real error naming what's missing.
       const suppliedFlags = Object.values(options).some((value) => value !== undefined);
 
       const isNonInteractive = !process.stdin.isTTY || !process.stdout.isTTY || suppliedFlags;

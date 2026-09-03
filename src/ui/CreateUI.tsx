@@ -60,9 +60,6 @@ export const CreateUI: FC<CreateUIProps> = ({
   const [phase, setPhase] = useState<Phase>({ type: 'target-select', cursor: 0 });
   const [mode, setMode] = useState<Mode>('in-place');
   const [values, setValues] = useState<FieldValues>(() => emptyValues(defaultBusinessId));
-  // Selection lives here, not only in the phase: the user can walk back from
-  // the picker to fix a field and come forward again, and re-entering the
-  // picker must not silently reinstate artifacts they deselected.
   const [artifacts, setArtifacts] = useState<readonly ArtifactType[]>(() => [...ARTIFACT_TYPES]);
   const [inputBuffer, setInputBuffer] = useState('');
   const [targetDir, setTargetDir] = useState<string>(parentDir);
@@ -225,9 +222,6 @@ export const CreateUI: FC<CreateUIProps> = ({
         if (nextField >= FIELDS.length) {
           setInputBuffer('');
 
-          // Everything is pre-selected on first entry (the default shell carries
-          // one of every artifact type), but a return visit keeps whatever the
-          // user last chose.
           setPhase({
             type: 'artifact-select',
             values: updated,
