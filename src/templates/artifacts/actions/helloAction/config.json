@@ -1,0 +1,5 @@
+{
+  "name": "Hello Action",
+  "api_name": "hello_action",
+  "hint_object_name": "client_client"
+}

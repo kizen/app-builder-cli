@@ -5,7 +5,7 @@ import stylistic from '@stylistic/eslint-plugin';
 
 export default tseslint.config(
   {
-    ignores: ['dist/**', 'node_modules/**', 'src/electron/preload.cjs'],
+    ignores: ['dist/**', 'node_modules/**', 'src/electron/preload.cjs', 'src/templates/**'],
   },
   ...tseslint.configs.strictTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,

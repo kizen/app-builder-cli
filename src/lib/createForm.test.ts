@@ -6,8 +6,10 @@ import {
   inferApiName,
   normalizeFieldValue,
   REQUIRED_FIELDS,
+  toggleArtifactSelection,
   validateField,
 } from './createForm.js';
+import { ARTIFACT_TYPES } from './createArtifacts.js';
 
 describe('inferApiName', () => {
   it('lowercases the name', () => {
@@ -73,8 +75,22 @@ describe('validateField', () => {
     }
   });
 
-  it('treats exactly name and apiName as required', () => {
-    expect([...REQUIRED_FIELDS]).toEqual(['name', 'apiName']);
+  it('treats exactly name, apiName and description as required', () => {
+    expect([...REQUIRED_FIELDS]).toEqual(['name', 'apiName', 'description']);
+  });
+});
+
+describe('validateField api_name format', () => {
+  it.each(['Bad-Name', 'x', '1abc', 'has space', 'UPPER'])('rejects %j', (value) => {
+    expect(validateField('apiName', value)).toMatch(/API name must start with/);
+  });
+
+  it.each(['my_plugin', '_private', 'ab', 'a1'])('accepts %j', (value) => {
+    expect(validateField('apiName', value)).toBeUndefined();
+  });
+
+  it('still reports the required-field error first when blank', () => {
+    expect(validateField('apiName', '   ')).toBe('API name is required');
   });
 });
 
@@ -126,5 +142,35 @@ describe('emptyValues', () => {
 
   it('returns a fresh object each call', () => {
     expect(emptyValues('x')).not.toBe(emptyValues('x'));
+  });
+});
+
+describe('toggleArtifactSelection', () => {
+  it('adds a type that is not selected', () => {
+    expect(toggleArtifactSelection([], 'block')).toEqual(['block']);
+  });
+
+  it('removes a type that is selected', () => {
+    expect(toggleArtifactSelection(['block'], 'block')).toEqual([]);
+  });
+
+  it('keeps ARTIFACT_TYPES order regardless of toggle order', () => {
+    const selected = toggleArtifactSelection(toggleArtifactSelection([], 'jsAction'), 'block');
+
+    expect(selected).toEqual(ARTIFACT_TYPES.filter((type) => selected.includes(type)));
+  });
+
+  it('round-trips back to the original selection', () => {
+    const once = toggleArtifactSelection([...ARTIFACT_TYPES], 'page');
+
+    expect(toggleArtifactSelection(once, 'page')).toEqual([...ARTIFACT_TYPES]);
+  });
+
+  it('does not mutate the input', () => {
+    const original: readonly string[] = ['block'];
+
+    toggleArtifactSelection(original as never, 'page');
+
+    expect(original).toEqual(['block']);
   });
 });

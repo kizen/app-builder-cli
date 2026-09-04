@@ -1,6 +1,15 @@
 import { access, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ensureGitignore } from './gitignore.js';
+import { scaffoldArtifactFiles } from './createArtifacts.js';
+import type { ArtifactType, ScaffoldedFile } from './createArtifacts.js';
+import { copilotFiles } from './createCopilotFiles.js';
+import { thumbnailBytes } from './createThumbnail.js';
+import type { Environment } from '../../shared/lib/credentials.js';
+
+const THUMBNAIL_PATH = 'src/thumbnail.png';
+
+const PROD_ENVIRONMENTS: readonly Environment[] = ['go', 'fmo'];
 
 export interface CreatePluginInput {
   targetDir: string;
@@ -9,6 +18,8 @@ export interface CreatePluginInput {
   externalLink: string;
   description: string;
   developerBusinessId: string;
+  developerEnvironment: Environment;
+  artifacts?: readonly ArtifactType[];
 }
 
 export type PrecheckResult = 'ok' | 'has-manifest' | 'has-kizenapp';
@@ -54,6 +65,13 @@ export async function findAvailableSubDir(parentDir: string, baseName: string): 
 }
 
 export function buildManifest(input: CreatePluginInput): Record<string, unknown> {
+  const businessId = input.developerBusinessId.trim();
+
+  const targetEnvironments =
+    businessId !== '' && !PROD_ENVIRONMENTS.includes(input.developerEnvironment)
+      ? [input.developerEnvironment]
+      : ['prod'];
+
   return {
     name: input.name,
     version: '1.0.0',
@@ -64,11 +82,27 @@ export function buildManifest(input: CreatePluginInput): Record<string, unknown>
     entry: 'src/',
     engine: '1.0.0',
     release_notes_directory: 'releaseNotes/',
-    release_environments: ['prod'],
+    release_environments: targetEnvironments,
     config_template: {},
     base_config: {},
-    developer_business_id: input.developerBusinessId,
+    ...(businessId ? { developer_business_id: { [input.developerEnvironment]: businessId } } : {}),
   };
+}
+
+async function writeScaffoldedFiles(
+  targetDir: string,
+  scaffolded: readonly ScaffoldedFile[],
+): Promise<void> {
+  const files = scaffolded.map((file) => ({
+    fullPath: join(targetDir, ...file.path.split('/')),
+    content: file.content,
+  }));
+
+  const directories = new Set(files.map((file) => dirname(file.fullPath)));
+
+  await Promise.all([...directories].map((dir) => mkdir(dir, { recursive: true })));
+
+  await Promise.all(files.map((file) => writeFile(file.fullPath, file.content, 'utf-8')));
 }
 
 export async function createPlugin(input: CreatePluginInput): Promise<void> {
@@ -85,6 +119,12 @@ export async function createPlugin(input: CreatePluginInput): Promise<void> {
   await mkdir(join(input.targetDir, 'src'), { recursive: true });
 
   await mkdir(join(input.targetDir, 'releaseNotes'), { recursive: true });
+
+  await Promise.all([
+    writeScaffoldedFiles(input.targetDir, scaffoldArtifactFiles(input.artifacts ?? [])),
+    writeScaffoldedFiles(input.targetDir, copilotFiles()),
+    writeFile(join(input.targetDir, ...THUMBNAIL_PATH.split('/')), thumbnailBytes(input.apiName)),
+  ]);
 
   ensureGitignore(input.targetDir);
 }

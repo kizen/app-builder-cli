@@ -8,6 +8,7 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts', 'shared/**/*.test.ts'],
     globals: false,
+    css: { include: [/src\/templates\/.*\.css(?:\?|$)/] },
     restoreMocks: true,
     clearMocks: true,
     coverage: {

@@ -1,0 +1,14 @@
+.hello-frame {
+  padding: 16px;
+  font-family: system-ui, sans-serif;
+}
+
+.hello-frame__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.hello-frame__body {
+  margin: 0;
+  color: #555;
+}

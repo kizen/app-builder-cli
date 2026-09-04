@@ -23,7 +23,15 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
 
 /** The flag strings each command declares, in declaration order. */
 const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
-  create: [],
+  create: [
+    '-n, --name <name>',
+    '-a, --api-name <name>',
+    '-d, --description <text>',
+    '-l, --external-link <url>',
+    '-b, --business-id <id>',
+    '-e, --environment <env>',
+    '--artifacts <list>',
+  ],
   build: [],
   dev: [
     '-p, --port <port>',

@@ -1,0 +1,16 @@
+.hello-block {
+  padding: 16px;
+  font-family: system-ui, sans-serif;
+  background: #f8fafc;
+  border-radius: 6px;
+}
+
+.hello-block__title {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.hello-block__body {
+  margin: 0;
+  color: #555;
+}
