@@ -1,5 +1,6 @@
 awslambdaric
 bcrypt
+boto3
 fpdf2
 lxml
 msgpack
