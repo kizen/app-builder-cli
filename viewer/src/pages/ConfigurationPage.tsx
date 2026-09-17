@@ -124,7 +124,12 @@ const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
           />
         ))}
 
-        <SetupAssistantSaveBar apiName={apiName} config={config} saveFn={saveFn} clearFn={clearFn} />
+        <SetupAssistantSaveBar
+          apiName={apiName}
+          config={config}
+          saveFn={saveFn}
+          clearFn={clearFn}
+        />
       </div>
     </SetupAssistantController>
   );
