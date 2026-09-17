@@ -1,6 +1,6 @@
 import { useParams } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { useCallback, useMemo, useRef, useState, type FC } from 'react';
+import { useCallback, useMemo, useState, type FC } from 'react';
 import { bundleQueryOptions } from '../bundleQuery.js';
 import { Card } from '../components/Card.js';
 import type { DeployablePlugin } from '@kizenapps/packager';
@@ -12,10 +12,25 @@ import type {
   UnknownJSON,
   AssistantField,
 } from '@kizenapps/engine';
-import { AppEngineProvider, SetupAssistantController } from '@kizenapps/engine/react';
+import {
+  getAllNestedInputsFromConfig,
+  saveAssistantSecrets,
+  type SaveSecretFn,
+} from '@kizenapps/engine/util';
+import {
+  AppEngineProvider,
+  SetupAssistantController,
+  useSetupAssistant,
+} from '@kizenapps/engine/react';
+import { clearSecretLocally, hasSecretValue, saveSecretLocally } from '../lib/localSecretsStore.js';
 import { SetupAssistantRow } from '../components/setup-assistant/SetupAssistantRow.js';
 import { JsonConfigEditor } from '../components/setup-assistant/JsonConfigEditor.js';
 import { ConfigJsonDialog } from '../components/setup-assistant/ConfigJsonDialog.js';
+import { PlanEntitlementsDialog } from '../components/setup-assistant/PlanEntitlementsDialog.js';
+import {
+  loadPlanEntitlements,
+  type StoredPlanEntitlements,
+} from '../lib/planEntitlementsStorage.js';
 import { Modal } from '../components/Modal.js';
 import { ToastProvider, useToastController } from '../ToastContext.js';
 import { PluginViewContent, usePluginView } from '../components/PluginViewContent.js';
@@ -52,6 +67,8 @@ interface SetupAssistantFormProps {
     setupAssistantConfig: SetupAssistantConfig,
   ) => void;
   clearFn: (apiName: string) => void;
+  plan: Record<string, Record<string, unknown>>;
+  entitlements: Record<string, unknown>;
 }
 
 const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
@@ -60,45 +77,43 @@ const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
   loadFn,
   saveFn,
   clearFn,
+  plan,
+  entitlements,
 }) => {
   const existing = loadFn(apiName);
   const savedValues = existing?.__kizen_setup_assistant_values;
 
-  const stateRef = useRef<Record<string, unknown>>({});
-  const [saved, setSaved] = useState(false);
+  const apiKeyFields = useMemo(
+    () => getAllNestedInputsFromConfig(config).filter((field) => field.type === 'api_key'),
+    [config],
+  );
+
+  const seededValues = useMemo(() => {
+    const base = { ...(savedValues ?? {}) } as Record<string, UnknownJSON>;
+
+    apiKeyFields.forEach((field) => {
+      if (field.secret) {
+        base[field.key] = {
+          type: 'api_key',
+          hasValue: hasSecretValue(apiName, field.secret),
+        } as UnknownJSON;
+      }
+    });
+
+    return base;
+  }, [savedValues, apiKeyFields, apiName]);
 
   const { getObjectByAPIName, getCustomObjectDetails } = useObjectLookups();
-
-  const handleStateChange = useCallback((state: Record<string, unknown>) => {
-    stateRef.current = state;
-  }, []);
-
-  const handleSave = (): void => {
-    const rawValues = stateRef.current as Record<string, ValueStore>;
-
-    saveFn(apiName, rawValues, config);
-
-    setSaved(true);
-
-    setTimeout(() => {
-      setSaved(false);
-    }, 2000);
-  };
-
-  const handleReset = (): void => {
-    clearFn(apiName);
-
-    window.location.reload();
-  };
 
   return (
     <SetupAssistantController
       config={config}
-      value={savedValues as Record<string, UnknownJSON>}
-      onStateChange={handleStateChange}
+      value={seededValues}
       disabledKeys={[]}
       getObjectByAPIName={getObjectByAPIName}
       getCustomObjectDetails={getCustomObjectDetails}
+      plan={plan}
+      entitlements={entitlements}
     >
       <div className="flex flex-col gap-4">
         {config.fields?.map((field) => (
@@ -109,23 +124,98 @@ const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
           />
         ))}
 
-        <div className="flex items-center gap-2 mt-2">
-          <button
-            onClick={handleSave}
-            className="rounded bg-blue-600 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 active:bg-blue-800"
-          >
-            Save Configuration
-          </button>
-          <button
-            onClick={handleReset}
-            className="rounded border border-black/10 px-4 py-1.5 text-[13px] font-medium text-neutral-600 hover:bg-neutral-50 active:bg-neutral-100"
-          >
-            Reset
-          </button>
-          {saved && <span className="text-[12px] text-green-600 font-medium">Saved</span>}
-        </div>
+        <SetupAssistantSaveBar
+          apiName={apiName}
+          config={config}
+          saveFn={saveFn}
+          clearFn={clearFn}
+        />
       </div>
     </SetupAssistantController>
+  );
+};
+
+const SetupAssistantSaveBar: FC<{
+  apiName: string;
+  config: SetupAssistantConfig;
+  saveFn: SetupAssistantFormProps['saveFn'];
+  clearFn: (apiName: string) => void;
+}> = ({ apiName, config, saveFn, clearFn }) => {
+  const { state, setState, validateForm } = useSetupAssistant();
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const saveSecret: SaveSecretFn = useCallback(
+    ({ pluginApiName, secretName, value }) => saveSecretLocally(pluginApiName, secretName, value),
+    [],
+  );
+
+  const handleSave = async (): Promise<void> => {
+    setSaveError(null);
+
+    const { isValid, includedKeys } = await validateForm();
+
+    if (!isValid) {
+      setSaveError('Fix the highlighted fields before saving.');
+
+      return;
+    }
+
+    try {
+      const sanitized = await saveAssistantSecrets(
+        state as Record<string, ValueStore>,
+        config,
+        apiName,
+        saveSecret,
+        includedKeys,
+      );
+
+      saveFn(apiName, sanitized as Record<string, ValueStore>, config);
+      setState(sanitized as Record<string, UnknownJSON>);
+
+      setSaved(true);
+
+      setTimeout(() => {
+        setSaved(false);
+      }, 2000);
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Could not save configuration');
+    }
+  };
+
+  const handleReset = (): void => {
+    getAllNestedInputsFromConfig(config)
+      .filter((field): field is AssistantField & { type: 'api_key' } => field.type === 'api_key')
+      .forEach((field) => {
+        if (field.secret) {
+          clearSecretLocally(apiName, field.secret);
+        }
+      });
+
+    clearFn(apiName);
+
+    window.location.reload();
+  };
+
+  return (
+    <div className="flex items-center gap-2 mt-2">
+      <button
+        onClick={() => {
+          void handleSave();
+        }}
+        className="rounded bg-blue-600 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 active:bg-blue-800"
+      >
+        Save Configuration
+      </button>
+      <button
+        onClick={handleReset}
+        className="rounded border border-black/10 px-4 py-1.5 text-[13px] font-medium text-neutral-600 hover:bg-neutral-50 active:bg-neutral-100"
+      >
+        Reset
+      </button>
+      {saveError && <span className="text-[12px] text-red-500">{saveError}</span>}
+      {saved && <span className="text-[12px] text-green-600 font-medium">Saved</span>}
+    </div>
   );
 };
 
@@ -209,6 +299,8 @@ const SetupSurface: FC<SetupSurfaceProps> = ({
   views,
   userConfigs,
   onConfigWrite,
+  plan,
+  entitlements,
 }) => {
   const bootstrap = useBootstrap();
   const request = useApi();
@@ -285,6 +377,8 @@ const SetupSurface: FC<SetupSurfaceProps> = ({
               loadFn={loadFn}
               saveFn={saveFn}
               clearFn={clearFn}
+              plan={plan}
+              entitlements={entitlements}
             />
           ) : (
             <SetupAssistantViewInner page={setupView} viewApiName={viewApiName} />
@@ -308,6 +402,10 @@ const ConfigurationPageContent: FC = () => {
   const { apiName } = useParams({ strict: false });
   const { data: bundle, isLoading, isError } = useQuery(bundleQueryOptions);
   const [jsonDialog, setJsonDialog] = useState<'business' | 'user' | null>(null);
+  const [planEntitlements, setPlanEntitlements] = useState<StoredPlanEntitlements>(() =>
+    loadPlanEntitlements(),
+  );
+  const [planDialogOpen, setPlanDialogOpen] = useState(false);
 
   const app = useMemo(
     () => bundle?.find((a) => a.api_name === apiName) as DeployablePlugin | undefined,
@@ -398,14 +496,24 @@ const ConfigurationPageContent: FC = () => {
                   />
                 </p>
               </div>
-              <button
-                onClick={() => {
-                  setJsonDialog('business');
-                }}
-                className="shrink-0 rounded border border-black/10 px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-50 active:bg-neutral-100"
-              >
-                View JSON
-              </button>
+              <div className="flex shrink-0 gap-2">
+                <button
+                  onClick={() => {
+                    setPlanDialogOpen(true);
+                  }}
+                  className="rounded border border-black/10 px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-50 active:bg-neutral-100"
+                >
+                  Plan & Entitlements
+                </button>
+                <button
+                  onClick={() => {
+                    setJsonDialog('business');
+                  }}
+                  className="rounded border border-black/10 px-3 py-1.5 text-[12px] font-medium text-neutral-600 hover:bg-neutral-50 active:bg-neutral-100"
+                >
+                  View JSON
+                </button>
+              </div>
             </div>
             <SetupSurface
               config={setupAssistant}
@@ -417,6 +525,8 @@ const ConfigurationPageContent: FC = () => {
               views={views}
               userConfigs={userConfigs}
               onConfigWrite={refreshConfig}
+              plan={planEntitlements.plan}
+              entitlements={planEntitlements.entitlements}
             />
           </div>
         </Card>
@@ -454,6 +564,8 @@ const ConfigurationPageContent: FC = () => {
               views={views}
               userConfigs={userConfigs}
               onConfigWrite={refreshConfig}
+              plan={planEntitlements.plan}
+              entitlements={planEntitlements.entitlements}
             />
           </div>
         </Card>
@@ -476,6 +588,14 @@ const ConfigurationPageContent: FC = () => {
         apiName={apiName ?? ''}
         loadFn={loadUserConfig}
         label="this.userConfig"
+      />
+      <PlanEntitlementsDialog
+        open={planDialogOpen}
+        onClose={() => {
+          setPlanDialogOpen(false);
+        }}
+        value={planEntitlements}
+        onChange={setPlanEntitlements}
       />
     </div>
   );

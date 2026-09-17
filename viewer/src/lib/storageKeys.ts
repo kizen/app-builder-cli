@@ -43,8 +43,14 @@ export function setCredentialPrefix(name: string | null): void {
 export const pluginConfigKey = (apiName: string): string =>
   `${getCredentialPrefix()}:kizen-plugin-config:${apiName}`;
 
+// Plan config and entitlements are business-wide, not per-plugin.
+export const planEntitlementsKey = (): string => `${getCredentialPrefix()}:kizen-plan-entitlements`;
+
 export const pluginUserConfigKey = (apiName: string): string =>
   `${getCredentialPrefix()}:kizen-plugin-user-config:${apiName}`;
+
+export const integrationSecretKey = (pluginApiName: string, secretName: string): string =>
+  `${getCredentialPrefix()}:kizen-integration-secret:${pluginApiName}__${secretName}`;
 
 export const calendarHarnessSelectionKey = (appApiName: string): string =>
   `${getCredentialPrefix()}:calendar-harness-selection:${appApiName}`;
