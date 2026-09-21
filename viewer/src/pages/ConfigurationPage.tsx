@@ -15,7 +15,7 @@ import type {
 } from '@kizenapps/engine';
 import {
   getAllNestedInputsFromConfig,
-  saveAssistantSecrets,
+  getProcessedAssistantConfig,
   type SaveSecretFn,
 } from '@kizenapps/engine/util';
 import {
@@ -160,15 +160,14 @@ const SetupAssistantSaveBar: FC<{
     }
 
     try {
-      const sanitized = await saveAssistantSecrets(
+      const { partialNewConfig } = await getProcessedAssistantConfig(
         state as Record<string, ValueStore>,
         config,
-        apiName,
-        saveSecret,
-        includedKeys,
+        { pluginApiName: apiName, saveSecret, includedKeys },
       );
+      const sanitized = partialNewConfig.__kizen_setup_assistant_values;
 
-      saveFn(apiName, sanitized as Record<string, ValueStore>, config);
+      saveFn(apiName, sanitized, config);
       setState(sanitized as Record<string, UnknownJSON>);
 
       setSaved(true);

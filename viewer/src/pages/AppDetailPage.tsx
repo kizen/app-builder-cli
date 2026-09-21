@@ -540,11 +540,6 @@ export const AppDetailPage: FC = () => {
                         {action.action_step_api_name}
                       </div>
                     </div>
-                    {action.action_type && (
-                      <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600">
-                        {action.action_type}
-                      </span>
-                    )}
                   </div>
                 ))}
               </div>

@@ -2,10 +2,10 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   PluginValidationError,
-  minifyFiles,
   packagePlugin,
   parseManifestFromFiles,
   transformDeployablePlugin,
+  transformFiles,
   validatePluginApp,
 } from '@kizenapps/packager';
 import type { DeployablePlugin } from '@kizenapps/packager';
@@ -65,7 +65,7 @@ export async function runBuild(
 
   onStep?.('minifying');
 
-  const minified = await minifyFiles(files);
+  const minified = await transformFiles(files);
 
   onStep?.('packaging');
 
