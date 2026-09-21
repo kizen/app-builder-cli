@@ -65,6 +65,43 @@ A floating frame whose `default_position` ends in `-fixed` must set
 `minimized_style: "circle"` or omit `minimized_style`. Any other value fails
 the build with `structure/fixed-frame-minimized-style`.
 
+## Automation steps
+
+An automation step is an `automationSteps/<stepName>/` directory holding
+`config.json` and `script.py`. Unlike the artifact config above, a bad step
+config is rejected outright: the build fails and names the step, the parameter,
+and the rule.
+
+Every parameter needs a `data_type`, and it must be one of `string`, `number`,
+`boolean`, `date`, `datetime`, `phone_number`, `uuid`, `employee`, `entity`
+(`automation-step/data-type`). The values authors reach for that do not exist:
+
+| Wrong | Use |
+| --- | --- |
+| `integer`, `decimal` | `number` |
+| `file`, `files`, `email`, `emails` | `string` |
+
+Four step fields and one parameter field were removed from the publish
+contract. They were silently dropped before and now fail the build
+(`automation-step/removed-field`): `action_type`, `script_alias`,
+`plugin_description` and `overall_description` on the step, and `script_alias`
+on a parameter. The step's description field is `action_description`.
+
+Also rejected:
+
+- A secret in the step's `secrets` array that the manifest's
+  `base_config.secrets` does not declare (`automation-step/undeclared-secret`).
+- An `input_source` other than `variable`, `object_field`,
+  `related_object_field` or `static_value` (`automation-step/input-source`).
+- `conflict_resolution` or `create_field_options` on an input — both are
+  output-only (`automation-step/output-only-option`) — or `output_target` on
+  an output, where it does nothing (`automation-step/output-target`).
+- An output `conflict_resolution` other than `overwrite`, `add_only`,
+  `remove_only`, `update_if_blank` or `overwrite_except_null`, or a
+  `create_field_options` that is not a boolean.
+- A `runtime` other than `python 3.12` or `python 3.13`. Omitting `runtime`
+  defaults to `python 3.13`.
+
 ## Publishing
 
 Publishing an app requires exactly one `thumbnail.png`, and it must sit inside

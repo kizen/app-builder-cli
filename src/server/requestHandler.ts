@@ -26,8 +26,10 @@ import { normalizeStepInputs } from '../../shared/lib/execution.js';
 import {
   CRYPTO_ALG,
   CRYPTO_VERSION,
+  DEFAULT_AUTOMATION_RUNTIME,
   deserializeEnvelope,
   encrypt,
+  scriptRuntimeToApiName,
   serializeEnvelope,
 } from '@kizenapps/packager';
 
@@ -432,10 +434,7 @@ export function createRequestHandler(
 
           const stepParams: Parameters<typeof executePythonStep>[0] = {
             script: body.script,
-            // Matches the production Kizen code-runner service's default runtime
-            // ("python-3-13"). Only used when a caller omits a runtime; real
-            // plugin steps send their own "python-3-NN" value.
-            scriptRuntime: body.scriptRuntime ?? 'python-3-13',
+            scriptRuntime: body.scriptRuntime ?? scriptRuntimeToApiName(DEFAULT_AUTOMATION_RUNTIME),
             inputs: normalizeStepInputs(body.inputs),
             secrets: body.secrets ?? {},
             onInstallProgress: (event) => {

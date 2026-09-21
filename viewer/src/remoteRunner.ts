@@ -14,8 +14,8 @@ export interface RemoteExecuteParams {
   script: string;
   scriptRuntime: string;
   inputs: Record<string, StepInputValue>;
-  inputTypes: Record<string, string>;
-  outputTypes: Record<string, string>;
+  inputTypes: Record<string, unknown>;
+  outputTypes: Record<string, unknown>;
   secretNames: string[];
 }
 
@@ -53,23 +53,50 @@ interface KizenRunResponse {
   error: { error: string; detail: string } | null;
 }
 
-const DATA_TYPE_TO_KIZEN: Record<string, string> = {
-  text: 's',
+type AutomationDataType =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'date'
+  | 'datetime'
+  | 'phone_number'
+  | 'uuid'
+  | 'employee'
+  | 'entity';
+
+const DATA_TYPE_TO_KIZEN = {
   string: 's',
   number: 'n',
-  integer: 'n',
   boolean: 'b',
   date: 'd',
   datetime: 'dt',
-  phone: 'p',
-  phonenumber: 'p',
+  phone_number: 'p',
   uuid: 'u',
-  file: 'f',
-  list: 'l',
-};
+  employee: 'u',
+  entity: 'u',
+} satisfies Record<AutomationDataType, string>;
 
-export function toKizenType(dataType: string): string {
-  return DATA_TYPE_TO_KIZEN[dataType.toLowerCase()] ?? 's';
+export function toKizenType(
+  dataType: unknown,
+  kind: 'Input' | 'Output',
+  parameterName: string,
+): string {
+  const kizenType =
+    typeof dataType === 'string'
+      ? (DATA_TYPE_TO_KIZEN as Record<string, string | undefined>)[dataType.toLowerCase()]
+      : undefined;
+
+  if (kizenType === undefined) {
+    const found = dataType === undefined ? 'missing' : JSON.stringify(dataType);
+
+    throw new Error(
+      `${kind} "${parameterName}" has data_type ${found}, which is not a valid automation ` +
+        `data type. Valid values: ${Object.keys(DATA_TYPE_TO_KIZEN).join(', ')}. ` +
+        `Rebuild the plugin to see the full validation report.`,
+    );
+  }
+
+  return kizenType;
 }
 
 function isSupportedRuntime(runtime: string): boolean {
@@ -78,7 +105,7 @@ function isSupportedRuntime(runtime: string): boolean {
 
 function encodeInputs(
   inputs: Record<string, StepInputValue>,
-  inputTypes: Record<string, string>,
+  inputTypes: Record<string, unknown>,
 ): Record<string, KizenEncodedValue> | null {
   const keys = Object.keys(inputs);
 
@@ -90,7 +117,7 @@ function encodeInputs(
 
   for (const key of keys) {
     encoded[key] = {
-      t: toKizenType(inputTypes[key] ?? 'string'),
+      t: toKizenType(inputTypes[key], 'Input', key),
       v: toStepInputValue(inputs[key]),
     };
   }
@@ -98,7 +125,7 @@ function encodeInputs(
   return encoded;
 }
 
-function encodeOutputTypes(outputTypes: Record<string, string>): Record<string, string> | null {
+function encodeOutputTypes(outputTypes: Record<string, unknown>): Record<string, string> | null {
   const keys = Object.keys(outputTypes);
 
   if (keys.length === 0) {
@@ -108,7 +135,7 @@ function encodeOutputTypes(outputTypes: Record<string, string>): Record<string, 
   const encoded: Record<string, string> = {};
 
   for (const key of keys) {
-    encoded[key] = toKizenType(outputTypes[key] ?? 'string');
+    encoded[key] = toKizenType(outputTypes[key], 'Output', key);
   }
 
   return encoded;

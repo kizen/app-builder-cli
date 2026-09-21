@@ -110,6 +110,8 @@ Reads the plugin in the current directory, validates it against the same rules e
 
 If validation finds any errors (for example an `api_name` containing hyphens, which the platform rejects) the build fails and prints each issue grouped by file. Fix the reported issues and re-run.
 
+Automation step configs are validated the same way — parameter data types, secrets that must be declared in the manifest's `base_config.secrets`, fields removed from the publish contract, and `runtime` — against the list of automation data types bundled in `@kizenapps/packager`. The Plugin Wizard applies the same rules at publish, against the live list read from the target environment, so a build that passes locally is expected to publish clean.
+
 ### `appbuilder dev`
 
 Starts the dev server and opens the viewer. Watches your plugin directory and rebuilds + hot-reloads the viewer on every change. Each rebuild runs the same validation as `build`.

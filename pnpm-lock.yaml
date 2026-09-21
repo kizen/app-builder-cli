@@ -12,8 +12,8 @@ importers:
         specifier: 1.9.0
         version: 1.9.0(@tanstack/react-query@5.99.0(react@19.2.5))(date-fns-tz@3.2.0(date-fns@4.1.0))(date-fns@4.1.0)(dompurify@3.4.3)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
       '@kizenapps/packager':
-        specifier: 0.7.0
-        version: 0.7.0
+        specifier: 0.8.0
+        version: 0.8.0
       chrome-launcher:
         specifier: ^1.2.1
         version: 1.2.1
@@ -533,8 +533,8 @@ packages:
       react: '>=18'
       react-dom: '>=18'
 
-  '@kizenapps/packager@0.7.0':
-    resolution: {integrity: sha512-Pc3Whred1VTWS+7E5wZzuHFULjhirnZqgo5fnIFroZnctDQtpbh4Xc1rHafzXBYscKDQBsbBXPQfMuC12VY+mw==}
+  '@kizenapps/packager@0.8.0':
+    resolution: {integrity: sha512-r+jd6Jon7n17rcNNDSJVB4DeWkfh2dmzte07wcBX/Yipxu+U/Cfbgt/j32rh56yg5w8XYb05jdTWxcvgpYJ2dQ==}
 
   '@napi-rs/wasm-runtime@1.1.3':
     resolution: {integrity: sha512-xK9sGVbJWYb08+mTJt3/YV24WxvxpXcXtP6B172paPZ+Ts69Re9dAr7lKwJoeIx8OoeuimEiRZ7umkiUVClmmQ==}
@@ -2925,7 +2925,7 @@ snapshots:
       react: 19.2.5
       react-dom: 19.2.5(react@19.2.5)
 
-  '@kizenapps/packager@0.7.0':
+  '@kizenapps/packager@0.8.0':
     dependencies:
       '@node-minify/core': 10.5.0
       '@node-minify/uglify-js': 10.5.0
