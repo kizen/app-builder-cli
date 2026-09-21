@@ -1,0 +1,68 @@
+# Fetches the Kizen plugin documentation into the workspace that Copilot code
+# review runs in, so reviews are grounded in the real contracts instead of a
+# copy of the rules pasted into this repo. The docs are cloned fresh on every
+# review, so they can never drift from the source.
+#
+# Mechanics that are easy to get wrong:
+#   - The job MUST be named `copilot-setup-steps` or Copilot ignores this file.
+#   - Only `steps`, `permissions`, `runs-on`, `services`, `snapshot` and
+#     `timeout-minutes` may be customized.
+#   - This file has no effect until it is on the DEFAULT branch, so it cannot be
+#     tested from the pull request that adds it.
+#   - Setup steps are exempt from the Copilot agent firewall, so the clone below
+#     needs no allowlist entry.
+name: Copilot code review setup
+
+on:
+  # Lets you run this from the Actions tab to verify the fetch on its own.
+  workflow_dispatch:
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out this plugin repo
+        uses: actions/checkout@v4
+
+      # kizen/app-engine is public, so no token is needed. Markdown only: a sparse,
+      # blobless, depth-1 clone keeps this to a couple of seconds and ~1 MB.
+      #
+      # The pattern is recursive so a doc added in a new subdirectory is picked up
+      # rather than silently missed; docs/site/ is excluded because it is the
+      # docs-website build tooling, not plugin reference material.
+      - name: Fetch the Kizen plugin docs corpus into .copilot-docs/
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/kizen/app-engine.git .docs-src
+          git -C .docs-src sparse-checkout set --no-cone '/docs/**/*.md' '!/docs/site/**'
+          mv .docs-src/docs .copilot-docs
+          rm -rf .docs-src
+
+      # Fail loudly. The failure mode of this approach is silent degradation: if the
+      # fetch breaks, the review still posts confident comments, just without the
+      # rules, and nothing surfaces that on the pull request. Asserting here turns
+      # that into a visible red job instead.
+      - name: Verify the corpus landed
+        run: |
+          set -euo pipefail
+          test -f .copilot-docs/17-gotchas.md
+          test -f .copilot-docs/method-index.md
+
+          # The numbered docs are the reference corpus itself, so check the series
+          # rather than only a total — a total alone can stay above a floor while
+          # individual files quietly go missing.
+          numbered=$(find .copilot-docs -maxdepth 1 -name '[0-9][0-9]-*.md' | wc -l | tr -d ' ')
+          test "$numbered" -ge 18
+
+          # examples/ carries the complete source of two shipping plugins, which is
+          # the most useful material for reviewing plugin code.
+          test -f .copilot-docs/examples/kitchen_sink.md
+
+          count=$(find .copilot-docs -name '*.md' | wc -l | tr -d ' ')
+          echo "Fetched $count markdown files into .copilot-docs/ ($numbered numbered docs)"
+          test "$count" -ge 24
+          du -sh .copilot-docs

@@ -10,6 +10,7 @@ export const SKIP_DIRS = new Set([
   'node_modules',
   '.git',
   '.kizenapp',
+  '.copilot-docs',
   '.github',
   '.claude',
   '__pycache__',

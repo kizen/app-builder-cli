@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .kizenapp/
+.copilot-docs/
 *.local
 .DS_Store
 .yalc/

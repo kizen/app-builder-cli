@@ -8,6 +8,7 @@ import { devCommand } from './commands/dev.js';
 import { encryptCommand } from './commands/encrypt.js';
 import { iconsCommand } from './commands/icons.js';
 import { reportCommand } from './commands/report.js';
+import { setupCopilotCommand } from './commands/setupCopilot.js';
 
 function readVersion(): string {
   const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
@@ -22,6 +23,8 @@ export function createProgram(): Command {
   program.name('appbuilder').description('Kizen plugin app builder').version(readVersion());
 
   createCommand(program);
+
+  setupCopilotCommand(program);
 
   buildCommand(program);
 
