@@ -11,6 +11,7 @@ import type {
   ValueStore,
   UnknownJSON,
   AssistantField,
+  JSONValue,
 } from '@kizenapps/engine';
 import {
   getAllNestedInputsFromConfig,
@@ -27,10 +28,7 @@ import { SetupAssistantRow } from '../components/setup-assistant/SetupAssistantR
 import { JsonConfigEditor } from '../components/setup-assistant/JsonConfigEditor.js';
 import { ConfigJsonDialog } from '../components/setup-assistant/ConfigJsonDialog.js';
 import { PlanEntitlementsDialog } from '../components/setup-assistant/PlanEntitlementsDialog.js';
-import {
-  loadPlanEntitlements,
-  type StoredPlanEntitlements,
-} from '../lib/planEntitlementsStorage.js';
+import { usePlanEntitlements } from '../lib/planEntitlementsStorage.js';
 import { Modal } from '../components/Modal.js';
 import { ToastProvider, useToastController } from '../ToastContext.js';
 import { PluginViewContent, usePluginView } from '../components/PluginViewContent.js';
@@ -67,8 +65,8 @@ interface SetupAssistantFormProps {
     setupAssistantConfig: SetupAssistantConfig,
   ) => void;
   clearFn: (apiName: string) => void;
-  plan: Record<string, Record<string, unknown>>;
-  entitlements: Record<string, unknown>;
+  plan: Record<string, Record<string, JSONValue>>;
+  entitlements: Record<string, JSONValue>;
 }
 
 const SetupAssistantFormInner: FC<SetupAssistantFormProps> = ({
@@ -402,9 +400,7 @@ const ConfigurationPageContent: FC = () => {
   const { apiName } = useParams({ strict: false });
   const { data: bundle, isLoading, isError } = useQuery(bundleQueryOptions);
   const [jsonDialog, setJsonDialog] = useState<'business' | 'user' | null>(null);
-  const [planEntitlements, setPlanEntitlements] = useState<StoredPlanEntitlements>(() =>
-    loadPlanEntitlements(),
-  );
+  const planEntitlements = usePlanEntitlements();
   const [planDialogOpen, setPlanDialogOpen] = useState(false);
 
   const app = useMemo(
@@ -595,7 +591,6 @@ const ConfigurationPageContent: FC = () => {
           setPlanDialogOpen(false);
         }}
         value={planEntitlements}
-        onChange={setPlanEntitlements}
       />
     </div>
   );

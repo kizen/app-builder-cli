@@ -2,6 +2,7 @@ import { useEffect, useState, type FC } from 'react';
 import { Dialog, DialogHeader } from '../Dialog.js';
 import {
   clearPlanEntitlements,
+  isStoredPlanEntitlements,
   savePlanEntitlements,
   type StoredPlanEntitlements,
 } from '../../lib/planEntitlementsStorage.js';
@@ -10,7 +11,7 @@ interface PlanEntitlementsDialogProps {
   open: boolean;
   onClose: () => void;
   value: StoredPlanEntitlements;
-  onChange: (value: StoredPlanEntitlements) => void;
+  onChange?: (value: StoredPlanEntitlements) => void;
 }
 
 const stringify = (value: StoredPlanEntitlements): string => JSON.stringify(value, null, 2);
@@ -36,14 +37,19 @@ export const PlanEntitlementsDialog: FC<PlanEntitlementsDialogProps> = ({
 
   const handleSave = (): void => {
     try {
-      const parsed = JSON.parse(text) as Partial<StoredPlanEntitlements>;
-      const next: StoredPlanEntitlements = {
-        plan: parsed.plan ?? {},
-        entitlements: parsed.entitlements ?? {},
-      };
+      const parsed: unknown = JSON.parse(text);
 
-      savePlanEntitlements(next);
-      onChange(next);
+      if (!isStoredPlanEntitlements(parsed)) {
+        setError(
+          'Expected { "plan": { [type]: { [key]: value } }, "entitlements": { [key]: value } }',
+        );
+        setSaved(false);
+
+        return;
+      }
+
+      savePlanEntitlements(parsed);
+      onChange?.(parsed);
       setError(null);
       setSaved(true);
 
@@ -58,7 +64,7 @@ export const PlanEntitlementsDialog: FC<PlanEntitlementsDialogProps> = ({
 
   const handleClear = (): void => {
     clearPlanEntitlements();
-    onChange({ plan: {}, entitlements: {} });
+    onChange?.({ plan: {}, entitlements: {} });
     setText(stringify({ plan: {}, entitlements: {} }));
     setError(null);
     setSaved(false);

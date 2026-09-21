@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FC } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FC } from 'react';
 import type { AssistantField, SelectOption, UnknownJSON } from '@kizenapps/engine';
 import { FieldLabel } from '../FieldLabel.js';
 import { useFieldBlock } from '../useFieldBlock.js';
@@ -26,6 +26,7 @@ export const RadioBlock: FC<{ field: AssistantField; disabled?: boolean }> = ({
     options.find((opt) => opt.value === field.default);
 
   const [disabledOptions, setDisabledOptions] = useState<Record<string, boolean>>({});
+  const optionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 
   const setRadioValue = useCallback(
     (option: SelectOption) => {
@@ -120,6 +121,8 @@ export const RadioBlock: FC<{ field: AssistantField; disabled?: boolean }> = ({
     <div className="flex flex-col gap-1">
       <FieldLabel field={field} />
       <div
+        role="radiogroup"
+        aria-label={field.label}
         className={`inline-flex max-w-full flex-wrap self-start overflow-hidden rounded-lg border text-[12px] font-medium ${
           errorState?.error ? 'border-red-300' : 'border-black/10'
         }`}
@@ -127,15 +130,50 @@ export const RadioBlock: FC<{ field: AssistantField; disabled?: boolean }> = ({
         {options.map((opt, i) => {
           const isSelected = value?.value === opt.value;
           const isOptionDisabled = isDisabled || Boolean(disabledOptions[opt.value]);
+          // Roving tabindex per the WAI-ARIA radiogroup pattern.
+          const isTabbable = value
+            ? isSelected
+            : opt.value === options.find((o) => !(isDisabled || disabledOptions[o.value]))?.value;
 
           return (
             <button
               key={opt.value}
+              ref={(node) => {
+                optionRefs.current[opt.value] = node;
+              }}
               type="button"
-              aria-pressed={isSelected}
+              role="radio"
+              aria-checked={isSelected}
+              aria-disabled={isOptionDisabled}
               disabled={isOptionDisabled}
+              tabIndex={isTabbable ? 0 : -1}
               onClick={() => {
                 setRadioValue(opt);
+              }}
+              onKeyDown={(e) => {
+                if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') {
+                  return;
+                }
+
+                e.preventDefault();
+
+                const enabled = options.filter((o) => !(isDisabled || disabledOptions[o.value]));
+
+                if (enabled.length === 0) {
+                  return;
+                }
+
+                const currentIndex = enabled.findIndex((o) => o.value === opt.value);
+                const delta = e.key === 'ArrowRight' ? 1 : -1;
+                const nextIndex = (currentIndex + delta + enabled.length) % enabled.length;
+                const next = enabled[nextIndex];
+
+                if (!next) {
+                  return;
+                }
+
+                setRadioValue(next);
+                optionRefs.current[next.value]?.focus();
               }}
               className={`px-3 py-1.5 transition-colors ${i > 0 ? 'border-l border-black/10' : ''} ${
                 isSelected
