@@ -198,8 +198,8 @@ export const CodeStepsPage: FC = () => {
             {selectedStep.script_runtime}
           </span>
         </div>
-        {selectedStep.overall_description && (
-          <p className="mt-2 text-[12px] text-neutral-500">{selectedStep.overall_description}</p>
+        {selectedStep.action_description && (
+          <p className="mt-2 text-[12px] text-neutral-500">{selectedStep.action_description}</p>
         )}
         {(selectedStep as typeof selectedStep & { when?: string }).when && (
           <div className="mt-2">

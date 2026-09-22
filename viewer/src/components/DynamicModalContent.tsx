@@ -11,6 +11,7 @@ import type { AssistantField, SetupAssistantConfig, UnknownJSON } from '@kizenap
 import { SetupAssistantController, useSetupAssistant } from '@kizenapps/engine/react';
 import { SetupAssistantRow } from './setup-assistant/SetupAssistantRow.js';
 import { useObjectLookups } from '../hooks/useObjectLookups.js';
+import { usePlanEntitlements } from '../lib/planEntitlementsStorage.js';
 
 export interface DynamicModalContentHandle {
   validateAndGetValues: () => Promise<{ isValid: boolean; values: Record<string, unknown> }>;
@@ -68,6 +69,7 @@ export const DynamicModalContent = forwardRef<
   }, []);
 
   const config: SetupAssistantConfig = { fields };
+  const { plan, entitlements } = usePlanEntitlements();
 
   return (
     <SetupAssistantController
@@ -77,6 +79,8 @@ export const DynamicModalContent = forwardRef<
       disabledKeys={[]}
       getObjectByAPIName={getObjectByAPIName}
       getCustomObjectDetails={getCustomObjectDetails}
+      plan={plan}
+      entitlements={entitlements}
     >
       <DynamicContentInner
         fields={fields}

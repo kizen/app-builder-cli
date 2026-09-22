@@ -59,6 +59,8 @@ const ASSISTANT_FIELD_TYPES: ReadonlySet<AssistantField['type']> = new Set([
   'number',
   'select',
   'boolean',
+  'radio',
+  'api_key',
 ]);
 
 // Drops runtime-only block types (e.g. 'spacer') and normalizes id→key so the

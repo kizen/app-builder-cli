@@ -33,9 +33,12 @@ function getCredentialPrefix(): string {
   return _credentialPrefix;
 }
 
+export const CREDENTIAL_PREFIX_CHANGED_EVENT = 'kizen:credential-prefix-changed';
+
 export function setCredentialPrefix(name: string | null): void {
   _credentialPrefix = name ?? 'credentials';
   localStorage.setItem(STORAGE_KEYS.activeProfile, _credentialPrefix);
+  window.dispatchEvent(new Event(CREDENTIAL_PREFIX_CHANGED_EVENT));
 }
 
 // --- Dynamic key builders (scoped per plugin / service / frame) -------------
@@ -43,8 +46,14 @@ export function setCredentialPrefix(name: string | null): void {
 export const pluginConfigKey = (apiName: string): string =>
   `${getCredentialPrefix()}:kizen-plugin-config:${apiName}`;
 
+// Plan config and entitlements are business-wide, not per-plugin.
+export const planEntitlementsKey = (): string => `${getCredentialPrefix()}:kizen-plan-entitlements`;
+
 export const pluginUserConfigKey = (apiName: string): string =>
   `${getCredentialPrefix()}:kizen-plugin-user-config:${apiName}`;
+
+export const integrationSecretKey = (pluginApiName: string, secretName: string): string =>
+  `${getCredentialPrefix()}:kizen-integration-secret:${encodeURIComponent(pluginApiName)}:${encodeURIComponent(secretName)}`;
 
 export const calendarHarnessSelectionKey = (appApiName: string): string =>
   `${getCredentialPrefix()}:calendar-harness-selection:${appApiName}`;
