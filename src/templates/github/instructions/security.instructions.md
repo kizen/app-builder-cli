@@ -16,10 +16,5 @@ string argument to `setTimeout` or `setInterval`), read
 secrets" and "Release & publish" sections of `.copilot-docs/17-gotchas.md`, and
 review the change against what they say.
 
-Two things to apply on top of the docs:
-
-- A plaintext credential that reached a commit is compromised, whatever the
-  diff does with it now. Say so and ask for it to be rotated — deleting the
-  line does not undo the exposure, because the value stays in the git history.
-- Flag every `__dangerouslySkipProxy` for human review, per
-  `.copilot-docs/11-output-ui-iframes-frames.md`.
+When a change uses `__dangerouslySkipProxy`, also read
+`.copilot-docs/11-output-ui-iframes-frames.md`.

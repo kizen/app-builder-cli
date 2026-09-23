@@ -35,12 +35,9 @@ thing to catch in review. When a changed file calls a `this.*` worker method,
 look that method up in `method-index.md` and read its contract before concluding
 the call is correct.
 
-The same applies to artifact config: a green build does not mean a correct
-artifact. The packager coerces malformed config instead of rejecting it, and
-says nothing about a missing required field — publishing is the real gate.
-Check each `config.json` against `03-manifest-reference.md`, and each automation
-step against `07-automation-steps.md`, rather than trusting that the build would
-have caught a mistake.
+The same applies to artifact config: check each `config.json` against
+`03-manifest-reference.md`, and each automation step against
+`07-automation-steps.md`.
 
 When a review comment is based on the documentation, name the file it came from.
 
