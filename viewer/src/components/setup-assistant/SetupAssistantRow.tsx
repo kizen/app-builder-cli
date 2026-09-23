@@ -1,5 +1,6 @@
 import type { FC } from 'react';
 import type { AssistantField } from '@kizenapps/engine';
+import { ApiKeyBlock } from './blocks/ApiKeyBlock.js';
 import { BooleanBlock } from './blocks/BooleanBlock.js';
 import { ContainerBlock } from './blocks/ContainerBlock.js';
 import { CustomObjectBlock } from './blocks/CustomObjectBlock.js';
@@ -9,6 +10,7 @@ import { ImageBlock } from './blocks/ImageBlock.js';
 import { LinkBlock } from './blocks/LinkBlock.js';
 import { NumberBlock } from './blocks/NumberBlock.js';
 import { QrBlock } from './blocks/QrBlock.js';
+import { RadioBlock } from './blocks/RadioBlock.js';
 import { SelectBlock } from './blocks/SelectBlock.js';
 import { TextBlock } from './blocks/TextBlock.js';
 
@@ -26,6 +28,8 @@ const fieldTypeComponents: Record<AssistantField['type'], FC<BlockProps>> = {
   description: DescriptionBlock,
   number: NumberBlock,
   select: SelectBlock,
+  radio: RadioBlock,
+  api_key: ApiKeyBlock,
   boolean: BooleanBlock,
   qr: QrBlock,
   image: ImageBlock,

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { UnknownJSON } from '@kizenapps/engine';
-import { mergeConfig } from '@kizenapps/engine/util';
+import { flattenReservedState, mergeConfig } from '@kizenapps/engine/util';
 import { loadConfig, loadUserConfig, type StoredConfig } from '../lib/configStorage.js';
+import { usePlanEntitlements } from '../lib/planEntitlementsStorage.js';
 import { hasSetupAssistant } from '../lib/setupAssistant.js';
 import type { PluginBaseConfig } from '../types.js';
 
@@ -79,6 +80,8 @@ export function usePluginConfig(
     return [{ api_name: apiName, config: { __kizen_clean_config: clean } as UnknownJSON }];
   }, [apiName, stores.user]);
 
+  const { plan, entitlements } = usePlanEntitlements();
+
   const whenState = useMemo((): Record<string, UnknownJSON> => {
     const mergedConfig = mergeConfig(
       (stores.business?.__kizen_clean_config ?? {}) as Record<string, UnknownJSON>,
@@ -103,8 +106,10 @@ export function usePluginConfig(
       state[`userConfig__${k}`] = v;
     }
 
+    Object.assign(state, flattenReservedState(plan, entitlements));
+
     return state;
-  }, [stores.business, stores.user, baseConfig]);
+  }, [stores.business, stores.user, baseConfig, plan, entitlements]);
 
   return useMemo(
     () => ({ configArgs, userConfigs, whenState, refreshConfig }),
