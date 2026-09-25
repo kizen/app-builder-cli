@@ -5,77 +5,49 @@ that `@kizenapps/packager` finds by walking the directory tree under the
 manifest's `entry` (default `src/`). No manifest key lists artifacts. The
 directory layout decides what gets packaged.
 
-## Component directories
+## The full Kizen plugin documentation is available at `.copilot-docs/`
 
-Under `entry`, the packager treats these directory names as component types:
+Before this review started, the complete Kizen plugin developer documentation
+was fetched into `.copilot-docs/` by `.github/workflows/copilot-code-review.yml`.
+It is not committed to this repo — it is cloned from `kizen/app-engine` at review
+time, so it is always current. It is the authoritative reference for every plugin
+API, manifest field and runtime contract. Deliberately, no plugin rules are
+copied into this repo: read them from `.copilot-docs/` instead.
 
-- `floatingFrames`
-- `blocks`
-- `dataAdornments`
-- `pages`
-- `views`
-- `toolbarItems`
-- `objectSettingsItems`
-- `actions`
-- `routeScripts`
-- `automationSteps`
-- `calendarSources`
+Use it. Start from:
 
-Every directory under a component type needs a `config.json`. `views/` is the
-one exception.
+- `.copilot-docs/17-gotchas.md` — the consolidated list of traps and silent
+  failure modes, grouped by topic. Scan the sections relevant to the changed
+  files.
+- `.copilot-docs/method-index.md` — A–Z lookup from any method, manifest field,
+  endpoint or identifier to the doc that owns it.
+- `.copilot-docs/03-manifest-reference.md` — every `kizen.json` and `config.json`
+  field, the component directory names, `api_name` rules, and the build/publish
+  validation rules.
+- The other numbered docs (`.copilot-docs/04-worker-runtime-api.md`,
+  `.copilot-docs/07-automation-steps.md`, `.copilot-docs/08-actions.md`, and so
+  on) for complete contracts.
 
-## `api_name` rules
+**Many Kizen plugin APIs fail silently when misused** — the call succeeds,
+nothing throws, and the behavior is quietly wrong. These defects are not
+detectable from the calling code alone, and they are the single most valuable
+thing to catch in review. When a changed file calls a `this.*` worker method,
+look that method up in `method-index.md` and read its contract before concluding
+the call is correct.
 
-- An `api_name` must match `/^[a-z_][a-z0-9_]+$/`: lowercase letters, digits
-  and underscores, starting with a letter or underscore, at least 2 characters.
-- Set `api_name` explicitly in each artifact's `config.json`. The fallback
-  lowercases and strips the directory name (`myFrame` becomes `myframe`), and
-  that result can collide with another artifact's explicit `api_name`.
-- Data adornments have no `api_name` field. Flag one that adds it as dead
-  configuration.
-- Sibling components in the same directory need unique `api_name`s. `pages/`
-  and `views/` go further and share one namespace, so a page and a view with
-  the same `api_name` collide even though they live in different directories.
+The same applies to artifact config: check each `config.json` against
+`03-manifest-reference.md`, and each automation step against
+`07-automation-steps.md`.
 
-## A green build does not mean a correct artifact
+When a review comment is based on the documentation, name the file it came from.
 
-The packager coerces malformed artifact config instead of rejecting it: an
-invalid `field_type` on a data adornment becomes `phonenumber`, and an invalid
-`minimized_style` on a floating frame becomes `circle`. It also says nothing
-about a missing required field. Publishing is the real gate. The publish step
-creates each artifact with no defaulting, so a field the packager never emitted
-is absent and the publish request 400s. Review each
-`config.json` as if the build will not catch mistakes in it, because for these
-cases it does not.
-
-Publishing an app requires these fields per artifact type. An artifact missing
-one builds clean and fails to publish:
-
-| Artifact | Required fields |
-| --- | --- |
-| Floating frame | `api_name`, `name`, `title` |
-| Block | `api_name`, `name` |
-| Data adornment | `field_type` (one of `phonenumber`, `date`, `datetime`) |
-| Routable page | `api_name`, `name` |
-| Toolbar item | `api_name`, `label`, and a non-blank `script.js` |
-| Object settings item | `api_name`, `label`, and a non-blank `script.js` |
-| JS action | `api_name`, `name`, `hint_object_name` (non-blank) |
-
-A floating frame whose `default_position` ends in `-fixed` must set
-`minimized_style: "circle"` or omit `minimized_style`. Any other value fails
-the build with `structure/fixed-frame-minimized-style`.
-
-## Publishing
-
-Publishing an app requires exactly one `thumbnail.png`, and it must sit inside
-the `entry` directory (`src/thumbnail.png` by default). The packager never sees
-a thumbnail at the repo root, and publishing then fails with "Thumbnail is
-required for publishing".
+If `.copilot-docs/` is not present, the setup workflow did not run — it only
+takes effect once it is on the repository's default branch — so say that in
+the review instead of guessing at the rules from memory.
 
 ## Scope
 
-This file covers repo structure and general review. Two path-scoped files
-cover the rest: `.github/instructions/security.instructions.md` for
-security-sensitive patterns and
-`.github/instructions/version-discipline.instructions.md` for manifest version
-bumps.
+This file covers repo structure and general review. Two path-scoped files cover
+the rest: `.github/instructions/security.instructions.md` for security-sensitive
+patterns and `.github/instructions/version-discipline.instructions.md` for
+manifest version bumps.

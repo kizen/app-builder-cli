@@ -1,0 +1,39 @@
+# Copilot only reads this file from the default branch, and only if the job is named copilot-setup-steps.
+name: Copilot code review setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out this plugin repo
+        uses: actions/checkout@v4
+
+      - name: Fetch the Kizen plugin docs corpus into .copilot-docs/
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/kizen/app-engine.git .docs-src
+          git -C .docs-src sparse-checkout set --no-cone '/docs/**/*.md' '!/docs/site/**'
+          mv .docs-src/docs .copilot-docs
+          rm -rf .docs-src
+
+      - name: Verify the corpus landed
+        run: |
+          set -euo pipefail
+          test -f .copilot-docs/17-gotchas.md
+          test -f .copilot-docs/method-index.md
+
+          numbered=$(find .copilot-docs -maxdepth 1 -name '[0-9][0-9]-*.md' | wc -l | tr -d ' ')
+          test "$numbered" -ge 18
+          test -f .copilot-docs/examples/kitchen_sink.md
+
+          count=$(find .copilot-docs -name '*.md' | wc -l | tr -d ' ')
+          echo "Fetched $count markdown files into .copilot-docs/ ($numbered numbered docs)"
+          test "$count" -ge 24
+          du -sh .copilot-docs

@@ -426,4 +426,148 @@ describe('runBuild', () => {
       expect(result.bundleSize).toBeLessThan((await bundleFileSize()) - 20_000);
     });
   });
+
+  describe('automation steps', () => {
+    const STEP_DIRECTORY = 'charge_card';
+    const STEP_DESCRIPTION = 'Charges a card through the Acme API.';
+    const STEP_SCRIPT = "outputs['result'] = 'charged'\n";
+
+    const writeAutomationStep = async (
+      stepName: string,
+      config: Record<string, unknown>,
+    ): Promise<void> => {
+      const stepDir = join(pluginDir, 'src', 'automationSteps', stepName);
+
+      await mkdir(stepDir, { recursive: true });
+      await writeFile(
+        join(stepDir, 'config.json'),
+        JSON.stringify(config, null, 2) + '\n',
+        'utf-8',
+      );
+      await writeFile(join(stepDir, 'script.py'), STEP_SCRIPT, 'utf-8');
+    };
+
+    const stepConfig = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+      name: 'Charge Card',
+      api_name: STEP_DIRECTORY,
+      action_description: STEP_DESCRIPTION,
+      runtime: 'python 3.13',
+      inputs: [{ name: 'amount', label: 'Amount', data_type: 'number', required: true }],
+      outputs: [{ name: 'result', label: 'Result', data_type: 'string' }],
+      ...overrides,
+    });
+
+    const readStepArtifact = async (): Promise<Record<string, unknown>> => {
+      const [entry] = await readBundle();
+      const configs = entry?.artifacts.automation_action_configs ?? [];
+
+      return configs[0] as Record<string, unknown>;
+    };
+
+    it('packages a valid step and drops the fields removed from the publish contract', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(STEP_DIRECTORY, stepConfig());
+
+      expect(validatePluginApp(await readLocalFiles(pluginDir))).toEqual([]);
+
+      await runBuild(pluginDir, outputDir);
+
+      const step = await readStepArtifact();
+
+      expect(step).toMatchObject({
+        name: 'Charge Card',
+        action_step_api_name: STEP_DIRECTORY,
+        action_description: STEP_DESCRIPTION,
+        script_runtime: 'python-3-13',
+      });
+      expect(step).not.toHaveProperty('overall_description');
+      expect(step).not.toHaveProperty('action_type');
+      expect(step.script).toContain('outputs');
+    });
+
+    it('falls back to the packager default runtime when runtime is omitted', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(STEP_DIRECTORY, stepConfig({ runtime: undefined }));
+
+      expect(validatePluginApp(await readLocalFiles(pluginDir))).toEqual([]);
+
+      await runBuild(pluginDir, outputDir);
+
+      expect((await readStepArtifact()).script_runtime).toBe('python-3-13');
+    });
+
+    it('rejects an input whose data_type is not an automation data type', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(
+        STEP_DIRECTORY,
+        stepConfig({
+          inputs: [{ name: 'amount', label: 'Amount', data_type: 'integer', required: true }],
+        }),
+      );
+
+      const thrown = await buildAndExpectRejection();
+
+      expect(thrown).toBeInstanceOf(PluginValidationError);
+
+      const { issues } = thrown as PluginValidationError;
+      const dataTypeIssue = issues.find((issue) => issue.rule === 'automation-step/data-type');
+
+      expect(dataTypeIssue).toBeDefined();
+      expect(dataTypeIssue?.severity).toBe('error');
+      expect(dataTypeIssue?.message).toContain(STEP_DIRECTORY);
+      expect(dataTypeIssue?.message).toContain('"amount"');
+      expect(dataTypeIssue?.message).toContain('number');
+      expect(dataTypeIssue?.path).toMatch(
+        new RegExp(`automationSteps/${STEP_DIRECTORY}/config\\.json$`),
+      );
+    });
+
+    it('writes no bundle.json when a step fails validation', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(
+        STEP_DIRECTORY,
+        stepConfig({
+          inputs: [{ name: 'amount', label: 'Amount', data_type: 'integer', required: true }],
+        }),
+      );
+
+      await buildAndExpectRejection();
+
+      await expect(stat(join(outputDir, 'bundle.json'))).rejects.toThrow();
+    });
+
+    it('rejects a step that still sets the removed action_type field', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(STEP_DIRECTORY, stepConfig({ action_type: 'python' }));
+
+      const thrown = await buildAndExpectRejection();
+
+      expect(thrown).toBeInstanceOf(PluginValidationError);
+
+      const { issues } = thrown as PluginValidationError;
+      const removedFieldIssue = issues.find(
+        (issue) => issue.rule === 'automation-step/removed-field',
+      );
+
+      expect(removedFieldIssue).toBeDefined();
+      expect(removedFieldIssue?.message).toContain('action_type');
+    });
+
+    it('rejects a step requesting a secret the manifest never declares', async () => {
+      await bootstrapPlugin();
+      await writeAutomationStep(STEP_DIRECTORY, stepConfig({ secrets: ['api_key'] }));
+
+      const thrown = await buildAndExpectRejection();
+
+      expect(thrown).toBeInstanceOf(PluginValidationError);
+
+      const { issues } = thrown as PluginValidationError;
+      const secretIssue = issues.find(
+        (issue) => issue.rule === 'automation-step/undeclared-secret',
+      );
+
+      expect(secretIssue).toBeDefined();
+      expect(secretIssue?.message).toContain('api_key');
+    });
+  });
 });

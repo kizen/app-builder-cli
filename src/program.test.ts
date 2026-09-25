@@ -8,12 +8,13 @@ import { createProgram } from './program.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The six commands, in the order `createProgram` registers them. */
-const COMMAND_NAMES = ['create', 'build', 'dev', 'encrypt', 'report', 'icons'];
+/** The seven commands, in the order `createProgram` registers them. */
+const COMMAND_NAMES = ['create', 'setup-copilot', 'build', 'dev', 'encrypt', 'report', 'icons'];
 
 /** Every command's `--help` blurb, verbatim. */
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
   create: 'Scaffold a new Kizen plugin project',
+  'setup-copilot': 'Add or refresh the Copilot code-review setup in an existing plugin repo',
   build: 'Bundle the plugin app into .kizenapp directory',
   dev: 'Start the plugin viewer dev server',
   encrypt: 'Encrypt a secret for a plugin against its encryption keys',
@@ -32,6 +33,7 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-e, --environment <env>',
     '--artifacts <list>',
   ],
+  'setup-copilot': ['--dry-run'],
   build: [],
   dev: [
     '-p, --port <port>',
@@ -114,7 +116,7 @@ describe('createProgram', () => {
 });
 
 describe('command wiring', () => {
-  it('registers exactly the six documented commands, in order', () => {
+  it('registers exactly the seven documented commands, in order', () => {
     expect(createProgram().commands.map((command) => command.name())).toStrictEqual(COMMAND_NAMES);
   });
 
@@ -128,7 +130,7 @@ describe('command wiring', () => {
     expect(flags).toStrictEqual(COMMAND_OPTION_FLAGS[name]);
   });
 
-  it.each(['create', 'build', 'icons'])('takes no arguments on %s', (name) => {
+  it.each(['create', 'setup-copilot', 'build', 'icons'])('takes no arguments on %s', (name) => {
     expect(subcommand(createProgram(), name).registeredArguments).toStrictEqual([]);
   });
 });

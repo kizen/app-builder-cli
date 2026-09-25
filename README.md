@@ -57,7 +57,9 @@ The wizard first asks where the plugin should live (the current directory, or a 
 
 > **Fill in Description and Business ID.** Both are labelled optional in the wizard, but `create` writes them into `kizen.json` as empty strings and the bundler rejects an empty `description` or `developer_business_id` — so a plugin created with those fields skipped fails `appbuilder build` until you edit `kizen.json` by hand. This is tracked internally (KZN-17594); until that fix lands, treat both as required.
 
-`create` writes `kizen.json`, `src/`, `releaseNotes/`, and adds `.kizenapp/` to `.gitignore`.
+It then asks which artifacts to scaffold — Floating frame, Block, Data adornment, Routable page, Toolbar item, Object settings item, JS action — with all seven selected by default (Space toggles, `a` selects all, `n` none). Each selected type gets a working `hello*` directory under `src/`, holding a `config.json` and a script that runs as-is.
+
+`create` writes `kizen.json`, `src/`, `releaseNotes/`, a placeholder `src/thumbnail.png` (512×512, colored from the `api_name`), the templates for the artifacts you picked, and the Copilot review files described under [`appbuilder create`](#appbuilder-create). It adds both `.kizenapp/` and `.copilot-docs/` to `.gitignore`.
 
 ### 2. Set up credentials
 
@@ -102,13 +104,27 @@ Writes `.kizenapp/bundle.json` — the same artifact `dev` serves — after runn
 
 ### `appbuilder create`
 
-Scaffolds a new Kizen plugin project. Interactive; no flags. See [Quickstart](#1-scaffold-a-plugin) for the fields it collects.
+Scaffolds a new Kizen plugin project. Interactive by default; passing any flag switches it to a non-interactive run, including `--artifacts` to choose the artifact templates up front (`appbuilder create --help` lists them all). See [Quickstart](#1-scaffold-a-plugin) for the fields it collects, the artifact picker, and everything it writes.
+
+The scaffold also includes `.github/copilot-instructions.md`, two path-scoped instruction files under `.github/instructions/`, and `.github/workflows/copilot-code-review.yml`. That workflow fetches the Kizen plugin docs from `kizen/app-engine` into `.copilot-docs/` before Copilot code review runs, so reviews cite the current documentation instead of rules copied into the plugin repo. It only takes effect once it is on the repository's default branch, and `.copilot-docs/` is gitignored. Plugins scaffolded before this setup existed can pick it up with `appbuilder setup-copilot`.
+
+### `appbuilder setup-copilot`
+
+Writes the same Copilot review files into an existing plugin repo — run it from the repo root (a `kizen.json` must be there). The four files are CLI-owned, so the command overwrites them and prints `created`, `updated`, or `unchanged` per file; a clobbered local customization is recoverable from git. It also adds `.kizenapp/` and `.copilot-docs/` to `.gitignore` if they are missing.
+
+| Flag        | Default | Purpose                                         |
+| ----------- | ------- | ----------------------------------------------- |
+| `--dry-run` | off     | Print the per-file statuses without writing any |
+
+As with `create`, the workflow only runs once it has reached the repository's default branch.
 
 ### `appbuilder build`
 
 Reads the plugin in the current directory, validates it against the same rules enforced by the Kizen platform and Plugin Wizard, minifies sources, and writes `.kizenapp/bundle.json`. No flags.
 
 If validation finds any errors (for example an `api_name` containing hyphens, which the platform rejects) the build fails and prints each issue grouped by file. Fix the reported issues and re-run.
+
+Automation step configs are validated the same way — parameter data types, secrets that must be declared in the manifest's `base_config.secrets`, fields removed from the publish contract, and `runtime` — against the list of automation data types bundled in `@kizenapps/packager`. The Plugin Wizard applies the same rules at publish, against the live list read from the target environment, so a build that passes locally is expected to publish clean.
 
 ### `appbuilder dev`
 

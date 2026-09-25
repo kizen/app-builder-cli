@@ -250,11 +250,53 @@ describe('createPlugin', () => {
       '.github/copilot-instructions.md',
       '.github/instructions/security.instructions.md',
       '.github/instructions/version-discipline.instructions.md',
+      '.github/workflows/copilot-code-review.yml',
     ]) {
       const content = await readFile(join(input.targetDir, ...file.split('/')), 'utf-8');
 
       expect(content.length).toBeGreaterThan(0);
     }
+  });
+
+  it('scaffolds a code review workflow Copilot will actually pick up', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    const workflow = await readFile(
+      join(input.targetDir, '.github', 'workflows', 'copilot-code-review.yml'),
+      'utf-8',
+    );
+
+    // Copilot ignores the file under any other job name, and does so silently.
+    expect(workflow).toMatch(/^ {2}copilot-setup-steps:$/m);
+
+    // The docs the instructions point at have to be what the workflow fetches.
+    expect(workflow).toContain('.copilot-docs');
+
+    // The fetch is asserted, so a broken clone fails the job instead of quietly
+    // producing a review with no rules behind it.
+    expect(workflow).toContain('test -f .copilot-docs/17-gotchas.md');
+  });
+
+  it('points the Copilot instructions at the fetched docs rather than inlining the rules', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    const instructions = await readFile(
+      join(input.targetDir, '.github', 'copilot-instructions.md'),
+      'utf-8',
+    );
+
+    // Retrieval is heuristic: Copilot is markedly more likely to consult the corpus
+    // when the instructions name it, so this pointer is load-bearing, not decorative.
+    expect(instructions).toContain('.copilot-docs/');
+    expect(instructions).toContain('.copilot-docs/17-gotchas.md');
+    expect(instructions).toContain('.copilot-docs/method-index.md');
+
+    expect(instructions).not.toContain('data_type');
+    expect(instructions).not.toContain('automation-step/');
   });
 
   it('scaffolds a thumbnail inside the entry directory, as a real PNG', async () => {
