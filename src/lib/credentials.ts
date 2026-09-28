@@ -1,8 +1,20 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
-export { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
+import {
+  ENVIRONMENTS,
+  normalizeCredentialIds,
+  type Environment,
+  type Credentials,
+} from '../../shared/lib/credentials.js';
+export {
+  ENVIRONMENTS,
+  cleanCredentialId,
+  normalizeCredentialIds,
+  type CredentialIds,
+  type Environment,
+  type Credentials,
+} from '../../shared/lib/credentials.js';
 
 export interface CredentialProfile {
   name: string;
@@ -18,18 +30,20 @@ function isValidEnvironment(value: unknown): value is Environment {
   return ENVIRONMENTS.includes(value as Environment);
 }
 
+function trimString(value: unknown): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
+
 function parseCredentials(raw: unknown): Credentials {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error('Credentials must be a JSON object');
   }
 
   const obj = raw as Record<string, unknown>;
-  const env = obj.environment;
+  const env = trimString(obj.environment);
 
   return {
-    apiKey: typeof obj.apiKey === 'string' ? obj.apiKey : '',
-    userId: typeof obj.userId === 'string' ? obj.userId : '',
-    businessId: typeof obj.businessId === 'string' ? obj.businessId : '',
+    ...normalizeCredentialIds(obj),
     environment: isValidEnvironment(env) ? env : 'go',
   };
 }
@@ -38,6 +52,31 @@ export async function loadCredentialsFromFile(filePath: string): Promise<Credent
   const content = await readFile(filePath, 'utf-8');
 
   return parseCredentials(JSON.parse(content) as unknown);
+}
+
+export type EnvironmentSource = 'explicit' | 'missing' | 'invalid';
+
+export interface DetailedCredentials {
+  credentials: Credentials;
+  environmentSource: EnvironmentSource;
+}
+
+function environmentSourceOf(raw: unknown): EnvironmentSource {
+  const env = trimString((raw as Record<string, unknown>).environment);
+
+  if (env === undefined || env === null || env === '') {
+    return 'missing';
+  }
+
+  return isValidEnvironment(env) ? 'explicit' : 'invalid';
+}
+
+export async function loadCredentialsDetailed(filePath: string): Promise<DetailedCredentials> {
+  const content = await readFile(filePath, 'utf-8');
+  const raw = JSON.parse(content) as unknown;
+  const credentials = parseCredentials(raw);
+
+  return { credentials, environmentSource: environmentSourceOf(raw) };
 }
 
 export async function loadGlobalCredentials(): Promise<Credentials | null> {
@@ -110,4 +149,18 @@ export async function loadCredentialProfile(name: string): Promise<Credentials |
   } catch {
     return null;
   }
+}
+
+export async function listLoadableCredentialProfiles(): Promise<CredentialProfile[]> {
+  const profiles = await listCredentialProfiles();
+  const loadable = await Promise.all(
+    profiles.map((profile) =>
+      loadCredentialsDetailed(profile.path).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+
+  return profiles.filter((_, index) => loadable[index] === true);
 }

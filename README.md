@@ -104,6 +104,24 @@ Writes `.kizenapp/bundle.json` — the same artifact `dev` serves — after runn
 
 Scaffolds a new Kizen plugin project. Interactive; no flags. See [Quickstart](#1-scaffold-a-plugin) for the fields it collects.
 
+### `appbuilder setup-claude`
+
+Installs or refreshes the Claude Code skill for building custom blocks (`.claude/skills/kizen-custom-block/SKILL.md`) in the plugin in the current directory. `appbuilder create` writes the skill once; run `setup-claude` in an existing plugin to add it, or after upgrading the CLI to pick up the bundled version.
+
+```sh
+appbuilder setup-claude [--dry-run]
+```
+
+| Flag        | Default | Purpose                                         |
+| ----------- | ------- | ----------------------------------------------- |
+| `--dry-run` | off     | Report what would change without writing files. |
+
+It also installs the skill's design guide (`.claude/skills/kizen-custom-block/design.md`), which tells the agent how to make blocks match native dashlets, and the Kizen data helper library (`src/lib/kizenData.js`) that block scripts import to read records and apply the dashboard's date and team filters. The library goes under the `entry` directory from `kizen.json` (`<entry>/lib/kizenData.js`, one per entry in a multi-plugin `kizen.json`), and under `src/` when `kizen.json` has no usable `entry`. `appbuilder create` writes it to `src/lib/kizenData.js`.
+
+It prints one line per file (`created`, `updated` or `unchanged`) and a one-line summary. These files are managed by the CLI, so local edits to them, including edits to `kizenData.js`, are replaced when they're `updated`. Don't edit `kizenData.js`; put your own helpers in another file under `src/lib/`. It only writes these files and never touches the `.github/` Copilot files or block code. It fails with exit code 1 when there's no `kizen.json` in the current directory.
+
+`block push` adds the warning `Claude files managed by appbuilder are out of date; run appbuilder setup-claude` when the plugin has the skill and any managed file (the skill, its design guide or `kizenData.js`) is missing or differs from the bundled one. The warning never fails the push.
+
 ### `appbuilder build`
 
 Reads the plugin in the current directory, validates it against the same rules enforced by the Kizen platform and Plugin Wizard, minifies sources, and writes `.kizenapp/bundle.json`. No flags.
@@ -170,6 +188,230 @@ Prints every valid icon name accepted by toolbar items, pages, and adornments, o
 appbuilder icons | grep calendar
 ```
 
+### `appbuilder block export`
+
+Packages the plugin in the current directory (same validation and minification as `build`) and prints one block as pretty JSON — exactly what the Custom Block (AI Coded) dashlet's paste editor accepts. Nothing is written to `.kizenapp`.
+
+```sh
+appbuilder block export [api_name] [--copy]
+```
+
+| Argument / flag | Default                 | Purpose                                                                |
+| --------------- | ----------------------- | ---------------------------------------------------------------------- |
+| `[api_name]`    | the plugin's only block | Block to export. Required when the plugin has more than one block.     |
+| `--copy`        | off                     | Also copy the JSON to the clipboard; a one-line status goes to stderr. |
+
+Only the block JSON goes to stdout, so it can be piped or redirected (`appbuilder block export > block.json`). Validation warnings and errors go to stderr. The command fails with a non-zero exit code if validation fails, the block can't be found or is ambiguous, or the packaged block would be rejected by the paste editor (for example a block with no `script.js`, a non-positive-integer `min_w`, or a `min_w` greater than its `max_w`).
+
+The JSON carries only the sizes the block's `config.json` writes: `min_w`, `max_w`, `min_h`, `max_h`, `default_w` and `default_h`. Sizes it leaves out are left out of the JSON too, rather than filled with packager defaults. `default_w` and `default_h` are the starting size, in grid columns and rows, of a dashlet created from the block. Each size that is set must be a positive integer, each `min_*` must be no greater than its `max_*`, and each `default_*` must fall within whichever of its `min_*` and `max_*` are set (for example `min_w` ≤ `default_w` ≤ `max_w`). Otherwise the export fails as `invalid_block` naming the field.
+
+### `appbuilder block push`
+
+Packages the plugin in the current directory (same validation as `block export`) and writes one block into a Custom Block (AI Coded) dashlet on a Kizen dashboard, homepage or chart group: it updates an existing dashlet or creates a new one. Card chrome (background, border, radius, shadow) comes from the dashboard's style settings, like native dashlets.
+
+```sh
+appbuilder block push [api_name] [flags]
+```
+
+Interactive by default: pick credentials, the block, the surface (dashboard, homepage or chart group), the dashboard, then whether to update an existing custom code dashlet or create a new one, and confirm. Pushing to a production environment (`go`, `fmo`) asks you to type `y`. In a TTY, `--yes` skips the confirm prompt only when the headless write gate would apply, so `go` and `fmo` still ask for a typed `y` unless `--allow-production` is also passed; `--dry-run` shows the plan without writing. A dashlet edited in Kizen since the last push still prompts before overwriting unless `--force` is passed.
+
+It runs headless when stdin or stdout is not a TTY, or when `--json` is passed. `--yes` never selects the mode. Headless runs never prompt: anything that would be a question fails with `needs_choice` and lists the choices.
+
+| Argument / flag            | Default                         | Purpose                                                                                     |
+| -------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `[api_name]`               | the plugin's only block         | Block to push. Required when the plugin has more than one block.                            |
+| `-c, --credentials <path>` | see resolution below            | Credentials JSON file to use                                                                |
+| `--profile <name>`         | see resolution below            | Stored credential profile to use                                                            |
+| `--dashboard <id>`         | the remembered target           | Dashboard, homepage or chart group to push to                                               |
+| `--dashlet <id>`           | matched by push history or name | Existing custom code dashlet to update. Needs `--dashboard`; can't be used with `--create`. |
+| `--create`                 | off                             | Create a new dashlet instead of updating one                                                |
+| `--dry-run`                | off                             | Resolve everything and print the request without writing                                    |
+| `--yes`                    | off                             | Write without asking. Headless runs without it are dry runs.                                |
+| `--allow-production`       | off                             | Allow headless writes to `go` / `fmo`                                                       |
+| `--force`                  | off                             | Overwrite a dashlet that was edited in Kizen since the last push                            |
+| `--forget`                 | off                             | Clear the remembered target for this block before resolving                                 |
+| `--json`                   | off                             | Print a JSON result to stdout (forces headless); the human summary goes to stderr           |
+
+**Credentials** resolve in this order: `-c`, then `--profile`, then the project's active profile from `.kizenapp/config.json`, then the only loadable stored profile; several profiles without a choice is `needs_choice`. A project set to local browser-only credentials must pass `-c` or `--profile`. The credentials file must name a valid `environment` (`go`, `fmo`, `staging`, `integration`, `test1`); a missing or invalid one is refused with `credentials_invalid` rather than defaulting to production. Empty `apiKey`, `userId` or `businessId` are refused the same way.
+
+**Write gating (headless).** `--dry-run` is always a dry run. Without `--yes` the run is a dry run too, and stderr says `Dry run only: pass --yes to write.` With `--yes`, `go` and `fmo` also need `--allow-production` (else `production_requires_flag`). If the target dashlet was pushed from here before and its content has since been changed in Kizen, both dry runs and writes stop with `drift_detected` unless `--force` is passed.
+
+**Remembered target.** A successful write records the target in `.kizenapp/pushes.json` (kept gitignored): one entry per environment, business, plugin and block. Pushing the block somewhere else replaces the entry. With no `--dashboard`, the next push goes to the remembered dashlet. If that dashboard or dashlet is gone, the push fails with `remembered_target_missing` and never silently creates a new one. When only the dashlet is gone the failure lists the dashboard's target `choices`, and `--create` adds a new block there; otherwise pass `--dashboard <id>` to choose another target, or `--forget` to clear it (honored in dry runs too; the result then carries `"forgotten": true`). A missing `pushes.json` just means nothing is remembered yet; one that can't be read, isn't valid JSON, or isn't a JSON array fails the push with `local_error` before anything is written, so fix or delete it.
+
+**Size.** A dashlet created by `push` starts `default_w` columns wide, or `min_w` when there's no `default_w`, or 6 when neither is set. Its height works the same way with `default_h`, then `min_h`, then 3 rows. That size is clamped into whichever of `min_*`/`max_*` the block's `config.json` sets, then into the grid (2 to 12 columns, 1 to 99 rows). The pushed content carries exactly the sizes `config.json` writes, the same as `block export`. Updating an existing dashlet never changes its layout or size.
+
+**Matching.** With `--dashboard` and neither `--dashlet` nor `--create`, the push updates the dashlet recorded in `.kizenapp/pushes.json` for that dashboard, else the single custom code dashlet named `appbuilder:<plugin_api_name>/<block_api_name>` (the name given to every dashlet `push` creates). No match, or several, is `needs_choice`.
+
+#### JSON output
+
+With `--json`, every result is one pretty-printed JSON object on stdout, and the human summary goes to stderr. Headless without `--json` prints human text instead: success and dry-run output on stdout, errors on stderr. A dry run:
+
+```json
+{
+  "ok": true,
+  "applied": false,
+  "dryRun": true,
+  "reason": "no_yes",
+  "action": "update",
+  "environment": "staging",
+  "businessId": "b0c6…",
+  "dashboard": { "id": "5f1e…", "name": "Sales overview", "type": "dashboard" },
+  "dashletId": "9a2d…",
+  "url": "https://v2.staging.kizen.com/dashboard/5f1e…",
+  "resolvedBy": "remembered",
+  "block": {
+    "pluginApiName": "my_plugin",
+    "apiName": "pipeline_summary",
+    "name": "Pipeline summary"
+  },
+  "method": "PATCH",
+  "path": "/dashboards/5f1e…/dashlet/9a2d…",
+  "body": { "config": { "…": "…" } },
+  "warnings": []
+}
+```
+
+`reason` is `flag` (`--dry-run`) or `no_yes` (headless without `--yes`). `action` is `create` or `update`, `method` is `POST` or `PATCH`, and `dashletId` is `null` for a create. `resolvedBy` is `flag`, `remembered`, `push_map` or `name`. `dashboard.type` is `dashboard`, `homepage` or `chart_group`.
+
+An applied write:
+
+```json
+{
+  "ok": true,
+  "applied": true,
+  "dryRun": false,
+  "action": "created",
+  "environment": "staging",
+  "businessId": "b0c6…",
+  "dashboard": { "id": "5f1e…", "name": "Sales overview", "type": "dashboard" },
+  "dashletId": "c41b…",
+  "url": "https://v2.staging.kizen.com/dashboard/5f1e…",
+  "refresh": {
+    "dashboardId": "5f1e…",
+    "script": "await window.__kizenCustomBlocks?.refresh('5f1e…')"
+  },
+  "resolvedBy": "flag",
+  "block": {
+    "pluginApiName": "my_plugin",
+    "apiName": "pipeline_summary",
+    "name": "Pipeline summary"
+  },
+  "remembered": true,
+  "warnings": []
+}
+```
+
+`action` is `created` or `updated`. `remembered` is `false` (with a warning) when `.kizenapp/pushes.json` couldn't be written; the push itself still succeeded.
+
+`refresh` is only on applied writes, and only when the dashboard id is a uuid; otherwise it's left out. `script` is exactly `await window.__kizenCustomBlocks?.refresh('<dashboardId>')`. Run it in a Kizen tab that already has `url` open to refetch that dashboard in place instead of reloading the page. The hook is registered on dashboards, homepages and chart groups. When it's available on the page, the script resolves to `{ refreshed: true, dashboardId }`. Otherwise it resolves to `undefined`: that browser's localStorage doesn't have `kizen-flag-custom-code-blocks` set to `'true'`, or the page is an older Kizen build without the hook. `refreshed: true` means the dashboard query was invalidated, not that the target was on screen, which is why the agent matches the tab by `url` and screenshots afterwards. Human output prints the same script on a `Refresh an open tab:` line after the URL.
+
+A failure exits 1:
+
+```json
+{
+  "ok": false,
+  "code": "needs_choice",
+  "message": "Choose a block to update on \"Sales overview\", or create a new one; pass --dashlet <id> or --create.",
+  "choice": "target",
+  "choices": [
+    {
+      "value": "9a2d…",
+      "label": "Pipeline summary",
+      "args": ["--dashboard", "5f1e…", "--dashlet", "9a2d…"],
+      "pushKey": "appbuilder:my_plugin/pipeline_summary",
+      "isFromThisPlugin": true
+    },
+    { "value": "new", "label": "Create a new block", "args": ["--dashboard", "5f1e…", "--create"] }
+  ]
+}
+```
+
+Optional failure fields: `choice` (`profile`, `block`, `dashboard` or `target`) and `choices` with `needs_choice`, `remembered_target_missing` and a `--dashlet` that is `not_found`; `issues` (the packager's validation issues) with `validation_failed`; `field` with `invalid_block`; `hint` with `auth_failed` and `forbidden`. Each choice's `args` are the exact CLI arguments that select it, to be appended to the command (dashboard choices also carry `surface` and `canEdit`).
+
+| Code                        | Meaning                                                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `needs_choice`              | A profile, block, dashboard or target must be chosen; see `choice` and `choices`                                                         |
+| `validation_failed`         | The plugin failed validation                                                                                                             |
+| `invalid_block`             | The plugin has no blocks, or the block would be rejected (`field` names the problem)                                                     |
+| `credentials_invalid`       | No usable credentials, or the file's `environment` is missing or invalid                                                                 |
+| `auth_failed`               | Kizen rejected the credentials                                                                                                           |
+| `forbidden`                 | The credentials can't access the dashboard                                                                                               |
+| `not_found`                 | The dashboard, or the `--dashlet` on it, doesn't exist                                                                                   |
+| `remembered_target_missing` | The remembered dashboard or dashlet is gone; nothing is created without `--create`                                                       |
+| `drift_detected`            | The dashlet was edited in Kizen since the last push; `--force` overwrites                                                                |
+| `production_requires_flag`  | `--yes` against `go` / `fmo` without `--allow-production`                                                                                |
+| `usage_error`               | Conflicting flags (`--dashlet` with `--create`, `--dashlet` without `--dashboard`), or a non-custom-code `--dashlet`                     |
+| `network_error`             | Kizen couldn't be reached                                                                                                                |
+| `api_error`                 | Any other Kizen API failure                                                                                                              |
+| `local_error`               | A local failure that isn't a validation error: no `kizen.json`, packaging, reading `.kizenapp/pushes.json`, or writing it for `--forget` |
+
+### `appbuilder block targets`
+
+Lists where a block can be pushed: the business's dashboards and homepages plus its custom objects, or with `--object` one custom object's chart groups. Always headless.
+
+The CLI honors `HTTP_PROXY`/`HTTPS_PROXY` and `NO_PROXY` on Node versions that support it (24.14+, or with `NODE_USE_ENV_PROXY=1` set).
+
+`customObjects` is sorted by name and ends with Contacts (`"fetchUrl": "client"`) when the CLI can look up the business's contacts object; Kizen doesn't list Contacts with the other custom objects, so if that lookup fails the row is silently left out. `--object <contacts id>` lists Contacts' chart groups like any other object's.
+
+| Flag                       | Default             | Purpose                                                   |
+| -------------------------- | ------------------- | --------------------------------------------------------- |
+| `-c, --credentials <path>` | as for `block push` | Credentials JSON file to use                              |
+| `--profile <name>`         | as for `block push` | Stored credential profile to use                          |
+| `--object <id>`            | —                   | List the chart groups of this custom object (or Contacts) |
+| `--json`                   | off                 | Print JSON instead of tables                              |
+
+```json
+{
+  "ok": true,
+  "environment": "staging",
+  "businessId": "b0c6…",
+  "surfaces": {
+    "dashboard": [
+      {
+        "id": "5f1e…",
+        "name": "Sales overview",
+        "type": "dashboard",
+        "dashletsCount": 4,
+        "employeeAccess": "Owner",
+        "hidden": false,
+        "canEdit": true
+      }
+    ],
+    "homepage": []
+  },
+  "customObjects": [
+    { "id": "71d0…", "objectName": "Deals", "fetchUrl": "pipeline" },
+    { "id": "c3a9…", "objectName": "Contacts", "fetchUrl": "client" }
+  ]
+}
+```
+
+With `--object <id>` the shape is `{ ok, environment, businessId, object: { id, objectName, fetchUrl } | null, surfaces: { chart_group: [...] } }`. `canEdit` is `true` for `Owner`, `Admin` or `Edit` access and `null` when Kizen reports no access level. Failures use the same shape and codes as `block push`.
+
+#### Agent loop
+
+The sequence a coding agent follows to build a block and put it on a dashboard. After upgrading the CLI, run `appbuilder setup-claude` so the agent's skill matches the new commands.
+
+```sh
+appbuilder block export <api_name>
+appbuilder block targets --json
+appbuilder block targets --object <object_id> --json        # chart groups only
+appbuilder block push <api_name> --dashboard <id> --json    # needs_choice → choices (existing blocks + new)
+appbuilder block push <api_name> --dashboard <id> [--dashlet <id> | --create] --dry-run --json
+appbuilder block push <api_name> --dashboard <id> [--dashlet <id> | --create] --yes --json
+# change requests: edit, re-validate, then
+appbuilder block push <api_name> --yes --json               # remembered target, zero questions
+```
+
+After each applied push, an agent that can drive the user's browser refreshes the open tab instead of reloading it: find the tab whose origin and path match `url`, run `refresh.script` there, and check that the block rendered. If the script returns `undefined`, the hook isn't available on that page, so navigate the tab to `url` instead. If no tab has `url` open, open it in a new one. `refresh` is absent when the dashboard id isn't a uuid; navigate to `url` in that case.
+
+Guardrails:
+
+- Never pass `--allow-production` unless the user named production.
+- Stop on `drift_detected` and ask the user before retrying with `--force`.
+- On `needs_choice`, ask the user using `choices` (labels to show, `args` to append).
+- On `remembered_target_missing`, ask whether to `--create` a new block rather than creating one.
+
 ## Reference
 
 ### Environment variables
@@ -191,6 +433,7 @@ Prod follows the same order minus step 3: `PLUGIN_WIZARD_URL`, then **`PLUGIN_WI
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `bundle.json` | The packaged, minified, validated plugin bundle the viewer loads.                                                               |
 | `config.json` | Per-project preferences: credential mode, active profile name, last viewed path, encryption target.                             |
+| `pushes.json` | The remembered `block push` targets: one dashlet per environment, business, plugin and block.                                   |
 | `.chrome/`    | The dedicated Chromium user-data directory for the viewer — cookies and session state included.                                 |
 | `venv/`       | The Python virtualenv used to execute code steps locally. Rebuilt when its interpreter is too old for the bundled requirements. |
 

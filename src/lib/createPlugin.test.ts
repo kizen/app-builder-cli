@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -9,6 +9,7 @@ import {
   precheckTargetDir,
 } from './createPlugin.js';
 import type { CreatePluginInput } from './createPlugin.js';
+import { exportBlock } from './exportBlock.js';
 
 let root: string;
 
@@ -255,6 +256,78 @@ describe('createPlugin', () => {
 
       expect(content.length).toBeGreaterThan(0);
     }
+  });
+
+  it('scaffolds the kizen-custom-block Claude Code skill', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    const content = await readFile(
+      join(input.targetDir, '.claude', 'skills', 'kizen-custom-block', 'SKILL.md'),
+      'utf-8',
+    );
+
+    expect(content).toMatch(/^---\nname: kizen-custom-block\ndescription: Use this skill when /);
+
+    const design = await readFile(
+      join(input.targetDir, '.claude', 'skills', 'kizen-custom-block', 'design.md'),
+      'utf-8',
+    );
+
+    expect(design).toContain('# Designing a Kizen custom block');
+  });
+
+  it('scaffolds the kizenData lib inside the entry directory', async () => {
+    const input = validInput();
+
+    await createPlugin(input);
+
+    const lib = await readFile(join(input.targetDir, 'src', 'lib', 'kizenData.js'), 'utf-8');
+    const template = await readFile(
+      new URL('../templates/plugin/lib/kizenData.js', import.meta.url),
+      'utf-8',
+    );
+
+    expect(lib).toBe(template);
+  });
+
+  it('exports a block that imports the kizenData lib, validation-clean and with the lib inlined', async () => {
+    const input = validInput({ artifacts: ['block'] });
+
+    await createPlugin(input);
+
+    const blockDir = join(input.targetDir, 'src', 'blocks', 'statusCounts');
+
+    await cp(join(input.targetDir, 'src', 'blocks', 'helloBlock'), blockDir, { recursive: true });
+    await rm(join(input.targetDir, 'src', 'blocks', 'helloBlock'), { recursive: true });
+    await writeFile(
+      join(blockDir, 'config.json'),
+      JSON.stringify({ name: 'Status counts', api_name: 'status_counts', types: ['dashboards'] }),
+      'utf-8',
+    );
+    await writeFile(
+      join(blockDir, 'script.js'),
+      [
+        "import { blockFilters, countBy, formatNumber, getFields, searchRecords } from '../../lib/kizenData.js';",
+        '',
+        "const fields = await getFields(this, 'client_client');",
+        'const { filters } = blockFilters(this.args, fields);',
+        "const { records } = await searchRecords(this, { object: 'client_client', fieldNames: ['status'], filters });",
+        "const rows = countBy(records, 'status');",
+        "this.outputUI(`<ul>${rows.map((r) => `<li>${r.label}: ${formatNumber(r.count)}</li>`).join('')}</ul>`);",
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const { block, warnings } = await exportBlock(input.targetDir, 'status_counts');
+
+    expect(warnings).toStrictEqual([]);
+    expect(block.script).not.toContain('kizenData.js');
+    expect(block.script).toContain('__lib_kizenData');
+    expect(block.script).toContain('/custom-objects/');
+    expect(block.script).toContain('999B+');
   });
 
   it('scaffolds a thumbnail inside the entry directory, as a real PNG', async () => {

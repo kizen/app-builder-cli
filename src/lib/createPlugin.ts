@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { ensureGitignore } from './gitignore.js';
 import { scaffoldArtifactFiles } from './createArtifacts.js';
 import type { ArtifactType, ScaffoldedFile } from './createArtifacts.js';
-import { copilotFiles } from './createCopilotFiles.js';
+import { claudeFiles, copilotFiles } from './createCopilotFiles.js';
 import { thumbnailBytes } from './createThumbnail.js';
 import type { Environment } from '../../shared/lib/credentials.js';
 
@@ -123,6 +123,7 @@ export async function createPlugin(input: CreatePluginInput): Promise<void> {
   await Promise.all([
     writeScaffoldedFiles(input.targetDir, scaffoldArtifactFiles(input.artifacts ?? [])),
     writeScaffoldedFiles(input.targetDir, copilotFiles()),
+    writeScaffoldedFiles(input.targetDir, claudeFiles()),
     writeFile(join(input.targetDir, ...THUMBNAIL_PATH.split('/')), thumbnailBytes(input.apiName)),
   ]);
 

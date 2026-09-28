@@ -65,6 +65,34 @@ describe('credential paths', () => {
   });
 });
 
+describe('cleanCredentialId', () => {
+  it('trims strings and maps non-strings to an empty string', () => {
+    expect(mod.cleanCredentialId('\r\nbiz-123\r\r ')).toBe('biz-123');
+    expect(mod.cleanCredentialId(undefined)).toBe('');
+    expect(mod.cleanCredentialId(42)).toBe('');
+  });
+});
+
+describe('normalizeCredentialIds', () => {
+  it('trims CR, LF and spaces from pasted ids', () => {
+    expect(
+      mod.normalizeCredentialIds({
+        apiKey: ' key-123\r\r',
+        userId: 'user-123\n',
+        businessId: '\r\nbiz-123\r\r ',
+      }),
+    ).toStrictEqual({ apiKey: 'key-123', userId: 'user-123', businessId: 'biz-123' });
+  });
+
+  it('turns missing and non-string ids into empty strings', () => {
+    expect(mod.normalizeCredentialIds({ apiKey: undefined, userId: 7 })).toStrictEqual({
+      apiKey: '',
+      userId: '',
+      businessId: '',
+    });
+  });
+});
+
 describe('loadCredentialsFromFile parsing', () => {
   it('reads a fully valid credentials file', async () => {
     await writeGlobal(JSON.stringify(VALID));
@@ -123,6 +151,30 @@ describe('loadCredentialsFromFile parsing', () => {
 
       expect(loaded.environment).toBe(environment);
     }
+  });
+
+  it('trims surrounding whitespace, CR and LF from every id', async () => {
+    await writeGlobal(
+      JSON.stringify({
+        apiKey: '  key-123\r\r',
+        userId: '\nuser-123\n',
+        businessId: ' \r\nbiz-123\r\r ',
+        environment: 'staging',
+      }),
+    );
+
+    await expect(mod.loadCredentialsFromFile(mod.GLOBAL_CREDENTIALS_PATH)).resolves.toEqual(VALID);
+  });
+
+  it('trims the environment before validating it', async () => {
+    await writeGlobal(
+      JSON.stringify({ ...VALID, businessId: 'biz-123\r\r', environment: ' staging\r\n' }),
+    );
+
+    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).resolves.toEqual({
+      credentials: VALID,
+      environmentSource: 'explicit',
+    });
   });
 
   it('drops unknown keys', async () => {
@@ -290,5 +342,75 @@ describe('credential profiles', () => {
 
     await expect(mod.loadCredentialProfile('a')).resolves.toMatchObject({ apiKey: 'a-key' });
     await expect(mod.loadCredentialProfile('b')).resolves.toMatchObject({ apiKey: 'b-key' });
+  });
+});
+
+describe('loadCredentialsDetailed', () => {
+  it('reports an explicit environment', async () => {
+    await writeGlobal(JSON.stringify(VALID));
+
+    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).resolves.toEqual({
+      credentials: VALID,
+      environmentSource: 'explicit',
+    });
+  });
+
+  it('reports a missing environment and still defaults it to go', async () => {
+    for (const environment of [undefined, null, '']) {
+      await writeGlobal(JSON.stringify({ ...VALID, environment }));
+
+      const detailed = await mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH);
+
+      expect(detailed.environmentSource).toBe('missing');
+      expect(detailed.credentials.environment).toBe('go');
+    }
+  });
+
+  it('reports an invalid environment such as prod', async () => {
+    for (const environment of ['prod', 7, ['staging']]) {
+      await writeGlobal(JSON.stringify({ ...VALID, environment }));
+
+      const detailed = await mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH);
+
+      expect(detailed.environmentSource).toBe('invalid');
+      expect(detailed.credentials.environment).toBe('go');
+    }
+  });
+
+  it('rejects a missing file', async () => {
+    await expect(mod.loadCredentialsDetailed(join(state.home, 'nope.json'))).rejects.toThrow();
+  });
+
+  it('rejects corrupt JSON and non-object payloads', async () => {
+    await writeGlobal('{ not json');
+
+    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).rejects.toThrow();
+
+    await writeGlobal('null');
+
+    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).rejects.toThrow(
+      'Credentials must be a JSON object',
+    );
+  });
+});
+
+describe('listLoadableCredentialProfiles', () => {
+  it('excludes the default profile when its file is absent', async () => {
+    await expect(mod.listLoadableCredentialProfiles()).resolves.toEqual([]);
+  });
+
+  it('excludes profiles that fail to parse and keeps the listing order', async () => {
+    await mod.saveGlobalCredentials(VALID);
+    await mod.saveCredentialProfile('work', VALID);
+    await writeFile(mod.getProfilePath('broken'), '{ not json', 'utf-8');
+    await writeFile(mod.getProfilePath('scalar'), '42', 'utf-8');
+
+    const all = await mod.listCredentialProfiles();
+    const loadable = await mod.listLoadableCredentialProfiles();
+
+    expect(loadable.map((p) => p.name)).toEqual(
+      all.map((p) => p.name).filter((name) => name !== 'broken' && name !== 'scalar'),
+    );
+    expect(loadable.map((p) => p.name).sort()).toEqual(['credentials', 'work']);
   });
 });

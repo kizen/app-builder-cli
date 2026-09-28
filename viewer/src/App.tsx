@@ -27,6 +27,7 @@ const DevSidebar = lazy(() =>
 );
 
 import { CredentialsContext, type Credentials } from './CredentialsContext.js';
+import { normalizeCredentialIds } from '@shared/lib/credentials.js';
 import { BootstrapContext } from './BootstrapContext.js';
 import type { BootstrapData } from './BootstrapContext.js';
 import { STORAGE_KEYS, setCredentialPrefix } from './lib/storageKeys.js';
@@ -147,9 +148,13 @@ export const App: FC = () => {
 
   const [credentials, setCredentials] = useState<Credentials>(() => {
     try {
+      const stored = (JSON.parse(localStorage.getItem(STORAGE_KEYS.credentials) ?? '{}') ??
+        {}) as Partial<Credentials>;
+
       return {
         ...EMPTY_CREDENTIALS,
-        ...JSON.parse(localStorage.getItem(STORAGE_KEYS.credentials) ?? '{}'),
+        ...stored,
+        ...normalizeCredentialIds(stored),
       } as Credentials;
     } catch {
       return EMPTY_CREDENTIALS;
@@ -188,9 +193,11 @@ export const App: FC = () => {
   }, [serverCredentials, serverActiveProfile]);
 
   const handleCredentialsChange = (next: Credentials): void => {
-    setCredentials(next);
+    const normalized = { ...next, ...normalizeCredentialIds(next) };
 
-    localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(next));
+    setCredentials(normalized);
+
+    localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(normalized));
   };
 
   const {

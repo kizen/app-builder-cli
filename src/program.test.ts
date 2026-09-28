@@ -9,16 +9,27 @@ import { createProgram } from './program.js';
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** The six commands, in the order `createProgram` registers them. */
-const COMMAND_NAMES = ['create', 'build', 'dev', 'encrypt', 'report', 'icons'];
+const COMMAND_NAMES = [
+  'create',
+  'setup-claude',
+  'build',
+  'dev',
+  'encrypt',
+  'report',
+  'icons',
+  'block',
+];
 
 /** Every command's `--help` blurb, verbatim. */
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
   create: 'Scaffold a new Kizen plugin project',
+  'setup-claude': 'Install or refresh the Claude Code skill for building custom blocks',
   build: 'Bundle the plugin app into .kizenapp directory',
   dev: 'Start the plugin viewer dev server',
   encrypt: 'Encrypt a secret for a plugin against its encryption keys',
   report: 'Generate a self-contained HTML report of the plugin',
   icons: 'List all valid icon names accepted by toolbar items, pages, and adornments',
+  block: 'Work with plugin content blocks',
 };
 
 /** The flag strings each command declares, in declaration order. */
@@ -32,6 +43,7 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-e, --environment <env>',
     '--artifacts <list>',
   ],
+  'setup-claude': ['--dry-run'],
   build: [],
   dev: [
     '-p, --port <port>',
@@ -51,7 +63,29 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
   ],
   report: ['-o, --output <path>'],
   icons: [],
+  block: [],
 };
+
+const BLOCK_PUSH_FLAGS = [
+  '-c, --credentials <path>',
+  '--profile <name>',
+  '--dashboard <id>',
+  '--dashlet <id>',
+  '--create',
+  '--dry-run',
+  '--yes',
+  '--allow-production',
+  '--force',
+  '--forget',
+  '--json',
+];
+
+const BLOCK_TARGETS_FLAGS = [
+  '-c, --credentials <path>',
+  '--profile <name>',
+  '--object <id>',
+  '--json',
+];
 
 function subcommand(program: Command, name: string): Command {
   const found = program.commands.find((command) => command.name() === name);
@@ -114,7 +148,7 @@ describe('createProgram', () => {
 });
 
 describe('command wiring', () => {
-  it('registers exactly the six documented commands, in order', () => {
+  it('registers exactly the eight documented commands, in order', () => {
     expect(createProgram().commands.map((command) => command.name())).toStrictEqual(COMMAND_NAMES);
   });
 
@@ -128,7 +162,7 @@ describe('command wiring', () => {
     expect(flags).toStrictEqual(COMMAND_OPTION_FLAGS[name]);
   });
 
-  it.each(['create', 'build', 'icons'])('takes no arguments on %s', (name) => {
+  it.each(['create', 'setup-claude', 'build', 'icons'])('takes no arguments on %s', (name) => {
     expect(subcommand(createProgram(), name).registeredArguments).toStrictEqual([]);
   });
 });
@@ -205,6 +239,81 @@ describe('report command options', () => {
     // the shape rather than an absolute path.
     expect(output.description).toMatch(/^output file path \(default: .+<api_name>\.html\)$/);
     expect(output.defaultValue).toBeUndefined();
+  });
+});
+
+describe('block command', () => {
+  it('nests an export subcommand with an optional api_name argument and a --copy option', () => {
+    const exportCommand = subcommand(createProgram(), 'block').commands.find(
+      (command) => command.name() === 'export',
+    );
+
+    expect(exportCommand).toBeDefined();
+    expect(
+      exportCommand?.registeredArguments.map((arg) => [arg.name(), arg.required]),
+    ).toStrictEqual([['api_name', false]]);
+    expect(exportCommand?.options.map((opt) => opt.flags)).toStrictEqual(['--copy']);
+  });
+
+  it('registers export, push and targets, in order', () => {
+    expect(
+      subcommand(createProgram(), 'block').commands.map((command) => command.name()),
+    ).toStrictEqual(['export', 'push', 'targets']);
+  });
+
+  it('describes push and targets', () => {
+    const block = subcommand(createProgram(), 'block');
+
+    expect(subcommand(block, 'push').description()).toBe(
+      'Push a block to a Kizen dashboard, homepage or chart group dashlet',
+    );
+    expect(subcommand(block, 'targets').description()).toBe(
+      'List the dashboards, homepages and chart groups a block can be pushed to',
+    );
+  });
+
+  it('gives push an optional api_name argument and its documented flags', () => {
+    const push = subcommand(subcommand(createProgram(), 'block'), 'push');
+
+    expect(push.registeredArguments.map((arg) => [arg.name(), arg.required])).toStrictEqual([
+      ['api_name', false],
+    ]);
+    expect(push.options.map((opt) => opt.flags)).toStrictEqual(BLOCK_PUSH_FLAGS);
+  });
+
+  it('gives targets no arguments and its documented flags', () => {
+    const targets = subcommand(subcommand(createProgram(), 'block'), 'targets');
+
+    expect(targets.registeredArguments).toStrictEqual([]);
+    expect(targets.options.map((opt) => opt.flags)).toStrictEqual(BLOCK_TARGETS_FLAGS);
+  });
+
+  it('maps the push and targets flags to their option names', () => {
+    const block = subcommand(createProgram(), 'block');
+    const attributeNames = (name: string): string[] =>
+      subcommand(block, name).options.map((opt) => opt.attributeName());
+
+    expect(attributeNames('push')).toStrictEqual([
+      'credentials',
+      'profile',
+      'dashboard',
+      'dashlet',
+      'create',
+      'dryRun',
+      'yes',
+      'allowProduction',
+      'force',
+      'forget',
+      'json',
+    ]);
+    expect(attributeNames('targets')).toStrictEqual(['credentials', 'profile', 'object', 'json']);
+  });
+
+  it('leaves every push and targets option unset before parsing', () => {
+    const block = subcommand(createProgram(), 'block');
+
+    expect(subcommand(block, 'push').opts()).toStrictEqual({});
+    expect(subcommand(block, 'targets').opts()).toStrictEqual({});
   });
 });
 
