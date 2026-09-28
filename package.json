@@ -45,7 +45,8 @@
     "start": "appbuilder",
     "prepublishOnly": "pnpm run typecheck && pnpm run lint && pnpm run test && pnpm run build",
     "version:prerelease": "node scripts/version-prerelease.js",
-    "version:check": "node scripts/version-release.js"
+    "version:check": "node scripts/version-release.js",
+    "release:poc": "node scripts/release-poc.js"
   },
   "dependencies": {
     "@kizenapps/engine": "1.10.0",

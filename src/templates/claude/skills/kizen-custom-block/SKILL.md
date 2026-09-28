@@ -130,21 +130,25 @@ Run these exact commands. The flags and JSON keys are the contract. `<api_name>`
    - Only offer rows where `canEdit !== false`. Ask the user which surface and which specific one. Don't pick for them.
    - Optionally run `appbuilder block push <api_name> --dashboard <id> --json` to get a `needs_choice` result listing the existing custom blocks and "new".
 3. **Preview.** Run `appbuilder block push <api_name> --dashboard <id> [--dashlet <id> | --create] --dry-run --json`. Show the user the `environment`, `businessId`, `dashboard.name`, `action` and any `warnings`.
-4. **Apply** once the user agrees: run the same command with `--yes` in place of `--dry-run`. Treat the push as done only when `applied === true`. Give the user the returned `url`, then refresh the browser (below).
+4. **Apply** once the user agrees: run the same command with `--yes` in place of `--dry-run`. Treat the push as done only when `applied === true`. Give the user the block URL (below), then refresh the browser (below).
 5. **Change requests.** Edit the files, validate again (step 1), then run `appbuilder block push <api_name> --yes --json`. With no target flags it updates the remembered dashlet. Refresh the browser (below) after each push. Repeat for each change.
 
 A headless run without `--yes` is always a dry run.
+
+### The block URL
+
+The block URL is the result's `url`, with one exception: when the result's `environment` is `integration`, replace the origin of `url` with `https://pr-9378.integration.kizen.dev` and keep the path and query. For example, `https://v2.integration.kizen.dev/dashboard/<id>` becomes `https://pr-9378.integration.kizen.dev/dashboard/<id>`. Every other environment uses `url` unchanged. Use the block URL everywhere this skill says to give, open, match or navigate to the block's page. This exception is temporary for the test build and will be removed once the feature is on integration.
 
 ### Refresh the browser after a push
 
 Do this after every applied push, only when Claude-in-Chrome tools are available. Dashlets don't poll, so the user's open tab keeps the old block until it's refreshed. Don't reload the page.
 
-1. List the open tabs (`tabs_context_mcp`) and find the one whose URL has the same origin and path as the result's `url`.
-2. If there is no such tab, open `url` in a new tab (`tabs_create_mcp`) and go to step 5.
-3. If the result has a `refresh` field, run `refresh.script` exactly as given in that tab with the page JavaScript tool (`javascript_tool`). If it has no `refresh` field, navigate that tab to `url` (`navigate`) and go to step 5.
+1. List the open tabs (`tabs_context_mcp`) and find the one whose URL has the same origin and path as the block URL.
+2. If there is no such tab, open the block URL in a new tab (`tabs_create_mcp`) and go to step 5.
+3. If the result has a `refresh` field, run `refresh.script` exactly as given in that tab with the page JavaScript tool (`javascript_tool`). If it has no `refresh` field, navigate that tab to the block URL (`navigate`) and go to step 5.
 4. Check what the script returned:
    - `{ refreshed: true, ... }`: the dashboard refetched in place.
-   - `undefined`: the refresh hook isn't available on this page. Navigate the tab to `url` instead. Then run `localStorage.getItem('kizen-flag-custom-code-blocks')` in that tab with `javascript_tool`. If it isn't `'true'`, tell the user once per conversation that setting that localStorage key to `'true'` in the Kizen tab enables in-place refresh. Never set it yourself.
+   - `undefined`: the refresh hook isn't available on this page. Navigate the tab to the block URL instead. Then run `localStorage.getItem('kizen-flag-custom-code-blocks')` in that tab with `javascript_tool`. If it isn't `'true'`, tell the user once per conversation that setting that localStorage key to `'true'` in the Kizen tab enables in-place refresh. Never set it yourself.
 5. Wait a couple of seconds, take a screenshot (`computer`), and check that the block rendered: not blank, and no visible error. Report what you saw to the user. If the block is blank or shows an error, read the console and fix the block before pushing again.
 
 Never run any other injected code in the user's tabs. `refresh.script` is the only script you may run, with one exception: the read-only `localStorage.getItem('kizen-flag-custom-code-blocks')` check above.
