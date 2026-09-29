@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PluginValidationError } from '@kizenapps/packager';
-import type { Block, DeployablePlugin, ValidationIssue } from '@kizenapps/packager';
+import type { Block, DeployablePlugin, RoutablePage, ValidationIssue } from '@kizenapps/packager';
 import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { AppBuilderConfig } from './config.js';
 import type {
@@ -12,6 +12,8 @@ import type {
   Environment,
 } from './credentials.js';
 import { claudeFiles } from './createCopilotFiles.js';
+import { createPlugin } from './createPlugin.js';
+import { packageBlocks, type ViewsByPlugin } from './exportBlock.js';
 import { KizenApiError } from './kizenClient.js';
 import type {
   KizenClient,
@@ -73,6 +75,22 @@ const makePlugin = (apiName: string, blocks: Block[]): DeployablePlugin =>
   ({ api_name: apiName, artifacts: { custom_blocks: blocks } }) as unknown as DeployablePlugin;
 
 const BLOCK_HASH = canonicalContentHash(toCustomCodeContent(makeBlock()));
+
+const makeView = (overrides: Partial<RoutablePage> = {}): RoutablePage => ({
+  name: 'Detail',
+  api_name: 'detail_view',
+  type: 'script',
+  css: '',
+  event_scripts: { close: 'close();' },
+  callback: '',
+  is_toolbar_item: false,
+  toolbar_color: '',
+  toolbar_icon: '',
+  script: 'detail();',
+  html: '',
+  iframe_url: '',
+  ...overrides,
+});
 
 const makeCredentials = (overrides: Partial<Credentials> = {}): Credentials => ({
   apiKey: 'key',
@@ -266,6 +284,7 @@ interface HarnessOptions {
   profiles?: CredentialProfile[];
   config?: AppBuilderConfig;
   deployable?: DeployablePlugin[];
+  views?: ViewsByPlugin;
   packageError?: unknown;
   warnings?: ValidationIssue[];
   pushMap?: PushMapEntry[];
@@ -303,6 +322,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
       options.packageError === undefined
         ? Promise.resolve({
             deployable: options.deployable ?? [makePlugin(PLUGIN, [makeBlock()])],
+            views: options.views ?? {},
             warnings: options.warnings ?? [],
           })
         : Promise.reject(options.packageError as Error),
@@ -578,6 +598,119 @@ describe('resolveBlock', () => {
       },
     });
     expect(deps.packageBlocks).toHaveBeenCalledWith(CWD);
+  });
+
+  it('push_content_includes_views_from_src_views', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'appbuilder-pushviews-'));
+    const pluginDir = join(workDir, 'plugin');
+
+    try {
+      await createPlugin({
+        targetDir: pluginDir,
+        name: 'Acme Widgets',
+        apiName: 'acme_widgets',
+        externalLink: 'https://example.com/acme-widgets',
+        description: 'Adds Acme widget tooling to Kizen.',
+        developerBusinessId: '',
+        developerEnvironment: 'go',
+        artifacts: ['block', 'page'],
+      });
+
+      const viewDir = join(pluginDir, 'src', 'views', 'detailView');
+
+      await mkdir(join(viewDir, 'eventScripts'), { recursive: true });
+      await writeFile(
+        join(viewDir, 'config.json'),
+        JSON.stringify({ name: 'Detail', api_name: 'detail_view' }),
+      );
+      await writeFile(join(viewDir, 'script.js'), "this.outputUI('<p>detail</p>');\n");
+      await writeFile(join(viewDir, 'eventScripts', 'close.js'), "this.outputUI('<p>x</p>');\n");
+
+      const { deps } = makeHarness({ deps: { cwd: pluginDir, packageBlocks } });
+      const step = await resolveBlock(undefined, deps);
+      const content = step.ok ? step.value.content : undefined;
+
+      expect(step.ok).toBe(true);
+      expect(content?.views?.map((view) => view.api_name)).toStrictEqual(['detail_view']);
+      expect(content?.views?.[0]).toMatchObject({
+        api_name: 'detail_view',
+        name: 'Detail',
+        type: 'script',
+        event_scripts: [{ name: 'close' }],
+      });
+      expect(content?.views?.[0]?.script).toContain('detail');
+      expect(step.ok && step.value.contentHash).toBe(canonicalContentHash(content));
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carries only the selected block's plugin views into the content", async () => {
+    const view = makeView();
+    const { deps } = makeHarness({
+      views: { [PLUGIN]: [view], other: [makeView({ api_name: 'o' })] },
+    });
+    const step = await resolveBlock(BLOCK, deps);
+
+    expect(step.ok && step.value.content).toStrictEqual(toCustomCodeContent(makeBlock(), [view]));
+  });
+
+  it('push_rejects_view_html_with_ref_marker', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'appbuilder-pushviews-'));
+    const pluginDir = join(workDir, 'plugin');
+
+    try {
+      await createPlugin({
+        targetDir: pluginDir,
+        name: 'Acme Widgets',
+        apiName: 'acme_widgets',
+        externalLink: 'https://example.com/acme-widgets',
+        description: 'Adds Acme widget tooling to Kizen.',
+        developerBusinessId: '',
+        developerEnvironment: 'go',
+        artifacts: ['block'],
+      });
+
+      const viewDir = join(pluginDir, 'src', 'views', 'refView');
+
+      await mkdir(viewDir, { recursive: true });
+      await writeFile(join(viewDir, 'index.html'), '<p>{__ref:field}</p>');
+
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const harness = makeHarness({ fake, deps: { cwd: pluginDir, packageBlocks } });
+      const step = await resolveBlock(undefined, harness.deps);
+
+      expect(step).toMatchObject({
+        ok: false,
+        code: 'invalid_block',
+        field: 'views.refview.html',
+      });
+      expect(!step.ok && step.message).toContain('"refview"');
+      expect(!step.ok && step.message).toContain('html');
+
+      await runPushHeadless(
+        undefined,
+        { json: true, dashboard: 'D1', create: true, yes: true },
+        harness.deps,
+      );
+
+      expect(harness.json()).toMatchObject({ ok: false, code: 'invalid_block' });
+      expect(fake.createDashlet).not.toHaveBeenCalled();
+      expect(fake.updateDashlet).not.toHaveBeenCalled();
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a view with a NUL in its script before any write', async () => {
+    const { deps } = makeHarness({ views: { [PLUGIN]: [makeView({ script: 'a\u0000' })] } });
+    const step = await resolveBlock(BLOCK, deps);
+
+    expect(step).toMatchObject({
+      ok: false,
+      code: 'invalid_block',
+      field: 'views.detail_view.script',
+    });
   });
 
   it('reports validation_failed with the issues', async () => {
@@ -1428,6 +1561,60 @@ describe('runPushHeadless', () => {
     expect(harness.json()).toMatchObject({ applied: true });
     expect(harness.json()).not.toHaveProperty('refresh');
     expect(harness.stderr.join('')).not.toContain('Refresh an open tab');
+  });
+
+  it('sends views on create and on update, and remembers their hash', async () => {
+    const views = { [PLUGIN]: [makeView()] };
+    const expected = toCustomCodeContent(makeBlock(), [makeView()]);
+    const createFake = makeClient({ dashboards: [salesWith()] });
+    const created = await runPush(makeHarness({ fake: createFake, views }), {
+      dashboard: 'D1',
+      create: true,
+      yes: true,
+    });
+    const createBody = createFake.createDashlet.mock.calls[0]?.[1];
+
+    expect(createBody?.config.content).toStrictEqual(expected);
+    expect(created.pushMap.entries[0]?.contentHash).toBe(canonicalContentHash(expected));
+    expect(canonicalContentHash(expected)).not.toBe(BLOCK_HASH);
+
+    const updateFake = makeClient({ dashboards: [salesWith(customCodeDashlet('X1'))] });
+
+    await runPush(makeHarness({ fake: updateFake, views, pushMap: [makeEntry()] }), {
+      yes: true,
+    });
+
+    const updateBody = updateFake.updateDashlet.mock.calls[0]?.[2];
+
+    expect(updateBody?.config.content).toStrictEqual(expected);
+  });
+
+  it('counts view bytes in the summary only when the block carries views', async () => {
+    const withViews = await runPush(
+      makeHarness({
+        fake: makeClient({ dashboards: [salesWith()] }),
+        views: { [PLUGIN]: [makeView()] },
+      }),
+      { dashboard: 'D1', create: true, dryRun: true },
+    );
+    const viewsBytes = Buffer.byteLength(
+      JSON.stringify(toCustomCodeContent(makeBlock(), [makeView()]).views),
+      'utf8',
+    );
+
+    expect(withViews.stderr.join('')).toContain(`, views ${String(viewsBytes)} bytes`);
+
+    const without = await runPush(
+      makeHarness({ fake: makeClient({ dashboards: [salesWith()] }) }),
+      {
+        dashboard: 'D1',
+        create: true,
+        dryRun: true,
+      },
+    );
+
+    expect(without.stderr.join('')).toContain('Size: script');
+    expect(without.stderr.join('')).not.toContain('views');
   });
 
   it('re-pushes to the remembered dashlet with zero flags', async () => {

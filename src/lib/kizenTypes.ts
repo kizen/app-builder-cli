@@ -47,6 +47,21 @@ export interface EventScriptEntry {
   script: string;
 }
 
+/**
+ * A plugin view carried inside custom_code content so a block can open it with
+ * `this.showViewInModal(api_name)`. `event_scripts` is an array, never a map,
+ * because react-app's DashletService rewrites object keys.
+ */
+export interface CustomCodeView {
+  api_name: string;
+  name?: string;
+  type: 'script' | 'html';
+  script?: string;
+  html?: string;
+  css?: string;
+  event_scripts: EventScriptEntry[];
+}
+
 export interface CustomCodeContent {
   kind: 'custom_code';
   version: 1;
@@ -61,6 +76,8 @@ export interface CustomCodeContent {
   default_w?: number;
   default_h?: number;
   host_chrome?: boolean;
+  /** Omitted when the plugin has no views, so view-less content is unchanged. */
+  views?: CustomCodeView[];
 }
 
 export interface CreateDashletBody {

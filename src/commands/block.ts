@@ -3,7 +3,7 @@ import { render } from 'ink';
 import type { Command } from 'commander';
 import { PluginValidationError } from '@kizenapps/packager';
 import { copyToClipboard } from '../lib/clipboard.js';
-import { exportBlock } from '../lib/exportBlock.js';
+import { exportBlock, toExportJson } from '../lib/exportBlock.js';
 import { formatValidationIssues } from '../lib/formatValidationIssues.js';
 import {
   createDefaultPushDeps,
@@ -32,13 +32,14 @@ export function blockCommand(program: Command): void {
     .option('--copy', 'also copy the JSON to the clipboard')
     .action(async (apiName: string | undefined, options: { copy?: boolean }) => {
       try {
-        const { block: exported, warnings } = await exportBlock(process.cwd(), apiName);
+        const result = await exportBlock(process.cwd(), apiName);
+        const { block: exported, warnings } = result;
 
         if (warnings.length > 0) {
           console.error(formatValidationIssues(warnings));
         }
 
-        const json = JSON.stringify(exported, null, 2);
+        const json = JSON.stringify(toExportJson(result), null, 2);
 
         console.log(json);
 

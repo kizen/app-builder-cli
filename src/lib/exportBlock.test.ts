@@ -1,18 +1,21 @@
-import { cp, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PluginValidationError } from '@kizenapps/packager';
-import type { Block, DeployablePlugin, FileContent } from '@kizenapps/packager';
+import type { Block, DeployablePlugin, FileContent, RoutablePage } from '@kizenapps/packager';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createPlugin } from './createPlugin.js';
 import {
   BlockExportError,
   applyAuthoredConfig,
+  collectViews,
   exportBlock,
+  findInvalidViewField,
   findInvalidBlockField,
   formatAvailableBlocks,
   packageBlocks,
   selectBlock,
+  toExportJson,
 } from './exportBlock.js';
 import { computeCreateLayout, toCustomCodeContent } from './pushBlock.js';
 import { packageLocalPlugin } from './runBuild.js';
@@ -717,10 +720,242 @@ describe('exportBlock', () => {
     expect(result.warnings).toStrictEqual(issues.filter((issue) => issue.severity === 'warning'));
   });
 
+  const writeComponent = async (
+    directory: string,
+    component: string,
+    files: Record<string, string>,
+  ): Promise<void> => {
+    for (const [relative, content] of Object.entries(files)) {
+      const path = join(pluginDir, 'src', directory, component, relative);
+
+      await mkdir(join(path, '..'), { recursive: true });
+      await writeFile(path, content, 'utf-8');
+    }
+  };
+
+  const writeDetailView = (): Promise<void> =>
+    writeComponent('views', 'detailView', {
+      'config.json': JSON.stringify({ name: 'Detail', api_name: 'detail_view' }),
+      'script.js': 'this.outputUI(\'<p class="detail">Detail</p>\');\n',
+      'styles.css': '.detail { color: red; }\n',
+      'eventScripts/close.js': "this.outputUI('<p>closed</p>');\n",
+    });
+
+  it('export_includes_views', async () => {
+    await bootstrapPlugin();
+    await writeDetailView();
+
+    const result = await exportBlock(pluginDir);
+    const json = toExportJson(result);
+
+    expect(result.views.map((view) => view.api_name)).toStrictEqual(['detail_view']);
+    expect(json).toStrictEqual({ ...result.block, views: json.views });
+    expect(json.views).toHaveLength(1);
+    expect(json.views?.[0]).toMatchObject({
+      api_name: 'detail_view',
+      name: 'Detail',
+      type: 'script',
+      event_scripts: [{ name: 'close', script: expect.stringContaining('closed') as unknown }],
+    });
+    expect(json.views?.[0]?.script).toContain('detail');
+    expect(json.views?.[0]?.css).toContain('.detail');
+    expect(json.views?.[0]).not.toHaveProperty('html');
+    // The block itself keeps its packaged shape: event_scripts stays a map for the paste editor.
+    expect(Array.isArray(json.event_scripts)).toBe(false);
+  });
+
+  it('export_rejects_view_event_script_with_nul', async () => {
+    await bootstrapPlugin();
+    await writeDetailView();
+    await writeComponent('views', 'detailView', {
+      // A raw NUL in a template literal survives minification (a quoted string becomes "\\0").
+      'eventScripts/close.js': 'this.outputUI(`<p>closed \u0000</p>`);\n',
+    });
+
+    const thrown = await exportAndExpectRejection();
+
+    expect(thrown).toBeInstanceOf(BlockExportError);
+    expect((thrown as BlockExportError).reason).toBe('invalid_block');
+    expect((thrown as BlockExportError).field).toBe('views.detail_view.event_scripts.close');
+    expect((thrown as BlockExportError).message).toContain('"detail_view"');
+    expect((thrown as BlockExportError).message).toContain('event_scripts.close');
+  });
+
+  it('exports no views key when the plugin has no views', async () => {
+    await bootstrapPlugin();
+
+    const result = await exportBlock(pluginDir);
+
+    expect(result.views).toStrictEqual([]);
+    expect(toExportJson(result)).toStrictEqual(result.block);
+    expect(Object.keys(toExportJson(result))).not.toContain('views');
+  });
+
+  it('pages_vs_views_handling', async () => {
+    await createPlugin({
+      targetDir: pluginDir,
+      name: 'Acme Widgets',
+      apiName: PLUGIN_API_NAME,
+      externalLink: 'https://example.com/acme-widgets',
+      description: 'Adds Acme widget tooling to Kizen.',
+      developerBusinessId: '',
+      developerEnvironment: 'go',
+      artifacts: ['block', 'page'],
+    });
+    await writeDetailView();
+    await writeComponent('views', 'plainView', { 'index.html': '<p>plain</p>' });
+
+    const { deployable } = await packageLocalPlugin(pluginDir);
+    const packaged = await packageBlocks(pluginDir);
+    const views = packaged.views[PLUGIN_API_NAME] ?? [];
+
+    // The packager merges both directories into routable_pages; only views/ are carried.
+    expect(
+      deployable[0]?.artifacts.routable_pages.map((page) => page.api_name).sort(),
+    ).toStrictEqual(['detail_view', 'hello_page', 'plainview']);
+    expect(views.map((view) => view.api_name)).toStrictEqual(['detail_view', 'plainview']);
+    expect(views.find((view) => view.api_name === 'plainview')).toMatchObject({
+      type: 'html',
+      html: '<p>plain</p>',
+      name: 'plainView',
+    });
+    expect(packaged.deployable[0]?.artifacts.routable_pages).toHaveLength(3);
+  });
+
   it('packageBlocks propagates validation errors as PluginValidationError', async () => {
     await bootstrapPlugin();
     await writeBlockFile('helloBlock', 'script.js', 'this.outputUI(document.title);\n');
 
     await expect(packageBlocks(pluginDir)).rejects.toBeInstanceOf(PluginValidationError);
+  });
+});
+
+describe('collectViews', () => {
+  const file = (path: string, content: unknown): FileContent => ({
+    path,
+    content: typeof content === 'string' ? content : JSON.stringify(content),
+  });
+
+  const page = (overrides: Partial<RoutablePage>): RoutablePage => ({
+    name: 'x',
+    api_name: 'x',
+    type: 'script',
+    css: '',
+    event_scripts: {},
+    callback: '',
+    is_toolbar_item: false,
+    toolbar_color: '',
+    toolbar_icon: '',
+    script: 's();',
+    html: '',
+    iframe_url: '',
+    ...overrides,
+  });
+
+  const pluginWithPages = (apiName: string, pages: RoutablePage[]): DeployablePlugin =>
+    ({
+      api_name: apiName,
+      artifacts: { custom_blocks: [], routable_pages: pages },
+    }) as unknown as DeployablePlugin;
+
+  it('keeps a view whose api_name a page also uses, told apart by name, and sorts by api_name', () => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry: 'src' }),
+      file('src/pages/report/config.json', { api_name: 'shared', name: 'Report page' }),
+      file('src/pages/report/script.js', 's();'),
+      file('src/views/zeta/script.js', 's();'),
+      file('src/views/reportView/config.json', { api_name: 'shared' }),
+      file('src/views/reportView/script.js', 's();'),
+    ];
+    const reportPage = page({ api_name: 'shared', name: 'Report page' });
+    const reportView = page({ api_name: 'shared', name: 'reportView' });
+    const zeta = page({ api_name: 'zeta', name: 'zeta' });
+
+    expect(
+      collectViews([pluginWithPages('p', [zeta, reportPage, reportView])], files),
+    ).toStrictEqual({ views: { p: [reportView, zeta] }, warnings: [] });
+  });
+
+  it('matches views per plugin entry in a multi-plugin manifest', () => {
+    const files = [
+      file('kizen.json', [
+        { api_name: 'one', entry: 'one' },
+        { api_name: 'two', entry: 'two' },
+      ]),
+      file('one/views/a/script.js', 's();'),
+      file('two/pages/a/script.js', 's();'),
+    ];
+    const a = page({ api_name: 'a', name: 'a' });
+
+    expect(
+      collectViews([pluginWithPages('one', [a]), pluginWithPages('two', [a])], files),
+    ).toStrictEqual({ views: { one: [a], two: [] }, warnings: [] });
+  });
+
+  it('warns when an authored view has no matching packaged view', () => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry: 'src' }),
+      file('src/views/a/script.js', 's();'),
+      file('src/views/b/script.js', 's();'),
+    ];
+    const a = page({ api_name: 'a', name: 'a' });
+    const renamed = page({ api_name: 'b_renamed_by_packager', name: 'b' });
+    const result = collectViews([pluginWithPages('p', [a, renamed])], files);
+
+    expect(result.views).toStrictEqual({ p: [a] });
+    expect(result.warnings).toStrictEqual([
+      {
+        rule: 'appbuilder/views-unmatched',
+        severity: 'warning',
+        message:
+          'Found 2 views/ components but matched 1 packaged views; the pushed block carries only the matched ones.',
+        path: 'src/views',
+        pluginApiName: 'p',
+      },
+    ]);
+  });
+});
+
+describe('findInvalidViewField', () => {
+  const view = (overrides: Record<string, unknown> = {}): RoutablePage =>
+    ({
+      name: 'Detail',
+      api_name: 'detail_view',
+      type: 'html',
+      css: '',
+      event_scripts: {},
+      callback: '',
+      is_toolbar_item: false,
+      toolbar_color: '',
+      toolbar_icon: '',
+      script: '',
+      html: '<p/>',
+      iframe_url: '',
+      ...overrides,
+    }) as RoutablePage;
+
+  it('accepts well-formed views', () => {
+    expect(findInvalidViewField([view(), view({ event_scripts: { a: 'b();' } })])).toBeUndefined();
+  });
+
+  it('view_with_non_string_name_rejected', () => {
+    expect(findInvalidViewField([view({ name: 42 })])).toStrictEqual({
+      view: 'detail_view',
+      field: 'name',
+    });
+  });
+
+  it.each([
+    ['api_name', { api_name: 'a\u0000' }, 'a\u0000'],
+    ['name', { name: '{__ref:x}' }, 'detail_view'],
+    ['script', { script: 'x("{__ref:y}")' }, 'detail_view'],
+    ['html', { html: '<p>{__ref:1}</p>' }, 'detail_view'],
+    ['css', { css: 'a{content:"\u0000"}' }, 'detail_view'],
+    ['event_scripts.go', { event_scripts: { go: 'x\u0000' } }, 'detail_view'],
+    ['event_scripts.{__ref:n}', { event_scripts: { '{__ref:n}': 'ok();' } }, 'detail_view'],
+    ['event_scripts.go', { event_scripts: { go: 7 } }, 'detail_view'],
+    ['event_scripts', { event_scripts: [] }, 'detail_view'],
+  ] as const)('names %s', (field, overrides, label) => {
+    expect(findInvalidViewField([view(), view(overrides)])).toStrictEqual({ view: label, field });
   });
 });

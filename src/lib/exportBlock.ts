@@ -4,7 +4,15 @@ import {
   MANIFEST_FILE_NAME,
   sanitizeToAPIName,
 } from '@kizenapps/packager';
-import type { Block, DeployablePlugin, FileContent, ValidationIssue } from '@kizenapps/packager';
+import type {
+  Block,
+  DeployablePlugin,
+  FileContent,
+  RoutablePage,
+  ValidationIssue,
+} from '@kizenapps/packager';
+import type { CustomCodeView } from './kizenTypes.js';
+import { toCustomCodeViews } from './pushBlock.js';
 import { packageLocalPlugin } from './runBuild.js';
 
 export type BlockSelectionFailure = 'not_found' | 'ambiguous' | 'no_blocks';
@@ -23,6 +31,17 @@ export type BlockSelection =
 export interface ExportedBlock {
   block: Block;
   pluginApiName: string;
+  /** The owning plugin's packaged views/ components, sorted by api_name. */
+  views: RoutablePage[];
+  warnings: ValidationIssue[];
+}
+
+/** Packaged views/ components per plugin api_name. */
+export type ViewsByPlugin = Record<string, RoutablePage[]>;
+
+export interface PackagedBlocks {
+  deployable: DeployablePlugin[];
+  views: ViewsByPlugin;
   warnings: ValidationIssue[];
 }
 
@@ -49,6 +68,9 @@ const AUTHORED_FIELDS = [...SIZE_FIELDS, 'host_chrome'] as const;
 type AuthoredField = (typeof AUTHORED_FIELDS)[number];
 
 const UNSUPPORTED_SEQUENCES = ['\u0000', '{__ref:'];
+
+// @kizenapps/packager 0.9.0 uses "views" internally but doesn't export the constant.
+const VIEWS_DIRECTORY_NAME = 'views';
 
 export class BlockExportError extends Error {
   readonly reason: BlockExportReason;
@@ -218,6 +240,53 @@ export function findInvalidBlockField(block: Block): string | undefined {
   return undefined;
 }
 
+export interface InvalidViewField {
+  view: string;
+  field: string;
+}
+
+const VIEW_STRING_FIELDS = ['api_name', 'name', 'script', 'html', 'css'] as const;
+
+const isUnsupportedString = (value: unknown): boolean =>
+  typeof value !== 'string' || hasUnsupportedContent(value);
+
+// Views ride inside the same custom_code content as the block, so they get the
+// same NUL / "{__ref:" guard. The packager copies config.name through unchecked,
+// so a non-string name is rejected here too.
+export function findInvalidViewField(views: readonly RoutablePage[]): InvalidViewField | undefined {
+  for (const view of views) {
+    const raw = view as unknown as Record<string, unknown>;
+    const label = typeof raw.api_name === 'string' ? raw.api_name : String(raw.api_name);
+    const invalidString = VIEW_STRING_FIELDS.find((field) => isUnsupportedString(raw[field]));
+
+    if (invalidString) {
+      return { view: label, field: invalidString };
+    }
+
+    const eventScripts = raw.event_scripts;
+
+    if (!isRecord(eventScripts)) {
+      return { view: label, field: 'event_scripts' };
+    }
+
+    const invalidEntry = Object.entries(eventScripts).find(
+      ([eventName, body]) => hasUnsupportedContent(eventName) || isUnsupportedString(body),
+    );
+
+    if (invalidEntry) {
+      return { view: label, field: `event_scripts.${invalidEntry[0]}` };
+    }
+  }
+
+  return undefined;
+}
+
+export const invalidViewFieldPath = ({ view, field }: InvalidViewField): string =>
+  `views.${view}.${field}`;
+
+export const invalidViewMessage = (blockApiName: string, invalid: InvalidViewField): string =>
+  `Block "${blockApiName}" can't carry view ${JSON.stringify(invalid.view)}: its ${invalid.field} must be a string without NUL characters or "{__ref:".`;
+
 export const invalidBlockMessage = (apiName: string, field: string): string => {
   if (field === 'script') {
     return `Block "${apiName}" has no script. Add a non-empty script.js to the block directory.`;
@@ -385,19 +454,115 @@ export function applyAuthoredConfig(
   });
 }
 
-export async function packageBlocks(
-  pluginDir: string,
-): Promise<{ deployable: DeployablePlugin[]; warnings: ValidationIssue[] }> {
+const viewKey = (apiName: unknown, name: unknown): string =>
+  JSON.stringify([String(apiName), String(name)]);
+
+// The packager merges pages/ and views/ into one routable_pages list with no
+// source marker, so rebuild each view's packaged (api_name, name) from the
+// source tree the same way the packager does and match on that pair.
+const authoredViewKeys = (files: readonly FileContent[], entry: string): Set<string> => {
+  const prefix = `${entry.replace(/\/+$/, '')}/${VIEWS_DIRECTORY_NAME}/`;
+  const configs = new Map<string, Record<string, unknown>>();
+  const directories = new Set<string>();
+
+  for (const file of files) {
+    if (!file.path.startsWith(prefix) || file.path.endsWith('.DS_Store')) {
+      continue;
+    }
+
+    const [directory, fileName, ...rest] = file.path.slice(prefix.length).split('/');
+
+    if (!directory) {
+      continue;
+    }
+
+    directories.add(directory);
+
+    if (fileName === CONFIG_FILE_NAME && rest.length === 0) {
+      const config = parseJsonRecord(file.content);
+
+      if (config) {
+        configs.set(directory, config);
+      }
+    }
+  }
+
+  const keys = new Set<string>();
+
+  for (const directory of directories) {
+    const config = configs.get(directory) ?? {};
+    const apiName =
+      typeof config.api_name === 'string' && config.api_name !== ''
+        ? config.api_name
+        : sanitizeToAPIName(directory);
+
+    keys.add(viewKey(apiName, config.name || directory));
+  }
+
+  return keys;
+};
+
+// name is typed string but the packager copies config.name through unchecked.
+const compareViews = (a: RoutablePage, b: RoutablePage): number =>
+  a.api_name.localeCompare(b.api_name) ||
+  String(a.name as unknown).localeCompare(String(b.name as unknown));
+
+export const VIEWS_UNMATCHED_RULE = 'appbuilder/views-unmatched';
+
+export function collectViews(
+  deployable: readonly DeployablePlugin[],
+  files: readonly FileContent[],
+): { views: ViewsByPlugin; warnings: ValidationIssue[] } {
+  const entries = manifestEntries(files);
+  const views: ViewsByPlugin = {};
+  const warnings: ValidationIssue[] = [];
+
+  for (const plugin of deployable) {
+    const entry = entries.get(plugin.api_name);
+    const keys = entry === undefined ? new Set<string>() : authoredViewKeys(files, entry);
+    const matched = plugin.artifacts.routable_pages
+      .filter((page) => keys.has(viewKey(page.api_name, page.name)))
+      .sort(compareViews);
+
+    // A packager change to how views are named would otherwise drop them silently.
+    if (matched.length !== keys.size && entry !== undefined) {
+      warnings.push({
+        rule: VIEWS_UNMATCHED_RULE,
+        severity: 'warning',
+        message: `Found ${String(keys.size)} ${VIEWS_DIRECTORY_NAME}/ components but matched ${String(matched.length)} packaged views; the pushed block carries only the matched ones.`,
+        path: `${entry.replace(/\/+$/, '')}/${VIEWS_DIRECTORY_NAME}`,
+        pluginApiName: plugin.api_name,
+      });
+    }
+
+    views[plugin.api_name] = matched;
+  }
+
+  return { views, warnings };
+}
+
+export function viewsFor(views: ViewsByPlugin, pluginApiName: string): RoutablePage[] {
+  return Object.hasOwn(views, pluginApiName) ? (views[pluginApiName] ?? []) : [];
+}
+
+/** The JSON `block export` prints: the packaged block plus its plugin's views, when any. */
+export function toExportJson(exported: ExportedBlock): Block & { views?: CustomCodeView[] } {
+  return { ...exported.block, ...toCustomCodeViews(exported.views) };
+}
+
+export async function packageBlocks(pluginDir: string): Promise<PackagedBlocks> {
   const { files, deployable, issues } = await packageLocalPlugin(pluginDir);
+  const collected = collectViews(deployable, files);
 
   return {
     deployable: applyAuthoredConfig(deployable, files),
-    warnings: issues.filter((issue) => issue.severity === 'warning'),
+    views: collected.views,
+    warnings: [...issues.filter((issue) => issue.severity === 'warning'), ...collected.warnings],
   };
 }
 
 export async function exportBlock(pluginDir: string, apiName?: string): Promise<ExportedBlock> {
-  const { deployable, warnings } = await packageBlocks(pluginDir);
+  const { deployable, views, warnings } = await packageBlocks(pluginDir);
   const selection = selectBlock(deployable, apiName);
 
   if (!selection.ok) {
@@ -414,5 +579,21 @@ export async function exportBlock(pluginDir: string, apiName?: string): Promise<
     );
   }
 
-  return { block: selection.block, pluginApiName: selection.pluginApiName, warnings };
+  const blockViews = viewsFor(views, selection.pluginApiName);
+  const invalidView = findInvalidViewField(blockViews);
+
+  if (invalidView !== undefined) {
+    throw new BlockExportError(
+      'invalid_block',
+      invalidViewMessage(selection.block.api_name, invalidView),
+      { field: invalidViewFieldPath(invalidView) },
+    );
+  }
+
+  return {
+    block: selection.block,
+    pluginApiName: selection.pluginApiName,
+    views: blockViews,
+    warnings,
+  };
 }

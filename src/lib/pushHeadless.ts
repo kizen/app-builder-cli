@@ -16,10 +16,15 @@ import {
 } from './credentials.js';
 import {
   findInvalidBlockField,
+  findInvalidViewField,
   invalidBlockMessage,
+  invalidViewFieldPath,
+  invalidViewMessage,
   packageBlocks,
   selectBlock,
   formatAvailableBlocks,
+  viewsFor,
+  type PackagedBlocks,
 } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
 import { ensureGitignore } from './gitignore.js';
@@ -126,9 +131,7 @@ export interface PushDeps {
   loadCredentialsDetailed: (path: string) => Promise<DetailedCredentials>;
   listLoadableCredentialProfiles: () => Promise<CredentialProfile[]>;
   loadConfig: (outputDir: string) => Promise<AppBuilderConfig>;
-  packageBlocks: (
-    dir: string,
-  ) => Promise<{ deployable: DeployablePlugin[]; warnings: ValidationIssue[] }>;
+  packageBlocks: (dir: string) => Promise<PackagedBlocks>;
   createClient: (credentials: Credentials) => KizenClient;
   readPushMap: (dir: string) => Promise<PushMapEntry[]>;
   writePushMap: (dir: string, entries: readonly PushMapEntry[]) => Promise<void>;
@@ -376,7 +379,7 @@ export async function resolveBlock(
   apiName: string | undefined,
   deps: PushDeps,
 ): Promise<Step<ResolvedBlock>> {
-  let packaged: { deployable: DeployablePlugin[]; warnings: ValidationIssue[] };
+  let packaged: PackagedBlocks;
 
   try {
     packaged = await deps.packageBlocks(deps.cwd);
@@ -413,7 +416,16 @@ export async function resolveBlock(
     });
   }
 
-  const content = toCustomCodeContent(selection.block);
+  const views = viewsFor(packaged.views, selection.pluginApiName);
+  const invalidView = findInvalidViewField(views);
+
+  if (invalidView !== undefined) {
+    return failure('invalid_block', invalidViewMessage(selection.block.api_name, invalidView), {
+      field: invalidViewFieldPath(invalidView),
+    });
+  }
+
+  const content = toCustomCodeContent(selection.block, views);
 
   return success({
     block: selection.block,
@@ -771,6 +783,8 @@ export interface PushSummary {
   pluginApiName: string;
   scriptBytes: number;
   stylesBytes: number;
+  /** Bytes of the views JSON; present only when the block carries views. */
+  viewsBytes?: number;
 }
 
 export interface PushPlan {
@@ -902,6 +916,9 @@ export async function buildPlan(
       pluginApiName: block.pluginApiName,
       scriptBytes: Buffer.byteLength(block.content.script, 'utf8'),
       stylesBytes: Buffer.byteLength(block.content.styles, 'utf8'),
+      ...(block.content.views && {
+        viewsBytes: Buffer.byteLength(JSON.stringify(block.content.views), 'utf8'),
+      }),
     },
   });
 }
@@ -1045,7 +1062,9 @@ export function formatSummaryLines(summary: PushSummary): string[] {
     `Dashboard: "${summary.dashboardName}" (${summary.dashboardId})`,
     `Action: ${summary.actionLine}`,
     `Block: ${summary.blockName} (${summary.pluginApiName}/${summary.blockApiName})`,
-    `Size: script ${String(summary.scriptBytes)} bytes, styles ${String(summary.stylesBytes)} bytes`,
+    `Size: script ${String(summary.scriptBytes)} bytes, styles ${String(summary.stylesBytes)} bytes${
+      summary.viewsBytes === undefined ? '' : `, views ${String(summary.viewsBytes)} bytes`
+    }`,
   ];
 }
 

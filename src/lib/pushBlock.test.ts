@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Block } from '@kizenapps/packager';
+import type { Block, RoutablePage } from '@kizenapps/packager';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CustomCodeContent, DashletLayout, PushMapEntry, WireDashlet } from './kizenTypes.js';
 import {
@@ -28,6 +28,7 @@ import {
   removePushMapEntry,
   surfaceToDashboardType,
   toCustomCodeContent,
+  toCustomCodeView,
   upsertPushMapEntry,
   writePushMap,
 } from './pushBlock.js';
@@ -1070,5 +1071,153 @@ describe('buildDashboardUrl', () => {
         dashboardId: 'c4',
       }),
     ).toBe('https://x.test/dashboard/c4');
+  });
+});
+
+const makeRoutablePage = (overrides: Partial<RoutablePage> = {}): RoutablePage => ({
+  name: 'Detail',
+  api_name: 'detail_view',
+  type: 'script',
+  css: '.d{color:red}',
+  event_scripts: { close: 'this.closeModal();', save: 'save();' },
+  callback: '',
+  is_toolbar_item: false,
+  toolbar_color: '',
+  toolbar_icon: '',
+  script: 'this.outputUI("detail");',
+  html: '',
+  iframe_url: '',
+  ...overrides,
+});
+
+describe('custom_code views', () => {
+  it('view_event_scripts_are_an_array', () => {
+    const view = toCustomCodeView(makeRoutablePage());
+    const content = toCustomCodeContent(makeBlock(), [makeRoutablePage()]);
+    const wire = JSON.parse(JSON.stringify(content)) as { views: { event_scripts: unknown }[] };
+
+    expect(view).toStrictEqual({
+      api_name: 'detail_view',
+      name: 'Detail',
+      type: 'script',
+      script: 'this.outputUI("detail");',
+      css: '.d{color:red}',
+      event_scripts: [
+        { name: 'close', script: 'this.closeModal();' },
+        { name: 'save', script: 'save();' },
+      ],
+    });
+    expect(Array.isArray(view.event_scripts)).toBe(true);
+    expect(wire.views.every((entry) => Array.isArray(entry.event_scripts))).toBe(true);
+    expect(toCustomCodeView(makeRoutablePage({ event_scripts: {} })).event_scripts).toStrictEqual(
+      [],
+    );
+  });
+
+  it('carries html views with html and without an empty script or css', () => {
+    expect(
+      toCustomCodeView(makeRoutablePage({ type: 'html', script: '', css: '', html: '<p>x</p>' })),
+    ).toStrictEqual({
+      api_name: 'detail_view',
+      name: 'Detail',
+      type: 'html',
+      html: '<p>x</p>',
+      event_scripts: [
+        { name: 'close', script: 'this.closeModal();' },
+        { name: 'save', script: 'save();' },
+      ],
+    });
+  });
+
+  it('content_without_views_is_unchanged_and_hash_stable', () => {
+    // Fixture and expected values were produced by the pre-views toCustomCodeContent and
+    // canonicalContentHash (src/lib/pushBlock.ts at bcd37de), so they pin the old output.
+    const block = {
+      name: 'Block',
+      api_name: 'block',
+      min_w: 1,
+      max_w: 12,
+      min_h: 1,
+      max_h: 12,
+      event_scripts: { greet: 'x()' },
+      script: 'this.outputUI("hi");',
+      styles: '.a{}',
+      when: '',
+    } as Block;
+    const oldJson =
+      '{"kind":"custom_code","version":1,"name":"Block","script":"this.outputUI(\\"hi\\");","styles":".a{}","event_scripts":[{"name":"greet","script":"x()"}],"min_w":1,"max_w":12,"min_h":1,"max_h":12}';
+    const oldHash = '9827adffe1804abb50b298a5b6cbdbb06f363112046009da0736ea76048b9755';
+
+    expect(JSON.stringify(toCustomCodeContent(block))).toBe(oldJson);
+    expect(JSON.stringify(toCustomCodeContent(block, []))).toBe(oldJson);
+    expect(Object.keys(toCustomCodeContent(block, []))).not.toContain('views');
+    expect(canonicalContentHash(toCustomCodeContent(block))).toBe(oldHash);
+    expect(canonicalContentHash(JSON.parse(oldJson))).toBe(oldHash);
+    expect(canonicalContentHash({ ...JSON.parse(oldJson), views: [] })).toBe(oldHash);
+    expect(
+      detectDrift(
+        makeDashlet({ config: customCodeConfig(JSON.parse(oldJson)) }),
+        makeEntry({ contentHash: oldHash }),
+      ),
+    ).toBe(false);
+  });
+
+  it('views_change_changes_drift_hash', () => {
+    const withView = toCustomCodeContent(makeBlock(), [makeRoutablePage()]);
+    const hash = canonicalContentHash(withView);
+    const changed = (overrides: Partial<RoutablePage>): string =>
+      canonicalContentHash(toCustomCodeContent(makeBlock(), [makeRoutablePage(overrides)]));
+
+    expect(hash).not.toBe(canonicalContentHash(toCustomCodeContent(makeBlock())));
+    expect(changed({ script: 'other();' })).not.toBe(hash);
+    expect(changed({ css: '' })).not.toBe(hash);
+    expect(changed({ api_name: 'renamed' })).not.toBe(hash);
+    expect(changed({ event_scripts: { close: 'changed();' } })).not.toBe(hash);
+    expect(
+      canonicalContentHash(
+        toCustomCodeContent(makeBlock(), [makeRoutablePage(), makeRoutablePage({ api_name: 'b' })]),
+      ),
+    ).not.toBe(hash);
+
+    const edited = {
+      ...withView,
+      views: withView.views?.map((view) => ({ ...view, script: 'edited_in_kizen();' })),
+    };
+
+    expect(
+      detectDrift(
+        makeDashlet({ config: customCodeConfig(edited) }),
+        makeEntry({ contentHash: hash }),
+      ),
+    ).toBe(true);
+    expect(
+      detectDrift(
+        makeDashlet({ config: customCodeConfig(JSON.parse(JSON.stringify(withView))) }),
+        makeEntry({ contentHash: hash }),
+      ),
+    ).toBe(false);
+  });
+
+  it('hashes views the same across key order, event_scripts shape and empty optional strings', () => {
+    const withView = toCustomCodeContent(makeBlock(), [
+      makeRoutablePage({ type: 'html', script: '', html: '<p/>' }),
+    ]);
+    const [view] = withView.views ?? [];
+    const reshaped = {
+      ...withView,
+      views: [
+        {
+          event_scripts: { close: 'this.closeModal();', save: 'save();' },
+          script: '',
+          css: view?.css,
+          html: view?.html,
+          type: view?.type,
+          name: view?.name,
+          api_name: view?.api_name,
+        },
+      ],
+    };
+
+    expect(canonicalContentHash(reshaped)).toBe(canonicalContentHash(withView));
   });
 });

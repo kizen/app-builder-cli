@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { Block } from '@kizenapps/packager';
+import type { Block, RoutablePage } from '@kizenapps/packager';
 import { cleanCredentialId } from '../../shared/lib/credentials.js';
 import type {
   CreateDashletBody,
   CustomCodeContent,
+  CustomCodeView,
   DashboardType,
   DashletLayout,
   EventScriptEntry,
@@ -97,16 +98,39 @@ function pickHostChrome(source: Record<string, unknown>): { host_chrome?: boolea
   return typeof source.host_chrome === 'boolean' ? { host_chrome: source.host_chrome } : {};
 }
 
-export function toCustomCodeContent(block: Block): CustomCodeContent {
+const toEventScriptEntries = (eventScripts: Record<string, string>): EventScriptEntry[] =>
+  Object.entries(eventScripts).map(([name, script]) => ({ name, script }));
+
+export function toCustomCodeView(page: RoutablePage): CustomCodeView {
+  return {
+    api_name: page.api_name,
+    name: page.name,
+    type: page.type,
+    ...(page.script !== '' && { script: page.script }),
+    ...(page.html !== '' && { html: page.html }),
+    ...(page.css !== '' && { css: page.css }),
+    event_scripts: toEventScriptEntries(page.event_scripts),
+  };
+}
+
+export function toCustomCodeViews(views: readonly RoutablePage[]): { views?: CustomCodeView[] } {
+  return views.length > 0 ? { views: views.map(toCustomCodeView) } : {};
+}
+
+export function toCustomCodeContent(
+  block: Block,
+  views: readonly RoutablePage[] = [],
+): CustomCodeContent {
   return {
     kind: 'custom_code',
     version: 1,
     name: block.name,
     script: block.script,
     styles: block.styles,
-    event_scripts: Object.entries(block.event_scripts).map(([name, script]) => ({ name, script })),
+    event_scripts: toEventScriptEntries(block.event_scripts),
     ...pickDimensions(block as unknown as Record<string, unknown>),
     ...pickHostChrome(block as unknown as Record<string, unknown>),
+    ...toCustomCodeViews(views),
   };
 }
 
@@ -228,9 +252,9 @@ export function customCodeName(dashlet: WireDashlet): string {
   return dashlet.name;
 }
 
-function normalizeEventScripts(value: unknown): EventScriptEntry[] {
-  const stringOr = (candidate: unknown): string => (typeof candidate === 'string' ? candidate : '');
+const stringOr = (candidate: unknown): string => (typeof candidate === 'string' ? candidate : '');
 
+function normalizeEventScripts(value: unknown): EventScriptEntry[] {
   if (Array.isArray(value)) {
     return value
       .filter(isRecord)
@@ -274,8 +298,29 @@ function nameOf(value: unknown): string {
   return '';
 }
 
+// Missing optional strings hash as '' so a round-trip that adds or drops an
+// empty script/html/css doesn't read as drift.
+function normalizeViews(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(isRecord).map((view) => ({
+    api_name: stringOr(view.api_name),
+    name: nameOf(view.name),
+    type: stringOr(view.type),
+    script: stringOr(view.script),
+    html: stringOr(view.html),
+    css: stringOr(view.css),
+    event_scripts: normalizeEventScripts(view.event_scripts),
+  }));
+}
+
 export function canonicalContentHash(content: unknown): string {
   const source = isRecord(content) ? content : {};
+  const views = normalizeViews(source.views);
+  // `views` joins the canonical form only when non-empty, so content without
+  // views hashes exactly as it did before views existed (pushes.json stays valid).
   const canonical = {
     name: nameOf(source.name),
     script: typeof source.script === 'string' ? source.script : '',
@@ -283,6 +328,7 @@ export function canonicalContentHash(content: unknown): string {
     event_scripts: normalizeEventScripts(source.event_scripts),
     ...pickDimensions(source),
     ...pickHostChrome(source),
+    ...(views.length > 0 && { views }),
   };
 
   return createHash('sha256')

@@ -148,10 +148,10 @@ Do this after every applied push, only when Claude-in-Chrome tools are available
 3. If the result has a `refresh` field, run `refresh.script` exactly as given in that tab with the page JavaScript tool (`javascript_tool`). If it has no `refresh` field, navigate that tab to the block URL (`navigate`) and go to step 5.
 4. Check what the script returned:
    - `{ refreshed: true, ... }`: the dashboard refetched in place.
-   - `undefined`: the refresh hook isn't available on this page. Navigate the tab to the block URL instead. Then run `localStorage.getItem('kizen-flag-custom-code-blocks')` in that tab with `javascript_tool`. If it isn't `'true'`, tell the user once per conversation that setting that localStorage key to `'true'` in the Kizen tab enables in-place refresh. Never set it yourself.
+   - `undefined`: the refresh hook isn't available on this page (an older Kizen build, or a page without the hook). Navigate the tab to the block URL instead.
 5. Wait a couple of seconds, take a screenshot (`computer`), and check that the block rendered: not blank, and no visible error. Report what you saw to the user. If the block is blank or shows an error, read the console and fix the block before pushing again.
 
-Never run any other injected code in the user's tabs. `refresh.script` is the only script you may run, with one exception: the read-only `localStorage.getItem('kizen-flag-custom-code-blocks')` check above.
+Never run any other injected code in the user's tabs. `refresh.script` is the only script you may run.
 
 ### JSON results
 
