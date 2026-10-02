@@ -45,6 +45,7 @@ describe('readLocalFiles skip lists', () => {
   it('names the expected skip directories', () => {
     expect([...SKIP_DIRS].sort()).toEqual([
       '.claude',
+      '.copilot-docs',
       '.git',
       '.github',
       '.kizenapp',

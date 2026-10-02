@@ -10,6 +10,7 @@ import { encryptCommand } from './commands/encrypt.js';
 import { iconsCommand } from './commands/icons.js';
 import { reportCommand } from './commands/report.js';
 import { setupClaudeCommand } from './commands/setupClaude.js';
+import { setupCopilotCommand } from './commands/setupCopilot.js';
 
 function readVersion(): string {
   const pkgPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
@@ -26,6 +27,8 @@ export function createProgram(): Command {
   createCommand(program);
 
   setupClaudeCommand(program);
+
+  setupCopilotCommand(program);
 
   buildCommand(program);
 

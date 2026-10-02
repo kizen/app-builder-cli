@@ -25,10 +25,13 @@ function entries(contents: string): string[] {
 }
 
 describe('ensureGitignore', () => {
-  it('creates the file with the .kizenapp/ entry when none exists', async () => {
+  it('creates the file with every managed entry when none exists', async () => {
     ensureGitignore(root);
 
-    expect(entries(await read())).toContain('.kizenapp/');
+    const lines = entries(await read());
+
+    expect(lines).toContain('.kizenapp/');
+    expect(lines).toContain('.copilot-docs/');
   });
 
   it('appends to an existing gitignore without dropping its entries', async () => {
@@ -41,9 +44,10 @@ describe('ensureGitignore', () => {
     expect(lines).toContain('node_modules/');
     expect(lines).toContain('dist/');
     expect(lines).toContain('.kizenapp/');
+    expect(lines).toContain('.copilot-docs/');
   });
 
-  it('separates the entry from a file that does not end in a newline', async () => {
+  it('separates the entries from a file that does not end in a newline', async () => {
     await writeFile(gitignorePath, 'dist/', 'utf-8');
 
     ensureGitignore(root);
@@ -76,23 +80,38 @@ describe('ensureGitignore', () => {
     ensureGitignore(root);
 
     expect(await read()).toBe(after);
-    expect(entries(await read()).filter((line) => line === '.kizenapp/')).toHaveLength(1);
+
+    const lines = entries(await read());
+
+    expect(lines.filter((line) => line === '.kizenapp/')).toHaveLength(1);
+    expect(lines.filter((line) => line === '.copilot-docs/')).toHaveLength(1);
   });
 
-  it('accepts the unslashed .kizenapp form as already-ignored', async () => {
-    await writeFile(gitignorePath, '.kizenapp\n', 'utf-8');
+  it('accepts the unslashed form as already-ignored, per entry', async () => {
+    await writeFile(gitignorePath, '.kizenapp\n.copilot-docs\n', 'utf-8');
 
     ensureGitignore(root);
 
-    expect(await read()).toBe('.kizenapp\n');
+    expect(await read()).toBe('.kizenapp\n.copilot-docs\n');
+  });
+
+  it('adds only the entries that are missing', async () => {
+    await writeFile(gitignorePath, '.kizenapp/\n', 'utf-8');
+
+    ensureGitignore(root);
+
+    const lines = entries(await read());
+
+    expect(lines.filter((line) => line === '.kizenapp/')).toHaveLength(1);
+    expect(lines.filter((line) => line === '.copilot-docs/')).toHaveLength(1);
   });
 
   it('matches an entry surrounded by whitespace', async () => {
-    await writeFile(gitignorePath, '  .kizenapp/  \n', 'utf-8');
+    await writeFile(gitignorePath, '  .kizenapp/  \n  .copilot-docs/  \n', 'utf-8');
 
     ensureGitignore(root);
 
-    expect(await read()).toBe('  .kizenapp/  \n');
+    expect(await read()).toBe('  .kizenapp/  \n  .copilot-docs/  \n');
   });
 
   it('does not treat a longer path containing the entry as a match', async () => {

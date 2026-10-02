@@ -3,6 +3,11 @@ import { writeFile, rm, mkdtemp, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import requirementsTxt from './python-requirements.txt';
+import {
+  AUTOMATION_SCRIPT_RUNTIMES,
+  isSupportedScriptRuntime,
+  scriptRuntimeToApiName,
+} from '@kizenapps/packager';
 import { parseRequirementsFile, resolvePythonBinary } from '../lib/pythonRuntime.js';
 import {
   type ExecutionResult,
@@ -198,14 +203,7 @@ export interface ExecuteStepParams {
 
 const VENV_DIR = join(process.cwd(), '.kizenapp', 'venv');
 
-// The production Kizen code-runner service only ships python-3-12 and
-// python-3-13 runtime images. Reject any other runtime locally so a bad or
-// unsupported "runtime" in a step's config.json fails fast
-const SUPPORTED_RUNTIMES = ['python-3-12', 'python-3-13'] as const;
-
-function isSupportedRuntime(runtime: string): boolean {
-  return (SUPPORTED_RUNTIMES as readonly string[]).includes(runtime);
-}
+const SUPPORTED_RUNTIMES = AUTOMATION_SCRIPT_RUNTIMES.map(scriptRuntimeToApiName);
 
 // ./python-requirements.txt is the single source of truth for packages.
 // Keep it in sync with the Python dependency set installed by the production
@@ -506,7 +504,9 @@ export async function executePythonStep(params: ExecuteStepParams): Promise<Exec
 
   // Fail fast on a runtime the remote code-runner can't run, instead of
   // silently building a venv on whatever interpreter is handy.
-  if (!isSupportedRuntime(params.scriptRuntime)) {
+  const runtimeSupported: boolean = isSupportedScriptRuntime(params.scriptRuntime);
+
+  if (!runtimeSupported) {
     return failedExecutionResult(
       `Unsupported runtime "${params.scriptRuntime}". Supported runtimes: ` +
         `${SUPPORTED_RUNTIMES.join(', ')}. Update the step's config.json "runtime" field ` +
@@ -514,7 +514,10 @@ export async function executePythonStep(params: ExecuteStepParams): Promise<Exec
     );
   }
 
-  const pythonBin = await ensureVenv(params.scriptRuntime, params.onInstallProgress);
+  const pythonBin = await ensureVenv(
+    scriptRuntimeToApiName(params.scriptRuntime),
+    params.onInstallProgress,
+  );
   const start = Date.now();
 
   let tmpDir: string | undefined;

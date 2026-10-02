@@ -529,7 +529,7 @@ export const AppDetailPage: FC = () => {
               </div>
               <div className="mb-1 flex items-center gap-2 text-[10px] text-neutral-400">
                 <span className="min-w-0 flex-1">Name</span>
-                <span className="shrink-0">Type</span>
+                <span className="shrink-0">Runtime</span>
               </div>
               <div className="divide-y divide-black/5">
                 {automationActions.map((action, i) => (
@@ -540,6 +540,9 @@ export const AppDetailPage: FC = () => {
                         {action.action_step_api_name}
                       </div>
                     </div>
+                    <span className="shrink-0 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-600">
+                      {action.script_runtime}
+                    </span>
                   </div>
                 ))}
               </div>
