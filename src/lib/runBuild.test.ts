@@ -8,19 +8,6 @@ import { ARTIFACT_TYPES } from './createArtifacts.js';
 import { readLocalFiles } from './readFiles.js';
 import { runBuild } from './runBuild.js';
 
-const UNUSED_KIZEN_DATA_WARNING = {
-  rule: 'imports/unused-module',
-  path: 'src/lib/kizenData.js',
-  severity: 'warning',
-};
-
-function expectOnlyUnusedKizenDataWarning(issues: ReturnType<typeof validatePluginApp>): void {
-  expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-  expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-    UNUSED_KIZEN_DATA_WARNING,
-  ]);
-}
-
 /**
  * A plausible developer business id. The bootstrap path is only meaningful when
  * the wizard-optional fields are actually filled in, so every plugin created
@@ -179,15 +166,15 @@ describe('runBuild', () => {
       });
     });
 
-    it('scaffolds a plugin with no validation errors and only the unused kizenData lib warning', async () => {
+    it('a fresh plugin validates with no issues', async () => {
       await bootstrapPlugin();
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expectOnlyUnusedKizenDataWarning(issues);
+      expect(issues).toEqual([]);
     });
 
-    it('has no validation errors and only the unused kizenData lib warning when no business id is configured', async () => {
+    it('stays validation-clean when no business id is configured', async () => {
       await createPlugin({
         targetDir: pluginDir,
         name: PLUGIN_NAME,
@@ -200,10 +187,10 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expectOnlyUnusedKizenDataWarning(issues);
+      expect(issues).toEqual([]);
     });
 
-    it('builds a full artifact scaffold with no errors and only the unused kizenData lib warning', async () => {
+    it('builds a full artifact scaffold with no errors and no warnings', async () => {
       await createPlugin({
         targetDir: pluginDir,
         name: PLUGIN_NAME,
@@ -217,7 +204,38 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expectOnlyUnusedKizenDataWarning(issues);
+      expect(issues).toEqual([]);
+
+      await expect(runBuild(pluginDir, outputDir)).resolves.toBeDefined();
+    });
+
+    it('validates clean when created with the data lib and a block that imports it', async () => {
+      await createPlugin({
+        targetDir: pluginDir,
+        name: PLUGIN_NAME,
+        apiName: PLUGIN_API_NAME,
+        externalLink: PLUGIN_EXTERNAL_LINK,
+        description: PLUGIN_DESCRIPTION,
+        developerBusinessId: DEVELOPER_BUSINESS_ID,
+        developerEnvironment: 'go',
+        artifacts: ['block'],
+        includeLib: true,
+      });
+
+      await writeFile(
+        join(pluginDir, 'src', 'blocks', 'helloBlock', 'script.js'),
+        [
+          "import { formatNumber } from '../../lib/kizenData.js';",
+          '',
+          'this.outputUI(`<p>${formatNumber(1234)}</p>`);',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const issues = validatePluginApp(await readLocalFiles(pluginDir));
+
+      expect(issues).toEqual([]);
 
       await expect(runBuild(pluginDir, outputDir)).resolves.toBeDefined();
     });
@@ -481,9 +499,7 @@ describe('runBuild', () => {
       await bootstrapPlugin();
       await writeAutomationStep(STEP_DIRECTORY, stepConfig());
 
-      const issues = validatePluginApp(await readLocalFiles(pluginDir));
-
-      expectOnlyUnusedKizenDataWarning(issues);
+      expect(validatePluginApp(await readLocalFiles(pluginDir))).toEqual([]);
 
       await runBuild(pluginDir, outputDir);
 
@@ -504,9 +520,7 @@ describe('runBuild', () => {
       await bootstrapPlugin();
       await writeAutomationStep(STEP_DIRECTORY, stepConfig({ runtime: undefined }));
 
-      const issues = validatePluginApp(await readLocalFiles(pluginDir));
-
-      expectOnlyUnusedKizenDataWarning(issues);
+      expect(validatePluginApp(await readLocalFiles(pluginDir))).toEqual([]);
 
       await runBuild(pluginDir, outputDir);
 

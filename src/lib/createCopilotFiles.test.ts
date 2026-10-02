@@ -37,12 +37,23 @@ const claudeContent = (path: string): string =>
   claudeFiles().find((file) => file.path === path)?.content ?? '';
 
 describe('claudeFiles', () => {
-  it('scaffolds the kizen-custom-block skill, its design guide and the data lib', () => {
-    expect(claudeFiles().map((file) => file.path)).toEqual([
+  it('scaffolds only the kizen-custom-block skill and its design guide by default', () => {
+    expect(claudeFiles().map((file) => file.path)).toStrictEqual([SKILL_PATH, DESIGN_PATH]);
+  });
+
+  it('adds the data lib, verbatim, when given an entry directory', () => {
+    const files = claudeFiles(['src']);
+    const template = fs.readFileSync(
+      fileURLToPath(new URL('../templates/plugin/lib/kizenData.js', import.meta.url)),
+      'utf8',
+    );
+
+    expect(files.map((file) => file.path)).toStrictEqual([
       SKILL_PATH,
       DESIGN_PATH,
       'src/lib/kizenData.js',
     ]);
+    expect(files[2]?.content).toBe(template);
   });
 
   it('places the data lib under each entry directory it is given', () => {

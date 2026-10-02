@@ -63,6 +63,28 @@ describe('applyProxyFromEnv', () => {
     expect(mod.getProxyEnvStatus()).toBe('already-set');
   });
 
+  it.each(['0', 'true', 'false'])(
+    'calls setGlobalProxyFromEnv when NODE_USE_ENV_PROXY=%s',
+    (value) => {
+      const http = fakeHttp();
+      const env = { HTTPS_PROXY: 'http://proxy.test:8080', NODE_USE_ENV_PROXY: value };
+
+      expect(mod.applyProxyFromEnv({ env, http })).toBe('applied');
+      expect(http.setGlobalProxyFromEnv).toHaveBeenCalledTimes(1);
+      expect(http.setGlobalProxyFromEnv).toHaveBeenCalledWith(env);
+      expect(mod.getProxyEnvStatus()).toBe('applied');
+    },
+  );
+
+  it('returns unavailable rather than already-set when NODE_USE_ENV_PROXY=0 and setGlobalProxyFromEnv is missing', () => {
+    expect(
+      mod.applyProxyFromEnv({
+        env: { HTTPS_PROXY: 'http://proxy.test:8080', NODE_USE_ENV_PROXY: '0' },
+        http: {},
+      }),
+    ).toBe('unavailable');
+  });
+
   it('returns unavailable when a proxy is set but setGlobalProxyFromEnv is missing', () => {
     expect(
       mod.applyProxyFromEnv({ env: { HTTPS_PROXY: 'http://proxy.test:8080' }, http: {} }),

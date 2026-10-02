@@ -24,11 +24,15 @@ export const KIZEN_DATA_LIB_FILE = 'lib/kizenData.js';
 export const kizenDataLibPath = (entryDir = 'src'): string =>
   entryDir === '' ? KIZEN_DATA_LIB_FILE : `${entryDir}/${KIZEN_DATA_LIB_FILE}`;
 
-export function claudeFiles(entryDirs: readonly string[] = ['src']): ScaffoldedFile[] {
+/**
+ * The Claude Code skill files, plus the Kizen data lib under each of `libEntryDirs`.
+ * The lib is opt-in, so an empty list (the default) scaffolds only the skill.
+ */
+export function claudeFiles(libEntryDirs: readonly string[] = []): ScaffoldedFile[] {
   return [
     { path: '.claude/skills/kizen-custom-block/SKILL.md', content: kizenCustomBlockSkill },
     { path: '.claude/skills/kizen-custom-block/design.md', content: kizenCustomBlockDesign },
-    ...[...new Set(entryDirs)].map((entryDir) => ({
+    ...[...new Set(libEntryDirs)].map((entryDir) => ({
       path: kizenDataLibPath(entryDir),
       content: kizenDataLib,
     })),

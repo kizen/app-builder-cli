@@ -9,7 +9,7 @@ Follow these rules exactly. The runtime is strict, and a push changes a live Kiz
 
 ## Keep this skill current
 
-At the start of any block task, run `appbuilder setup-claude` in the plugin directory.
+At the start of any block task, run `appbuilder setup-claude --include-lib` in the plugin directory.
 
 - If it reports `updated` for `.claude/skills/kizen-custom-block/SKILL.md`, your loaded copy of this skill is stale. Re-read `.claude/skills/kizen-custom-block/SKILL.md` before doing anything else, and follow the new copy.
 - If it reports `created` for any file, or `updated` for `.claude/skills/kizen-custom-block/design.md`, read that file before writing any markup or styles.
@@ -153,7 +153,7 @@ Never run any other injected code in the user's tabs. `refresh.script` is the on
 
 - Dry run: `{ ok: true, applied: false, dryRun: true, action: 'create' | 'update', environment, businessId, dashboard: { id, name, type }, dashletId | null, url, method, path, body, warnings }`.
 - Applied: `{ ok: true, applied: true, dryRun: false, action: 'created' | 'updated', ..., dashletId, url, refresh?: { dashboardId, script }, remembered }`. `refresh` is absent when the dashboard id isn't a uuid.
-- If a `block push` result's `warnings` contains `Claude files managed by appbuilder are out of date; run appbuilder setup-claude`, run `appbuilder setup-claude`, re-read `.claude/skills/kizen-custom-block/SKILL.md`, then continue.
+- If a `block push` result's `warnings` contains `Claude files managed by appbuilder are out of date; run appbuilder setup-claude`, run `appbuilder setup-claude --include-lib`, re-read `.claude/skills/kizen-custom-block/SKILL.md`, then continue.
 - Error: `{ ok: false, code, message, choice?, choices? }`. `code` is one of `needs_choice`, `validation_failed`, `invalid_block`, `auth_failed`, `forbidden`, `remembered_target_missing`, `drift_detected`, `network_error`, `credentials_invalid`, `production_requires_flag`, `not_found`, `usage_error`, `api_error` or `local_error`.
 
 ### `needs_choice`

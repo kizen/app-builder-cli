@@ -44,8 +44,9 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-b, --business-id <id>',
     '-e, --environment <env>',
     '--artifacts <list>',
+    '--include-lib',
   ],
-  'setup-claude': ['--dry-run'],
+  'setup-claude': ['--dry-run', '--include-lib'],
   'setup-copilot': ['--dry-run'],
   build: [],
   dev: [

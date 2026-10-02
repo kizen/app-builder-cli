@@ -47,6 +47,7 @@ interface CreateUIProps {
   parentDir: string;
   defaultBusinessId: string;
   defaultEnvironment: Environment;
+  includeLib?: boolean;
 }
 
 const Hint: FC<{ text: string }> = ({ text }) => <Text dimColor>{text}</Text>;
@@ -55,6 +56,7 @@ export const CreateUI: FC<CreateUIProps> = ({
   parentDir,
   defaultBusinessId,
   defaultEnvironment,
+  includeLib = false,
 }) => {
   const app = useApp();
   const [phase, setPhase] = useState<Phase>({ type: 'target-select', cursor: 0 });
@@ -123,6 +125,7 @@ export const CreateUI: FC<CreateUIProps> = ({
           developerBusinessId: finalValues.developerBusinessId,
           developerEnvironment: defaultEnvironment,
           artifacts,
+          includeLib,
         });
 
         setPhase({ type: 'done', targetDir: dir });
@@ -133,7 +136,7 @@ export const CreateUI: FC<CreateUIProps> = ({
         });
       }
     },
-    [defaultEnvironment],
+    [defaultEnvironment, includeLib],
   );
 
   useInput((input, key) => {

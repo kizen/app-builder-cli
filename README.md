@@ -104,7 +104,7 @@ Writes `.kizenapp/bundle.json` — the same artifact `dev` serves — after runn
 
 ### `appbuilder create`
 
-Scaffolds a new Kizen plugin project. Interactive by default; passing any flag switches it to a non-interactive run, including `--artifacts` to choose the artifact templates up front (`appbuilder create --help` lists them all). See [Quickstart](#1-scaffold-a-plugin) for the fields it collects, the artifact picker, and everything it writes.
+Scaffolds a new Kizen plugin project. Interactive by default; passing any flag other than `--include-lib` switches it to a non-interactive run, including `--artifacts` to choose the artifact templates up front (`appbuilder create --help` lists them all). Pass `--include-lib` to also write the Kizen data helper library to `src/lib/kizenData.js`; without it, no library is written. See [Quickstart](#1-scaffold-a-plugin) for the fields it collects, the artifact picker, and everything it writes.
 
 The scaffold also includes `.github/copilot-instructions.md`, two path-scoped instruction files under `.github/instructions/`, and `.github/workflows/copilot-code-review.yml`. That workflow fetches the Kizen plugin docs from `kizen/app-engine` into `.copilot-docs/` before Copilot code review runs, so reviews cite the current documentation instead of rules copied into the plugin repo. It only takes effect once it is on the repository's default branch, and `.copilot-docs/` is gitignored. Plugins scaffolded before this setup existed can pick it up with `appbuilder setup-copilot`.
 
@@ -123,18 +123,19 @@ As with `create`, the workflow only runs once it has reached the repository's de
 Installs or refreshes the Claude Code skill for building custom blocks (`.claude/skills/kizen-custom-block/SKILL.md`) in the plugin in the current directory. `appbuilder create` writes the skill once; run `setup-claude` in an existing plugin to add it, or after upgrading the CLI to pick up the bundled version.
 
 ```sh
-appbuilder setup-claude [--dry-run]
+appbuilder setup-claude [--dry-run] [--include-lib]
 ```
 
-| Flag        | Default | Purpose                                         |
-| ----------- | ------- | ----------------------------------------------- |
-| `--dry-run` | off     | Report what would change without writing files. |
+| Flag            | Default | Purpose                                                      |
+| --------------- | ------- | ------------------------------------------------------------ |
+| `--dry-run`     | off     | Report what would change without writing files.              |
+| `--include-lib` | off     | Also install the Kizen data helper library (`kizenData.js`). |
 
-It also installs the skill's design guide (`.claude/skills/kizen-custom-block/design.md`), which tells the agent how to make blocks match native dashlets, and the Kizen data helper library (`src/lib/kizenData.js`) that block scripts import to read records and apply the dashboard's date and team filters. The library goes under the `entry` directory from `kizen.json` (`<entry>/lib/kizenData.js`, one per entry in a multi-plugin `kizen.json`), and under `src/` when `kizen.json` has no usable `entry`. `appbuilder create` writes it to `src/lib/kizenData.js`.
+It also installs the skill's design guide (`.claude/skills/kizen-custom-block/design.md`), which tells the agent how to make blocks match native dashlets. With `--include-lib`, it installs the Kizen data helper library that block scripts import to read records and apply the dashboard's date and team filters. The library goes under the `entry` directory from `kizen.json` (`<entry>/lib/kizenData.js`, one per entry in a multi-plugin `kizen.json`), and under `src/` when `kizen.json` has no usable `entry`. Without the flag, it refreshes only the libraries that already exist. `appbuilder create --include-lib` writes it to `src/lib/kizenData.js`.
 
 It prints one line per file (`created`, `updated` or `unchanged`) and a one-line summary. These files are managed by the CLI, so local edits to them, including edits to `kizenData.js`, are replaced when they're `updated`. Don't edit `kizenData.js`; put your own helpers in another file under `src/lib/`. It only writes these files and never touches the `.github/` Copilot files or block code. It fails with exit code 1 when there's no `kizen.json` in the current directory.
 
-`block push` adds the warning `Claude files managed by appbuilder are out of date; run appbuilder setup-claude` when the plugin has the skill and any managed file (the skill, its design guide or `kizenData.js`) is missing or differs from the bundled one. The warning never fails the push.
+`block push` adds the warning `Claude files managed by appbuilder are out of date; run appbuilder setup-claude` when the plugin has the skill and the skill or its design guide is missing or differs from the bundled one, or an existing `kizenData.js` differs from the bundled one. The warning never fails the push.
 
 ### `appbuilder build`
 

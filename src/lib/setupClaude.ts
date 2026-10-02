@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { ScaffoldedFile } from './createArtifacts.js';
-import { claudeFiles } from './createCopilotFiles.js';
+import { claudeFiles, kizenDataLibPath } from './createCopilotFiles.js';
 import { normalizeEntryDir } from './guards.js';
 import {
   applyManagedFiles,
@@ -49,17 +49,38 @@ export function entryDirsOf(manifest: unknown): string[] {
   return entryDirs.length > 0 ? [...new Set(entryDirs)] : ['src'];
 }
 
-export async function pluginClaudeFiles(
-  dir: string,
-  fs: ClaudeFs = nodeClaudeFs,
-): Promise<ScaffoldedFile[]> {
+const manifestEntryDirs = async (dir: string, fs: ClaudeFs): Promise<string[]> => {
   try {
     const manifest = await fs.readFile(join(dir, 'kizen.json'));
 
-    return claudeFiles(manifest === undefined ? undefined : entryDirsOf(JSON.parse(manifest)));
+    return manifest === undefined ? ['src'] : entryDirsOf(JSON.parse(manifest));
   } catch {
-    return claudeFiles();
+    return ['src'];
   }
+};
+
+/**
+ * The Claude files appbuilder manages in this plugin: always the skill and its design guide,
+ * and the data lib under each entry directory when `includeLib` is set or that lib already exists.
+ */
+export async function pluginClaudeFiles(
+  dir: string,
+  fs: ClaudeFs = nodeClaudeFs,
+  options: { includeLib?: boolean } = {},
+): Promise<ScaffoldedFile[]> {
+  const entryDirs = await manifestEntryDirs(dir, fs);
+  const libEntryDirs =
+    options.includeLib === true
+      ? entryDirs
+      : (
+          await Promise.all(
+            entryDirs.map(async (entryDir) =>
+              (await fs.exists(join(dir, kizenDataLibPath(entryDir)))) ? entryDir : undefined,
+            ),
+          )
+        ).filter((entryDir): entryDir is string => entryDir !== undefined);
+
+  return claudeFiles(libEntryDirs);
 }
 
 export async function isClaudeSkillStale(
@@ -110,7 +131,7 @@ const count = (plan: readonly ManagedFilePlan[], status: ManagedFileStatus): str
 
 export async function runSetupClaude(
   dir: string,
-  options: { dryRun?: boolean },
+  options: { dryRun?: boolean; includeLib?: boolean },
   deps: SetupClaudeDeps = defaultSetupClaudeDeps,
 ): Promise<void> {
   if (!(await deps.fs.exists(join(dir, 'kizen.json')))) {
@@ -124,7 +145,12 @@ export async function runSetupClaude(
   let plan: ManagedFilePlan[];
 
   try {
-    plan = await applyManagedFiles(dir, await pluginClaudeFiles(dir, deps.fs), { dryRun }, deps.fs);
+    plan = await applyManagedFiles(
+      dir,
+      await pluginClaudeFiles(dir, deps.fs, { includeLib: options.includeLib === true }),
+      { dryRun },
+      deps.fs,
+    );
   } catch (error) {
     deps.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
     deps.setExitCode(1);

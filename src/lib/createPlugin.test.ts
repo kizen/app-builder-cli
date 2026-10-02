@@ -259,7 +259,7 @@ describe('createPlugin', () => {
     }
   });
 
-  it('scaffolds the kizen-custom-block Claude Code skill and the kizenData lib in the entry directory', async () => {
+  it('scaffolds the kizen-custom-block Claude Code skill and its design guide', async () => {
     const input = validInput();
 
     await createPlugin(input);
@@ -277,6 +277,21 @@ describe('createPlugin', () => {
     );
 
     expect(design).toContain('# Designing a Kizen custom block');
+  });
+
+  it('createPlugin without includeLib writes no kizenData.js', async () => {
+    const input = validInput({ artifacts: ['block'] });
+
+    await createPlugin(input);
+
+    await expect(stat(join(input.targetDir, 'src', 'lib', 'kizenData.js'))).rejects.toThrow();
+    await expect(stat(join(input.targetDir, 'src', 'lib'))).rejects.toThrow();
+  });
+
+  it('createPlugin with includeLib writes src/lib/kizenData.js', async () => {
+    const input = validInput({ includeLib: true });
+
+    await createPlugin(input);
 
     const lib = await readFile(join(input.targetDir, 'src', 'lib', 'kizenData.js'), 'utf-8');
     const template = await readFile(
@@ -288,7 +303,7 @@ describe('createPlugin', () => {
   });
 
   it('exports a block that imports the kizenData lib, validation-clean and with the lib inlined', async () => {
-    const input = validInput({ artifacts: ['block'] });
+    const input = validInput({ artifacts: ['block'], includeLib: true });
 
     await createPlugin(input);
 

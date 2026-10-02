@@ -20,6 +20,8 @@ export interface CreatePluginInput {
   developerBusinessId: string;
   developerEnvironment: Environment;
   artifacts?: readonly ArtifactType[];
+  /** Also write the Kizen data lib to `src/lib/kizenData.js`. */
+  includeLib?: boolean;
 }
 
 export type PrecheckResult = 'ok' | 'has-manifest' | 'has-kizenapp';
@@ -123,7 +125,7 @@ export async function createPlugin(input: CreatePluginInput): Promise<void> {
   await Promise.all([
     writeScaffoldedFiles(input.targetDir, scaffoldArtifactFiles(input.artifacts ?? [])),
     writeScaffoldedFiles(input.targetDir, copilotFiles()),
-    writeScaffoldedFiles(input.targetDir, claudeFiles()),
+    writeScaffoldedFiles(input.targetDir, claudeFiles(input.includeLib === true ? ['src'] : [])),
     writeFile(join(input.targetDir, ...THUMBNAIL_PATH.split('/')), thumbnailBytes(input.apiName)),
   ]);
 

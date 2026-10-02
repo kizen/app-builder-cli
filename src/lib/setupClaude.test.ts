@@ -19,7 +19,7 @@ const DESIGN_PATH = '.claude/skills/kizen-custom-block/design.md';
 const LIB_PATH = 'src/lib/kizenData.js';
 
 const bundled = (path: string): string =>
-  claudeFiles().find((file) => file.path === path)?.content ?? '';
+  claudeFiles(['src']).find((file) => file.path === path)?.content ?? '';
 
 const BUNDLED = bundled(CLAUDE_SKILL_PATH);
 const BUNDLED_DESIGN = bundled(DESIGN_PATH);
@@ -146,14 +146,15 @@ describe('isClaudeSkillStale', () => {
     expect(await isClaudeSkillStale(dir)).toBe(true);
   });
 
-  it('is true when the skill and design guide match but the data lib is missing', async () => {
+  it('isClaudeSkillStale ignores an absent kizenData.js', async () => {
     await writeSkill(BUNDLED);
     await writeDesign(BUNDLED_DESIGN);
 
-    expect(await isClaudeSkillStale(dir)).toBe(true);
+    expect(await isClaudeSkillStale(dir)).toBe(false);
+    await expect(stat(libFile())).rejects.toThrow();
   });
 
-  it('is true when the data lib differs from the bundled one', async () => {
+  it('isClaudeSkillStale reports a differing existing kizenData.js', async () => {
     await writeBundled();
     await writeLib('export const mine = 1;\n');
 
@@ -164,11 +165,13 @@ describe('isClaudeSkillStale', () => {
     await writeFile(join(dir, 'kizen.json'), JSON.stringify({ entry: 'app/' }), 'utf-8');
     await writeSkill(BUNDLED);
     await writeDesign(BUNDLED_DESIGN);
-    await writeLib(BUNDLED_LIB);
+    // A lib outside the entry directory is not a managed file.
+    await writeLib('export const mine = 1;\n');
+    await mkdir(join(dir, 'app', 'lib'), { recursive: true });
+    await writeFile(join(dir, 'app', 'lib', 'kizenData.js'), 'export const mine = 1;\n', 'utf-8');
 
     expect(await isClaudeSkillStale(dir)).toBe(true);
 
-    await mkdir(join(dir, 'app', 'lib'), { recursive: true });
     await writeFile(join(dir, 'app', 'lib', 'kizenData.js'), BUNDLED_LIB, 'utf-8');
 
     expect(await isClaudeSkillStale(dir)).toBe(false);
@@ -202,7 +205,7 @@ describe('runSetupClaude', () => {
     await expect(stat(skillFile())).rejects.toThrow();
   });
 
-  it('reports created and writes the skill, the design guide and the data lib', async () => {
+  it('setup-claude without --include-lib does not create kizenData.js', async () => {
     await inPlugin();
 
     const { deps, logs, errors, exitCodes } = makeDeps();
@@ -212,14 +215,62 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `created   ${CLAUDE_SKILL_PATH}`,
       `created   ${DESIGN_PATH}`,
-      `created   ${LIB_PATH}`,
-      'Claude files: 3 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+      'Claude files: 2 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(errors).toStrictEqual([]);
     expect(exitCodes).toStrictEqual([]);
     expect(await readSkill()).toBe(BUNDLED);
     expect(await readDesign()).toBe(BUNDLED_DESIGN);
+    await expect(stat(libFile())).rejects.toThrow();
+  });
+
+  it('setup-claude without --include-lib refreshes an existing kizenData.js', async () => {
+    await inPlugin();
+    await writeSkill(BUNDLED);
+    await writeDesign(BUNDLED_DESIGN);
+    await writeLib('export const old = 1;\n');
+
+    const { deps, logs, exitCodes } = makeDeps();
+
+    await runSetupClaude(dir, {}, deps);
+
+    expect(logs).toStrictEqual([
+      `unchanged ${CLAUDE_SKILL_PATH}`,
+      `unchanged ${DESIGN_PATH}`,
+      `updated   ${LIB_PATH}`,
+      'Claude files: 0 created, 1 updated, 2 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+    ]);
+    expect(exitCodes).toStrictEqual([]);
     expect(await readLib()).toBe(BUNDLED_LIB);
+  });
+
+  it('setup-claude --include-lib creates kizenData.js under each entry dir', async () => {
+    await writeFile(
+      join(dir, 'kizen.json'),
+      JSON.stringify([{ entry: 'src/googleAds/' }, { entry: 'src/outlookInbox/' }]),
+      'utf-8',
+    );
+
+    const { deps, logs, exitCodes } = makeDeps();
+
+    await runSetupClaude(dir, { includeLib: true }, deps);
+
+    expect(logs).toStrictEqual([
+      `created   ${CLAUDE_SKILL_PATH}`,
+      `created   ${DESIGN_PATH}`,
+      'created   src/googleAds/lib/kizenData.js',
+      'created   src/outlookInbox/lib/kizenData.js',
+      'Claude files: 4 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+    ]);
+    expect(exitCodes).toStrictEqual([]);
+
+    for (const entry of ['googleAds', 'outlookInbox']) {
+      expect(await readFile(join(dir, 'src', entry, 'lib', 'kizenData.js'), 'utf-8')).toBe(
+        BUNDLED_LIB,
+      );
+    }
+
+    await expect(stat(libFile())).rejects.toThrow();
   });
 
   it('writes the data lib under the kizen.json entry directory', async () => {
@@ -227,7 +278,7 @@ describe('runSetupClaude', () => {
 
     const { deps, logs } = makeDeps();
 
-    await runSetupClaude(dir, {}, deps);
+    await runSetupClaude(dir, { includeLib: true }, deps);
 
     expect(logs[2]).toBe('created   app/lib/kizenData.js');
     expect(await readFile(join(dir, 'app', 'lib', 'kizenData.js'), 'utf-8')).toBe(BUNDLED_LIB);
@@ -242,7 +293,7 @@ describe('runSetupClaude', () => {
     const fs = spyFs();
     const { deps, logs, exitCodes } = makeDeps(fs);
 
-    await runSetupClaude(dir, { dryRun: true }, deps);
+    await runSetupClaude(dir, { dryRun: true, includeLib: true }, deps);
 
     expect(logs).toStrictEqual([
       `updated   ${CLAUDE_SKILL_PATH}`,
@@ -253,6 +304,23 @@ describe('runSetupClaude', () => {
     expect(fs.writeFile).not.toHaveBeenCalled();
     expect(exitCodes).toStrictEqual([]);
     expect(await readSkill()).toBe('edited locally\n');
+    await expect(stat(libFile())).rejects.toThrow();
+  });
+
+  it('plans no data lib in a dry run without --include-lib', async () => {
+    await inPlugin();
+
+    const fs = spyFs();
+    const { deps, logs } = makeDeps(fs);
+
+    await runSetupClaude(dir, { dryRun: true }, deps);
+
+    expect(logs).toStrictEqual([
+      `created   ${CLAUDE_SKILL_PATH}`,
+      `created   ${DESIGN_PATH}`,
+      'Dry run: 2 created, 0 updated, 0 unchanged; nothing written (these files are managed by appbuilder, so local edits to them are replaced).',
+    ]);
+    expect(fs.writeFile).not.toHaveBeenCalled();
   });
 
   it('fails with exit code 1 when a write fails', async () => {
@@ -303,18 +371,41 @@ describe('entryDirsOf', () => {
 });
 
 describe('pluginClaudeFiles', () => {
-  it('places the data lib under src when kizen.json is missing', async () => {
+  it('manages only the skill and design guide when no data lib exists and none is requested', async () => {
     expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toStrictEqual([
       CLAUDE_SKILL_PATH,
       DESIGN_PATH,
-      LIB_PATH,
     ]);
+  });
+
+  it('places the data lib under src when kizen.json is missing', async () => {
+    expect(
+      (await pluginClaudeFiles(dir, nodeClaudeFs, { includeLib: true })).map((file) => file.path),
+    ).toStrictEqual([CLAUDE_SKILL_PATH, DESIGN_PATH, LIB_PATH]);
   });
 
   it('places the data lib under src when kizen.json is not valid JSON', async () => {
     await writeFile(join(dir, 'kizen.json'), '{ nope', 'utf-8');
 
-    expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toContain(LIB_PATH);
+    expect(
+      (await pluginClaudeFiles(dir, nodeClaudeFs, { includeLib: true })).map((file) => file.path),
+    ).toContain(LIB_PATH);
+  });
+
+  it('manages only the entry directories whose data lib already exists', async () => {
+    await writeFile(
+      join(dir, 'kizen.json'),
+      JSON.stringify([{ entry: 'src/googleAds/' }, { entry: 'src/outlookInbox/' }]),
+      'utf-8',
+    );
+    await mkdir(join(dir, 'src', 'outlookInbox', 'lib'), { recursive: true });
+    await writeFile(join(dir, 'src', 'outlookInbox', 'lib', 'kizenData.js'), 'x', 'utf-8');
+
+    expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toStrictEqual([
+      CLAUDE_SKILL_PATH,
+      DESIGN_PATH,
+      'src/outlookInbox/lib/kizenData.js',
+    ]);
   });
 
   it('places one data lib under each entry of a multi-plugin manifest', async () => {
@@ -324,7 +415,7 @@ describe('pluginClaudeFiles', () => {
       'utf-8',
     );
 
-    const files = await pluginClaudeFiles(dir);
+    const files = await pluginClaudeFiles(dir, nodeClaudeFs, { includeLib: true });
 
     expect(files.map((file) => file.path)).toStrictEqual([
       CLAUDE_SKILL_PATH,

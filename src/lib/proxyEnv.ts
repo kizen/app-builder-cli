@@ -25,7 +25,8 @@ export function applyProxyFromEnv({ env, http }: ApplyProxyFromEnvOptions): Prox
 
   if (!PROXY_VARS.some((name) => isSet(env[name]))) {
     status = 'not-configured';
-  } else if (isSet(env.NODE_USE_ENV_PROXY)) {
+  } else if (env.NODE_USE_ENV_PROXY === '1') {
+    // Node turns on its own env proxy only for exactly '1'; any other value leaves it off.
     status = 'already-set';
   } else if (typeof http.setGlobalProxyFromEnv !== 'function') {
     status = 'unavailable';

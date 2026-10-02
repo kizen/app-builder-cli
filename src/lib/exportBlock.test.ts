@@ -512,7 +512,7 @@ describe('exportBlock', () => {
       (error: unknown) => error,
     );
 
-  it('exports the only block exactly as packaged, warning only about the unused kizenData lib', async () => {
+  it('exports the only block exactly as packaged, with no warnings', async () => {
     await bootstrapPlugin();
 
     const { deployable } = await packageLocalPlugin(pluginDir);
@@ -522,12 +522,7 @@ describe('exportBlock', () => {
     expect(result.block.api_name).toBe('hello_block');
     expect(result.block.script.trim()).not.toBe('');
     expect(result.pluginApiName).toBe(PLUGIN_API_NAME);
-    expect(result.warnings.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-    expect(
-      result.warnings.map(({ rule, path, severity }) => ({ rule, path, severity })),
-    ).toStrictEqual([
-      { rule: 'imports/unused-module', path: 'src/lib/kizenData.js', severity: 'warning' },
-    ]);
+    expect(result.warnings).toStrictEqual([]);
   });
 
   it('selects a block by api_name among several', async () => {
