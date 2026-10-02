@@ -1,20 +1,7 @@
 import type { FC } from 'react';
 import { Box, Text } from 'ink';
 import type { ValidationIssue } from '@kizenapps/packager';
-
-const groupIssuesByPath = (issues: ValidationIssue[]): Map<string, ValidationIssue[]> => {
-  const groups = new Map<string, ValidationIssue[]>();
-
-  for (const issue of issues) {
-    const key = issue.path ?? issue.pluginApiName ?? 'general';
-    const group = groups.get(key) ?? [];
-
-    group.push(issue);
-    groups.set(key, group);
-  }
-
-  return groups;
-};
+import { groupIssuesByPath } from '../lib/formatValidationIssues.js';
 
 interface ValidationIssuesProps {
   issues: ValidationIssue[];

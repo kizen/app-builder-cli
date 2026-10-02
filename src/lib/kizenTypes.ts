@@ -80,6 +80,16 @@ export interface CustomCodeContent {
   views?: CustomCodeView[];
 }
 
+/** Every block size key, in canonical content order. */
+export const BLOCK_SIZE_FIELDS = [
+  'min_w',
+  'max_w',
+  'min_h',
+  'max_h',
+  'default_w',
+  'default_h',
+] as const satisfies readonly (keyof CustomCodeContent)[];
+
 export interface CreateDashletBody {
   name: string;
   layout: DashletLayout;

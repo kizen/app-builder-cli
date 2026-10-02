@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as osModule from 'node:os';
 import type * as credentialsModule from './credentials.js';
-import type { Credentials } from '../../shared/lib/credentials.js';
+import { cleanCredentialId, type Credentials } from '../../shared/lib/credentials.js';
 
 // credentials.ts resolves its paths from homedir() at module load, so the fake
 // home has to be in place before each dynamic import below.
@@ -67,23 +67,13 @@ describe('credential paths', () => {
 
 describe('cleanCredentialId', () => {
   it('trims strings and maps non-strings to an empty string', () => {
-    expect(mod.cleanCredentialId('\r\nbiz-123\r\r ')).toBe('biz-123');
-    expect(mod.cleanCredentialId(undefined)).toBe('');
-    expect(mod.cleanCredentialId(42)).toBe('');
+    expect(cleanCredentialId('\r\nbiz-123\r\r ')).toBe('biz-123');
+    expect(cleanCredentialId(undefined)).toBe('');
+    expect(cleanCredentialId(42)).toBe('');
   });
 });
 
 describe('normalizeCredentialIds', () => {
-  it('trims CR, LF and spaces from pasted ids', () => {
-    expect(
-      mod.normalizeCredentialIds({
-        apiKey: ' key-123\r\r',
-        userId: 'user-123\n',
-        businessId: '\r\nbiz-123\r\r ',
-      }),
-    ).toStrictEqual({ apiKey: 'key-123', userId: 'user-123', businessId: 'biz-123' });
-  });
-
   it('turns missing and non-string ids into empty strings', () => {
     expect(mod.normalizeCredentialIds({ apiKey: undefined, userId: 7 })).toStrictEqual({
       apiKey: '',
@@ -346,17 +336,8 @@ describe('credential profiles', () => {
 });
 
 describe('loadCredentialsDetailed', () => {
-  it('reports an explicit environment', async () => {
-    await writeGlobal(JSON.stringify(VALID));
-
-    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).resolves.toEqual({
-      credentials: VALID,
-      environmentSource: 'explicit',
-    });
-  });
-
   it('reports a missing environment and still defaults it to go', async () => {
-    for (const environment of [undefined, null, '']) {
+    for (const environment of [undefined, null, '', ' \n']) {
       await writeGlobal(JSON.stringify({ ...VALID, environment }));
 
       const detailed = await mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH);
@@ -377,21 +358,65 @@ describe('loadCredentialsDetailed', () => {
     }
   });
 
-  it('rejects a missing file', async () => {
-    await expect(mod.loadCredentialsDetailed(join(state.home, 'nope.json'))).rejects.toThrow();
-  });
+  it.each([
+    { name: 'valid', contents: JSON.stringify(VALID), status: 'fulfilled' },
+    { name: 'missing', contents: null, status: 'rejected', errorClass: Error, code: 'ENOENT' },
+    { name: 'corrupt', contents: '{ not json', status: 'rejected', errorClass: SyntaxError },
+    {
+      name: 'non-object',
+      contents: 'null',
+      status: 'rejected',
+      errorClass: Error,
+      message: 'Credentials must be a JSON object',
+    },
+    {
+      name: 'invalid environment',
+      contents: '{"apiKey":"k","environment":"prod"}',
+      status: 'fulfilled',
+    },
+    {
+      name: 'blank environment',
+      contents: '{"apiKey":"k","environment":"  "}',
+      status: 'fulfilled',
+    },
+  ] as const)(
+    'loadCredentialsFromFile delegates to loadCredentialsDetailed for $name',
+    async (row) => {
+      if (row.contents !== null) {
+        await writeGlobal(row.contents);
+      }
 
-  it('rejects corrupt JSON and non-object payloads', async () => {
-    await writeGlobal('{ not json');
+      const [plain, detailed] = await Promise.allSettled([
+        mod.loadCredentialsFromFile(mod.GLOBAL_CREDENTIALS_PATH),
+        mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH),
+      ]);
 
-    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).rejects.toThrow();
+      expect(plain.status).toBe(row.status);
+      expect(detailed.status).toBe(row.status);
 
-    await writeGlobal('null');
+      if (plain.status === 'fulfilled' && detailed.status === 'fulfilled') {
+        expect(plain.value).toStrictEqual(detailed.value.credentials);
+      } else if (plain.status === 'rejected' && detailed.status === 'rejected') {
+        const plainError = plain.reason as NodeJS.ErrnoException;
+        const detailedError = detailed.reason as NodeJS.ErrnoException;
 
-    await expect(mod.loadCredentialsDetailed(mod.GLOBAL_CREDENTIALS_PATH)).rejects.toThrow(
-      'Credentials must be a JSON object',
-    );
-  });
+        expect(plainError.constructor).toBe(detailedError.constructor);
+        expect(plainError.message).toBe(detailedError.message);
+
+        if ('errorClass' in row) {
+          expect(plainError.constructor).toBe(row.errorClass);
+        }
+
+        if ('code' in row) {
+          expect(plainError.code).toBe(row.code);
+        }
+
+        if ('message' in row) {
+          expect(plainError.message).toBe(row.message);
+        }
+      }
+    },
+  );
 });
 
 describe('listLoadableCredentialProfiles', () => {

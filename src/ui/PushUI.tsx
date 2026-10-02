@@ -11,27 +11,23 @@ import { type ValidationIssue } from '@kizenapps/packager';
 import { type Credentials } from '../lib/credentials.js';
 import { formatValidationIssues } from '../lib/formatValidationIssues.js';
 import { type Surface } from '../lib/kizenTypes.js';
-import {
-  findPushMapEntry,
-  matchPushTarget,
-  removePushMapEntry,
-  surfaceToDashboardType,
-} from '../lib/pushBlock.js';
+import { surfaceToDashboardType } from '../lib/pushBlock.js';
 import {
   apiFailure,
   applyPlan,
   buildBrowserRefresh,
   buildPlan,
   buildTargetChoices,
-  forgetRemembered,
   formatSummaryLines,
-  pushMapKeyOf,
   headlessWriteGate,
   listPushableObjects,
+  loadPushContext,
+  matchContextTarget,
   resolveBlock,
   resolveCredentials,
   resolveTarget,
   toTargetRow,
+  warningLines,
   type AppliedPush,
   type PushChoice,
   type PushCommandOptions,
@@ -120,6 +116,8 @@ const SURFACE_NOUNS: Record<Surface, string> = {
   chart_group: 'chart group',
 };
 
+const BACK_HINT = '↑/↓ to move, Enter to select, Esc to go back';
+
 const DRIFT_WARNING =
   'The block was edited in Kizen since your last push. Overwriting discards those edits.';
 
@@ -131,6 +129,20 @@ function orderTargetChoices(choices: PushChoice[], matchedId: string | null): Pu
   const rest = choices.filter((choice) => choice.value !== matchedId && !isCreateChoice(choice));
 
   return matched.length > 0 ? [...matched, ...rest, ...creates] : [...creates, ...rest];
+}
+
+// A SelectList onSelect that hands the picked element of `list` to `fn`.
+function pick<T>(
+  list: readonly T[],
+  fn: (value: T) => void,
+): (item: SelectItem, index: number) => void {
+  return (_item, index) => {
+    const value = list[index];
+
+    if (value !== undefined) {
+      fn(value);
+    }
+  };
 }
 
 function targetItem(choice: PushChoice, matchedId: string | null): SelectItem {
@@ -315,24 +327,22 @@ function createPushFlow(
     credentials: Credentials,
     block: ResolvedBlock,
   ): Promise<void> => {
-    const key = pushMapKeyOf({ credentials, block });
-    let pushMap = await deps.readPushMap(deps.cwd);
+    const { context, forgotten } = await loadPushContext(
+      {
+        client: deps.createClient(credentials),
+        credentials,
+        block,
+        forget: options.forget === true,
+      },
+      deps,
+    );
 
-    if (options.forget && (await forgetRemembered({ credentials, block, pushMap }, deps))) {
-      pushMap = removePushMapEntry(pushMap, key);
+    if (forgotten) {
       setSession((session) => ({
         ...session,
         notices: [...session.notices, `Forgot the remembered target for ${block.block.api_name}.`],
       }));
     }
-
-    const context: PushContext = {
-      client: deps.createClient(credentials),
-      credentials,
-      block,
-      pushMap,
-      entry: findPushMapEntry(pushMap, key),
-    };
 
     if (options.dashboard !== undefined || context.entry) {
       await resolve(context, options, null);
@@ -482,13 +492,7 @@ function createPushFlow(
         setPhase({ type: 'loading', label: `Loading "${row.name}"…` });
 
         const dashboard = await context.client.getDashboard(row.id);
-        const match = matchPushTarget({
-          dashboardId: dashboard.id,
-          dashlets: dashboard.dashlets,
-          pluginApiName: context.block.pluginApiName,
-          blockApiName: context.block.block.api_name,
-          entry: context.entry,
-        });
+        const match = matchContextTarget(context, dashboard);
         const matchedId = match.kind === 'map' || match.kind === 'name' ? match.dashlet.id : null;
 
         setPhase({
@@ -596,9 +600,7 @@ const DoneFrame: FC<{ plan: PushPlan; applied: AppliedPush | null }> = ({ plan, 
       <Box flexDirection="column" gap={1}>
         <Text color="yellow">Dry run: nothing was written.</Text>
         <PlanSummary plan={plan} />
-        {plan.warnings.length > 0 && (
-          <Lines lines={plan.warnings.map((warning) => `Warning: ${warning}`)} color="yellow" />
-        )}
+        {plan.warnings.length > 0 && <Lines lines={warningLines(plan.warnings)} color="yellow" />}
         <Box flexDirection="column">
           <Text bold>
             {plan.method} {plan.path}
@@ -623,7 +625,7 @@ const DoneFrame: FC<{ plan: PushPlan; applied: AppliedPush | null }> = ({ plan, 
         {refresh && <Text dimColor>Refresh an open tab: {refresh.script}</Text>}
       </Box>
       {applied.warnings.length > 0 && (
-        <Lines lines={applied.warnings.map((warning) => `Warning: ${warning}`)} color="yellow" />
+        <Lines lines={warningLines(applied.warnings)} color="yellow" />
       )}
     </Box>
   );
@@ -691,13 +693,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           key="profile"
           title="Credential profile"
           items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
-          onSelect={(_item, index) => {
-            const choice = phase.choices[index];
-
-            if (choice) {
-              flow.pickProfile(phase, choice);
-            }
-          }}
+          onSelect={pick(phase.choices, (choice) => {
+            flow.pickProfile(phase, choice);
+          })}
           onCancel={flow.cancel}
         />,
       );
@@ -707,13 +705,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           key="block"
           title="Block to push"
           items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
-          onSelect={(_item, index) => {
-            const choice = phase.choices[index];
-
-            if (choice) {
-              flow.pickBlock(phase, choice);
-            }
-          }}
+          onSelect={pick(phase.choices, (choice) => {
+            flow.pickBlock(phase, choice);
+          })}
           onCancel={flow.cancel}
         />,
       );
@@ -723,13 +717,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           key="surface"
           title="Where should the block go?"
           items={SURFACE_ITEMS}
-          onSelect={(_item, index) => {
-            const item = SURFACE_ITEMS[index];
-
-            if (item) {
-              flow.pickSurface(phase, item.key);
-            }
-          }}
+          onSelect={pick(SURFACE_ITEMS, (item) => {
+            flow.pickSurface(phase, item.key);
+          })}
           onCancel={flow.cancel}
         />,
       );
@@ -739,17 +729,13 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           key="object"
           title="Custom object"
           items={phase.objects.map((object) => ({ key: object.id, label: object.objectName }))}
-          onSelect={(_item, index) => {
-            const object = phase.objects[index];
-
-            if (object) {
-              flow.pickObject(phase, object);
-            }
-          }}
+          onSelect={pick(phase.objects, (object) => {
+            flow.pickObject(phase, object);
+          })}
           onCancel={() => {
             setPhase(phase.back);
           }}
-          hint="↑/↓ to move, Enter to select, Esc to go back"
+          hint={BACK_HINT}
         />,
       );
     case 'dashboard-select':
@@ -758,17 +744,13 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           key={`dashboards-${phase.surface}-${phase.objectId ?? ''}`}
           title={phase.title}
           items={phase.rows.map(dashboardItem)}
-          onSelect={(_item, index) => {
-            const row = phase.rows[index];
-
-            if (row) {
-              flow.pickDashboard(phase, row);
-            }
-          }}
+          onSelect={pick(phase.rows, (row) => {
+            flow.pickDashboard(phase, row);
+          })}
           onCancel={() => {
             setPhase(phase.back);
           }}
-          hint="↑/↓ to move, Enter to select, Esc to go back"
+          hint={BACK_HINT}
         />,
       );
     case 'target-select': {
@@ -781,13 +763,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
             key={`targets-${phase.dashboardId}`}
             title={phase.title}
             items={phase.choices.map((choice) => targetItem(choice, phase.matchedId))}
-            onSelect={(_item, index) => {
-              const choice = phase.choices[index];
-
-              if (choice) {
-                flow.pickTarget(phase, choice);
-              }
-            }}
+            onSelect={pick(phase.choices, (choice) => {
+              flow.pickTarget(phase, choice);
+            })}
             onCancel={
               back
                 ? () => {
@@ -795,7 +773,7 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
                   }
                 : flow.cancel
             }
-            {...(back && { hint: '↑/↓ to move, Enter to select, Esc to go back' })}
+            {...(back && { hint: BACK_HINT })}
           />
         </>,
       );
@@ -824,10 +802,7 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
         <Box flexDirection="column" gap={1}>
           <PlanSummary plan={phase.plan} />
           {phase.plan.warnings.length > 0 && (
-            <Lines
-              lines={phase.plan.warnings.map((warning) => `Warning: ${warning}`)}
-              color="yellow"
-            />
+            <Lines lines={warningLines(phase.plan.warnings)} color="yellow" />
           )}
           {phase.plan.summary.isProduction && (
             <Text color="red" bold>

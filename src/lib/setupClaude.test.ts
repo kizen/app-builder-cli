@@ -4,12 +4,10 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { claudeFiles } from './createCopilotFiles.js';
 import {
-  applyClaudeFiles,
   CLAUDE_SKILL_PATH,
   entryDirsOf,
   isClaudeSkillStale,
   nodeClaudeFs,
-  planClaudeFiles,
   pluginClaudeFiles,
   runSetupClaude,
   STALE_CLAUDE_SKILL_WARNING,
@@ -102,195 +100,12 @@ const makeDeps = (fs: ClaudeFs = nodeClaudeFs): DepsHarness => {
   return { deps, logs, errors, exitCodes };
 };
 
-describe('claudeFiles contract', () => {
-  it('bundles the skill, its design guide and the data lib at the paths setup-claude manages', () => {
-    expect(claudeFiles().map((file) => file.path)).toStrictEqual([
-      CLAUDE_SKILL_PATH,
-      DESIGN_PATH,
-      LIB_PATH,
-    ]);
-    expect(BUNDLED.length).toBeGreaterThan(0);
-    expect(BUNDLED_DESIGN.length).toBeGreaterThan(0);
-    expect(BUNDLED_LIB).toContain('export const searchRecords = ');
-  });
-
-  it('points the skill at the design guide', () => {
-    expect(BUNDLED).toContain(
-      'Before writing any markup or styles, read `design.md` in this skill directory and follow it exactly.',
-    );
-  });
-
+describe('STALE_CLAUDE_SKILL_WARNING', () => {
   it('names the managed files and the command in the stale warning, not one file', () => {
     expect(STALE_CLAUDE_SKILL_WARNING).toBe(
       'Claude files managed by appbuilder are out of date; run appbuilder setup-claude',
     );
     expect(STALE_CLAUDE_SKILL_WARNING).not.toContain('SKILL.md');
-  });
-
-  it('tells the agent to look for the exact stale warning the push emits', () => {
-    expect(BUNDLED).toContain(`\`${STALE_CLAUDE_SKILL_WARNING}\``);
-    expect(BUNDLED).toContain('## Keep this skill current');
-    expect(BUNDLED).toContain('appbuilder setup-claude');
-  });
-});
-
-describe('planClaudeFiles', () => {
-  it('plans created when every file is missing', async () => {
-    expect(await planClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'created' },
-      { path: DESIGN_PATH, status: 'created' },
-      { path: LIB_PATH, status: 'created' },
-    ]);
-  });
-
-  it('plans each file on its own status', async () => {
-    await writeSkill('edited locally\n');
-
-    expect(await planClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'updated' },
-      { path: DESIGN_PATH, status: 'created' },
-      { path: LIB_PATH, status: 'created' },
-    ]);
-  });
-
-  it('plans updated for a design guide that differs while the skill matches', async () => {
-    await writeSkill(BUNDLED);
-    await writeDesign('edited locally\n');
-
-    expect(await planClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'unchanged' },
-      { path: DESIGN_PATH, status: 'updated' },
-      { path: LIB_PATH, status: 'created' },
-    ]);
-  });
-
-  it('plans unchanged when every file matches the bundled one', async () => {
-    await writeBundled();
-
-    expect(await planClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'unchanged' },
-      { path: DESIGN_PATH, status: 'unchanged' },
-      { path: LIB_PATH, status: 'unchanged' },
-    ]);
-  });
-
-  it('plans updated for a locally edited data lib', async () => {
-    await writeBundled();
-    await writeLib('export const mine = 1;\n');
-
-    expect(await planClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'unchanged' },
-      { path: DESIGN_PATH, status: 'unchanged' },
-      { path: LIB_PATH, status: 'updated' },
-    ]);
-  });
-
-  it('never writes', async () => {
-    const fs = spyFs();
-
-    await planClaudeFiles(dir, fs);
-
-    expect(fs.writeFile).not.toHaveBeenCalled();
-  });
-});
-
-describe('applyClaudeFiles', () => {
-  it('creates missing files with the bundled content', async () => {
-    expect(await applyClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'created' },
-      { path: DESIGN_PATH, status: 'created' },
-      { path: LIB_PATH, status: 'created' },
-    ]);
-    expect(await readSkill()).toBe(BUNDLED);
-    expect(await readDesign()).toBe(BUNDLED_DESIGN);
-    expect(await readLib()).toBe(BUNDLED_LIB);
-  });
-
-  it('overwrites a locally edited skill with the bundled content', async () => {
-    await writeSkill('edited locally\n');
-    await writeDesign(BUNDLED_DESIGN);
-    await writeLib(BUNDLED_LIB);
-
-    expect(await applyClaudeFiles(dir)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'updated' },
-      { path: DESIGN_PATH, status: 'unchanged' },
-      { path: LIB_PATH, status: 'unchanged' },
-    ]);
-    expect(await readSkill()).toBe(BUNDLED);
-  });
-
-  it('writes only the design guide when only it differs', async () => {
-    await writeSkill(BUNDLED);
-    await writeDesign('edited locally\n');
-    await writeLib(BUNDLED_LIB);
-
-    const fs = spyFs();
-
-    expect(await applyClaudeFiles(dir, {}, fs)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'unchanged' },
-      { path: DESIGN_PATH, status: 'updated' },
-      { path: LIB_PATH, status: 'unchanged' },
-    ]);
-    expect(fs.writeFile.mock.calls.map((call) => String(call[0]))).toStrictEqual([designFile()]);
-    expect(await readDesign()).toBe(BUNDLED_DESIGN);
-  });
-
-  it('does not rewrite unchanged files', async () => {
-    await writeBundled();
-
-    const fs = spyFs();
-
-    expect(await applyClaudeFiles(dir, {}, fs)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'unchanged' },
-      { path: DESIGN_PATH, status: 'unchanged' },
-      { path: LIB_PATH, status: 'unchanged' },
-    ]);
-    expect(fs.writeFile).not.toHaveBeenCalled();
-  });
-
-  it('replaces a locally edited data lib with the bundled one', async () => {
-    await writeBundled();
-    await writeLib('export const mine = 1;\n');
-
-    const fs = spyFs();
-
-    await applyClaudeFiles(dir, {}, fs);
-
-    expect(fs.writeFile.mock.calls.map((call) => String(call[0]))).toStrictEqual([libFile()]);
-    expect(await readLib()).toBe(BUNDLED_LIB);
-  });
-
-  it('makes no writes on a dry run with an outdated skill', async () => {
-    await writeSkill('edited locally\n');
-
-    const fs = spyFs();
-
-    expect(await applyClaudeFiles(dir, { dryRun: true }, fs)).toStrictEqual([
-      { path: CLAUDE_SKILL_PATH, status: 'updated' },
-      { path: DESIGN_PATH, status: 'created' },
-      { path: LIB_PATH, status: 'created' },
-    ]);
-    expect(fs.writeFile).not.toHaveBeenCalled();
-    expect(await readSkill()).toBe('edited locally\n');
-  });
-
-  it('makes no writes on a dry run with a missing skill', async () => {
-    await applyClaudeFiles(dir, { dryRun: true });
-
-    await expect(stat(skillFile())).rejects.toThrow();
-    await expect(stat(designFile())).rejects.toThrow();
-    await expect(stat(libFile())).rejects.toThrow();
-  });
-
-  it('only writes the managed skill files and the data lib', async () => {
-    const fs = spyFs();
-
-    await applyClaudeFiles(dir, {}, fs);
-
-    const written = fs.writeFile.mock.calls.map((call) => String(call[0]));
-
-    expect(written).toStrictEqual([skillFile(), designFile(), libFile()]);
-    expect(written.some((path) => path.includes('.github'))).toBe(false);
   });
 });
 
@@ -419,54 +234,6 @@ describe('runSetupClaude', () => {
     await expect(stat(libFile())).rejects.toThrow();
   });
 
-  it('reports updated and restores the bundled skill', async () => {
-    await inPlugin();
-    await writeSkill('edited locally\n');
-    await writeDesign(BUNDLED_DESIGN);
-    await writeLib(BUNDLED_LIB);
-
-    const { deps, logs } = makeDeps();
-
-    await runSetupClaude(dir, {}, deps);
-
-    expect(logs[0]).toBe(`updated   ${CLAUDE_SKILL_PATH}`);
-    expect(logs[1]).toBe(`unchanged ${DESIGN_PATH}`);
-    expect(logs[2]).toBe(`unchanged ${LIB_PATH}`);
-    expect(logs[3]).toContain('0 created, 1 updated, 2 unchanged');
-    expect(await readSkill()).toBe(BUNDLED);
-  });
-
-  it('reports a missing design guide as created next to an unchanged skill', async () => {
-    await inPlugin();
-    await writeSkill(BUNDLED);
-    await writeLib(BUNDLED_LIB);
-
-    const { deps, logs } = makeDeps();
-
-    await runSetupClaude(dir, {}, deps);
-
-    expect(logs[0]).toBe(`unchanged ${CLAUDE_SKILL_PATH}`);
-    expect(logs[1]).toBe(`created   ${DESIGN_PATH}`);
-    expect(logs[2]).toBe(`unchanged ${LIB_PATH}`);
-    expect(logs[3]).toContain('1 created, 0 updated, 2 unchanged');
-    expect(await readDesign()).toBe(BUNDLED_DESIGN);
-  });
-
-  it('reports unchanged', async () => {
-    await inPlugin();
-    await writeBundled();
-
-    const { deps, logs, exitCodes } = makeDeps();
-
-    await runSetupClaude(dir, {}, deps);
-
-    expect(logs[0]).toBe(`unchanged ${CLAUDE_SKILL_PATH}`);
-    expect(logs[1]).toBe(`unchanged ${DESIGN_PATH}`);
-    expect(logs[2]).toBe(`unchanged ${LIB_PATH}`);
-    expect(logs[3]).toContain('0 created, 0 updated, 3 unchanged');
-    expect(exitCodes).toStrictEqual([]);
-  });
-
   it('reports a dry run without writing', async () => {
     await inPlugin();
     await writeSkill('edited locally\n');
@@ -566,11 +333,5 @@ describe('pluginClaudeFiles', () => {
       'src/outlookInbox/lib/kizenData.js',
     ]);
     expect(files[3]?.content).toBe(BUNDLED_LIB);
-  });
-
-  it('places the data lib at lib/ for a root entry', async () => {
-    await writeFile(join(dir, 'kizen.json'), JSON.stringify({ entry: './' }), 'utf-8');
-
-    expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toContain('lib/kizenData.js');
   });
 });

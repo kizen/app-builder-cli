@@ -9,9 +9,7 @@ import {
 } from '../../shared/lib/credentials.js';
 export {
   ENVIRONMENTS,
-  cleanCredentialId,
   normalizeCredentialIds,
-  type CredentialIds,
   type Environment,
   type Credentials,
 } from '../../shared/lib/credentials.js';
@@ -34,7 +32,22 @@ function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
 }
 
-function parseCredentials(raw: unknown): Credentials {
+export type EnvironmentSource = 'explicit' | 'missing' | 'invalid';
+
+export interface DetailedCredentials {
+  credentials: Credentials;
+  environmentSource: EnvironmentSource;
+}
+
+function environmentSourceOf(env: unknown): EnvironmentSource {
+  if (isValidEnvironment(env)) {
+    return 'explicit';
+  }
+
+  return env === undefined || env === null || env === '' ? 'missing' : 'invalid';
+}
+
+function parseCredentials(raw: unknown): DetailedCredentials {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error('Credentials must be a JSON object');
   }
@@ -43,40 +56,22 @@ function parseCredentials(raw: unknown): Credentials {
   const env = trimString(obj.environment);
 
   return {
-    ...normalizeCredentialIds(obj),
-    environment: isValidEnvironment(env) ? env : 'go',
+    credentials: {
+      ...normalizeCredentialIds(obj),
+      environment: isValidEnvironment(env) ? env : 'go',
+    },
+    environmentSource: environmentSourceOf(env),
   };
 }
 
-export async function loadCredentialsFromFile(filePath: string): Promise<Credentials> {
+export async function loadCredentialsDetailed(filePath: string): Promise<DetailedCredentials> {
   const content = await readFile(filePath, 'utf-8');
 
   return parseCredentials(JSON.parse(content) as unknown);
 }
 
-export type EnvironmentSource = 'explicit' | 'missing' | 'invalid';
-
-export interface DetailedCredentials {
-  credentials: Credentials;
-  environmentSource: EnvironmentSource;
-}
-
-function environmentSourceOf(raw: unknown): EnvironmentSource {
-  const env = trimString((raw as Record<string, unknown>).environment);
-
-  if (env === undefined || env === null || env === '') {
-    return 'missing';
-  }
-
-  return isValidEnvironment(env) ? 'explicit' : 'invalid';
-}
-
-export async function loadCredentialsDetailed(filePath: string): Promise<DetailedCredentials> {
-  const content = await readFile(filePath, 'utf-8');
-  const raw = JSON.parse(content) as unknown;
-  const credentials = parseCredentials(raw);
-
-  return { credentials, environmentSource: environmentSourceOf(raw) };
+export async function loadCredentialsFromFile(filePath: string): Promise<Credentials> {
+  return (await loadCredentialsDetailed(filePath)).credentials;
 }
 
 export async function loadGlobalCredentials(): Promise<Credentials | null> {

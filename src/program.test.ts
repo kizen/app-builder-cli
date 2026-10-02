@@ -267,32 +267,31 @@ describe('block command', () => {
     ).toStrictEqual(['export', 'push', 'targets']);
   });
 
-  it('describes push and targets', () => {
-    const block = subcommand(createProgram(), 'block');
-
-    expect(subcommand(block, 'push').description()).toBe(
+  it.each([
+    [
+      'push',
       'Push a block to a Kizen dashboard, homepage or chart group dashlet',
-    );
-    expect(subcommand(block, 'targets').description()).toBe(
+      [['api_name', false]],
+      BLOCK_PUSH_FLAGS,
+    ],
+    [
+      'targets',
       'List the dashboards, homepages and chart groups a block can be pushed to',
-    );
-  });
+      [],
+      BLOCK_TARGETS_FLAGS,
+    ],
+  ])(
+    'describes %s and gives it its documented arguments and flags',
+    (name, description, args, flags) => {
+      const command = subcommand(subcommand(createProgram(), 'block'), name);
 
-  it('gives push an optional api_name argument and its documented flags', () => {
-    const push = subcommand(subcommand(createProgram(), 'block'), 'push');
-
-    expect(push.registeredArguments.map((arg) => [arg.name(), arg.required])).toStrictEqual([
-      ['api_name', false],
-    ]);
-    expect(push.options.map((opt) => opt.flags)).toStrictEqual(BLOCK_PUSH_FLAGS);
-  });
-
-  it('gives targets no arguments and its documented flags', () => {
-    const targets = subcommand(subcommand(createProgram(), 'block'), 'targets');
-
-    expect(targets.registeredArguments).toStrictEqual([]);
-    expect(targets.options.map((opt) => opt.flags)).toStrictEqual(BLOCK_TARGETS_FLAGS);
-  });
+      expect(command.description()).toBe(description);
+      expect(command.registeredArguments.map((arg) => [arg.name(), arg.required])).toStrictEqual(
+        args,
+      );
+      expect(command.options.map((opt) => opt.flags)).toStrictEqual(flags);
+    },
+  );
 
   it('maps the push and targets flags to their option names', () => {
     const block = subcommand(createProgram(), 'block');

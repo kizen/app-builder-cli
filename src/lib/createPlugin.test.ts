@@ -259,7 +259,7 @@ describe('createPlugin', () => {
     }
   });
 
-  it('scaffolds the kizen-custom-block Claude Code skill', async () => {
+  it('scaffolds the kizen-custom-block Claude Code skill and the kizenData lib in the entry directory', async () => {
     const input = validInput();
 
     await createPlugin(input);
@@ -277,12 +277,6 @@ describe('createPlugin', () => {
     );
 
     expect(design).toContain('# Designing a Kizen custom block');
-  });
-
-  it('scaffolds the kizenData lib inside the entry directory', async () => {
-    const input = validInput();
-
-    await createPlugin(input);
 
     const lib = await readFile(join(input.targetDir, 'src', 'lib', 'kizenData.js'), 'utf-8');
     const template = await readFile(

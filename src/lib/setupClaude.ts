@@ -1,68 +1,39 @@
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join, posix } from 'node:path';
+import { join } from 'node:path';
 import type { ScaffoldedFile } from './createArtifacts.js';
 import { claudeFiles } from './createCopilotFiles.js';
+import { normalizeEntryDir } from './guards.js';
+import {
+  applyManagedFiles,
+  formatManagedFileLine,
+  nodeManagedFs,
+  planManagedFiles,
+  type ManagedFilePlan,
+  type ManagedFileStatus,
+  type ManagedFs,
+} from './managedFiles.js';
 
 export const CLAUDE_SKILL_PATH = '.claude/skills/kizen-custom-block/SKILL.md';
 
 export const STALE_CLAUDE_SKILL_WARNING =
   'Claude files managed by appbuilder are out of date; run appbuilder setup-claude';
 
-export type ClaudeFileStatus = 'created' | 'updated' | 'unchanged';
+export type ClaudeFs = ManagedFs;
 
-export interface ClaudeFilePlan {
-  path: string;
-  status: ClaudeFileStatus;
-}
+export const nodeClaudeFs: ClaudeFs = nodeManagedFs;
 
-export interface ClaudeFs {
-  readFile: (path: string) => Promise<string | undefined>;
-  writeFile: (path: string, content: string) => Promise<void>;
-  exists: (path: string) => Promise<boolean>;
-}
-
-const isMissing = (error: unknown): boolean =>
-  error instanceof Error && 'code' in error && error.code === 'ENOENT';
-
-export const nodeClaudeFs: ClaudeFs = {
-  readFile: async (path) => {
-    try {
-      return await readFile(path, 'utf-8');
-    } catch (error) {
-      if (isMissing(error)) {
-        return undefined;
-      }
-
-      throw error;
-    }
-  },
-  writeFile: async (path, content) => {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, content, 'utf-8');
-  },
-  exists: async (path) => {
-    try {
-      await access(path);
-
-      return true;
-    } catch {
-      return false;
-    }
-  },
-};
-
-const normalizeEntryDir = (entry: unknown): string | undefined => {
+/** A kizen.json `entry` as a root-relative directory, or undefined when blank or outside the plugin. */
+const entryDirOf = (entry: unknown): string | undefined => {
   if (typeof entry !== 'string' || entry.trim() === '') {
     return undefined;
   }
 
-  const normalized = posix.normalize(entry.trim().replaceAll('\\', '/')).replace(/\/+$/, '');
+  const normalized = normalizeEntryDir(entry);
 
   if (normalized === '..' || normalized.startsWith('../') || normalized.startsWith('/')) {
     return undefined;
   }
 
-  return normalized === '.' ? '' : normalized;
+  return normalized;
 };
 
 export function entryDirsOf(manifest: unknown): string[] {
@@ -70,7 +41,7 @@ export function entryDirsOf(manifest: unknown): string[] {
   const entryDirs = manifests
     .map((entry) =>
       typeof entry === 'object' && entry !== null && 'entry' in entry
-        ? normalizeEntryDir(entry.entry)
+        ? entryDirOf(entry.entry)
         : undefined,
     )
     .filter((entryDir): entryDir is string => entryDir !== undefined);
@@ -91,55 +62,12 @@ export async function pluginClaudeFiles(
   }
 }
 
-const statusOf = (current: string | undefined, bundled: string): ClaudeFileStatus => {
-  if (current === undefined) {
-    return 'created';
-  }
-
-  return current === bundled ? 'unchanged' : 'updated';
-};
-
-export async function planClaudeFiles(
-  dir: string,
-  fs: ClaudeFs = nodeClaudeFs,
-  files: readonly ScaffoldedFile[] = claudeFiles(),
-): Promise<ClaudeFilePlan[]> {
-  return Promise.all(
-    files.map(async (file) => ({
-      path: file.path,
-      status: statusOf(await fs.readFile(join(dir, file.path)), file.content),
-    })),
-  );
-}
-
-export async function applyClaudeFiles(
-  dir: string,
-  options: { dryRun?: boolean } = {},
-  fs: ClaudeFs = nodeClaudeFs,
-  files: readonly ScaffoldedFile[] = claudeFiles(),
-): Promise<ClaudeFilePlan[]> {
-  const plan = await planClaudeFiles(dir, fs, files);
-
-  if (options.dryRun === true) {
-    return plan;
-  }
-
-  await Promise.all(
-    files
-      .filter((_file, index) => plan[index]?.status !== 'unchanged')
-      .map((file) => fs.writeFile(join(dir, file.path), file.content)),
-  );
-
-  return plan;
-}
-
 export async function isClaudeSkillStale(
   dir: string,
   fs: ClaudeFs = nodeClaudeFs,
-  files?: readonly ScaffoldedFile[],
 ): Promise<boolean> {
   try {
-    const managed = files ?? (await pluginClaudeFiles(dir, fs));
+    const managed = await pluginClaudeFiles(dir, fs);
 
     if (!managed.some((file) => file.path === CLAUDE_SKILL_PATH)) {
       return false;
@@ -149,7 +77,7 @@ export async function isClaudeSkillStale(
       return false;
     }
 
-    const plan = await planClaudeFiles(dir, fs, managed);
+    const plan = await planManagedFiles(dir, managed, fs);
 
     return plan.some((entry) => entry.status !== 'unchanged');
   } catch {
@@ -177,14 +105,13 @@ export const defaultSetupClaudeDeps: SetupClaudeDeps = {
   },
 };
 
-const count = (plan: readonly ClaudeFilePlan[], status: ClaudeFileStatus): string =>
+const count = (plan: readonly ManagedFilePlan[], status: ManagedFileStatus): string =>
   `${String(plan.filter((entry) => entry.status === status).length)} ${status}`;
 
 export async function runSetupClaude(
   dir: string,
   options: { dryRun?: boolean },
   deps: SetupClaudeDeps = defaultSetupClaudeDeps,
-  files?: readonly ScaffoldedFile[],
 ): Promise<void> {
   if (!(await deps.fs.exists(join(dir, 'kizen.json')))) {
     deps.error('Error: kizen.json not found. Run this command from a plugin directory.');
@@ -194,15 +121,10 @@ export async function runSetupClaude(
   }
 
   const dryRun = options.dryRun === true;
-  let plan: ClaudeFilePlan[];
+  let plan: ManagedFilePlan[];
 
   try {
-    plan = await applyClaudeFiles(
-      dir,
-      { dryRun },
-      deps.fs,
-      files ?? (await pluginClaudeFiles(dir, deps.fs)),
-    );
+    plan = await applyManagedFiles(dir, await pluginClaudeFiles(dir, deps.fs), { dryRun }, deps.fs);
   } catch (error) {
     deps.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
     deps.setExitCode(1);
@@ -211,7 +133,7 @@ export async function runSetupClaude(
   }
 
   for (const entry of plan) {
-    deps.log(`${entry.status.padEnd(9)} ${entry.path}`);
+    deps.log(formatManagedFileLine(entry));
   }
 
   const counts = `${count(plan, 'created')}, ${count(plan, 'updated')}, ${count(plan, 'unchanged')}`;

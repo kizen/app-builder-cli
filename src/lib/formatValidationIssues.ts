@@ -3,7 +3,7 @@ import type { ValidationIssue } from '@kizenapps/packager';
 const plural = (count: number, singular: string, pluralForm: string): string =>
   `${String(count)} ${count === 1 ? singular : pluralForm}`;
 
-const groupIssuesByPath = (issues: ValidationIssue[]): Map<string, ValidationIssue[]> => {
+export const groupIssuesByPath = (issues: ValidationIssue[]): Map<string, ValidationIssue[]> => {
   const groups = new Map<string, ValidationIssue[]>();
 
   for (const issue of issues) {

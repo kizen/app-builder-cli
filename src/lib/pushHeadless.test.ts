@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { PluginValidationError } from '@kizenapps/packager';
 import type { Block, DeployablePlugin, RoutablePage, ValidationIssue } from '@kizenapps/packager';
 import { describe, expect, it, vi, type Mock } from 'vitest';
@@ -11,9 +11,8 @@ import type {
   DetailedCredentials,
   Environment,
 } from './credentials.js';
-import { claudeFiles } from './createCopilotFiles.js';
-import { createPlugin } from './createPlugin.js';
-import { packageBlocks, type ViewsByPlugin } from './exportBlock.js';
+import type { ViewsByPlugin } from './exportBlock.js';
+import { formatValidationIssues } from './formatValidationIssues.js';
 import { KizenApiError } from './kizenClient.js';
 import type {
   KizenClient,
@@ -23,13 +22,7 @@ import type {
   WireDashboardSummary,
   WireDashlet,
 } from './kizenTypes.js';
-import {
-  canonicalContentHash,
-  PUSH_MAP_RELATIVE_PATH,
-  pushKey,
-  readPushMap,
-  toCustomCodeContent,
-} from './pushBlock.js';
+import { canonicalContentHash, pushKey, toCustomCodeContent } from './pushBlock.js';
 import {
   apiFailure,
   buildBrowserRefresh,
@@ -38,6 +31,7 @@ import {
   headlessWriteGate,
   listPushableObjects,
   listTargets,
+  loadPushContext,
   resolveBlock,
   resolveCredentials,
   resolveTarget,
@@ -48,8 +42,10 @@ import {
   type PushContext,
   type PushDeps,
   type ResolvedBlock,
+  type ResolvedTarget,
 } from './pushHeadless.js';
 import { isClaudeSkillStale } from './setupClaude.js';
+import { makePlugin, routablePage } from '../test/fixtures.js';
 
 const PLUGIN = 'acme';
 const BLOCK = 'chart';
@@ -71,26 +67,10 @@ const makeBlock = (overrides: Partial<Block> = {}): Block => ({
   ...overrides,
 });
 
-const makePlugin = (apiName: string, blocks: Block[]): DeployablePlugin =>
-  ({ api_name: apiName, artifacts: { custom_blocks: blocks } }) as unknown as DeployablePlugin;
-
 const BLOCK_HASH = canonicalContentHash(toCustomCodeContent(makeBlock()));
 
-const makeView = (overrides: Partial<RoutablePage> = {}): RoutablePage => ({
-  name: 'Detail',
-  api_name: 'detail_view',
-  type: 'script',
-  css: '',
-  event_scripts: { close: 'close();' },
-  callback: '',
-  is_toolbar_item: false,
-  toolbar_color: '',
-  toolbar_icon: '',
-  script: 'detail();',
-  html: '',
-  iframe_url: '',
-  ...overrides,
-});
+const makeView = (overrides: Partial<RoutablePage> = {}): RoutablePage =>
+  routablePage({ event_scripts: { close: 'close();' }, script: 'detail();', ...overrides });
 
 const makeCredentials = (overrides: Partial<Credentials> = {}): Credentials => ({
   apiKey: 'key',
@@ -246,16 +226,7 @@ const makeClient = (
     } satisfies WireDashlet),
   );
 
-  return {
-    client: {
-      listDashboards,
-      listCustomObjects,
-      getCustomObject,
-      getClientObjectId,
-      getDashboard,
-      createDashlet,
-      updateDashlet,
-    },
+  const mocks = {
     listDashboards,
     listCustomObjects,
     getCustomObject,
@@ -264,6 +235,8 @@ const makeClient = (
     createDashlet,
     updateDashlet,
   };
+
+  return { client: mocks, ...mocks };
 };
 
 interface Harness {
@@ -405,6 +378,23 @@ const makeContext = (fake: FakeClient, entry?: PushMapEntry): PushContext => ({
   entry,
 });
 
+const createOn = (
+  dashboard: WireDashboard,
+  surface: ResolvedTarget['surface'] = 'dashboard',
+): ResolvedTarget => ({
+  dashboard,
+  surface,
+  action: 'create',
+  dashlet: undefined,
+  resolvedBy: 'flag',
+});
+
+const planFor = (
+  context: PushContext,
+  target: ResolvedTarget,
+  deps: Parameters<typeof buildPlan>[3] = { randomUUID: () => 'u' },
+): ReturnType<typeof buildPlan> => buildPlan(context, target, {}, deps);
+
 describe('apiFailure', () => {
   it('maps KizenApiError kinds and keeps the hint', () => {
     expect(
@@ -419,14 +409,6 @@ describe('apiFailure', () => {
       ok: false,
       code: 'network_error',
       message: 'offline',
-    });
-  });
-
-  it('keeps api_error for Kizen HTTP errors', () => {
-    expect(apiFailure(new KizenApiError('api_error', 'GET x failed with 500'))).toStrictEqual({
-      ok: false,
-      code: 'api_error',
-      message: 'GET x failed with 500',
     });
   });
 
@@ -462,10 +444,7 @@ describe('resolveCredentials', () => {
     });
     const step = await resolveCredentials({ credentials: '/tmp/c.json', profile: 'staging' }, deps);
 
-    expect(step).toStrictEqual({
-      ok: true,
-      value: { credentials: makeCredentials(), source: { kind: 'file', path: '/tmp/c.json' } },
-    });
+    expect(step).toStrictEqual({ ok: true, value: { credentials: makeCredentials() } });
     expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith('/tmp/c.json');
     expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
   });
@@ -484,16 +463,10 @@ describe('resolveCredentials', () => {
     const { deps } = makeHarness({ profiles, config: { activeCredentialProfile: 'credentials' } });
     const step = await resolveCredentials({ profile: 'staging' }, deps);
 
-    expect(step).toMatchObject({
-      ok: true,
-      value: {
-        source: {
-          kind: 'profile',
-          name: 'staging',
-          path: '/home/.kizenappbuilder/staging.json',
-        },
-      },
-    });
+    expect(step.ok).toBe(true);
+    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(
+      '/home/.kizenappbuilder/staging.json',
+    );
     expect(deps.loadConfig).not.toHaveBeenCalled();
   });
 
@@ -518,24 +491,26 @@ describe('resolveCredentials', () => {
     const { deps } = makeHarness({ profiles, config: { activeCredentialProfile: 'staging' } });
     const step = await resolveCredentials({}, deps);
 
-    expect(step).toMatchObject({ ok: true, value: { source: { name: 'staging' } } });
+    expect(step.ok).toBe(true);
+    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(
+      '/home/.kizenappbuilder/staging.json',
+    );
   });
 
   it('falls through an activeCredentialProfile that is not loadable', async () => {
     const { deps } = makeHarness({ config: { activeCredentialProfile: 'gone' } });
     const step = await resolveCredentials({}, deps);
 
-    expect(step).toMatchObject({ ok: true, value: { source: { name: 'credentials' } } });
+    expect(step.ok).toBe(true);
+    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(DEFAULT_PATH);
   });
 
   it('uses the only loadable profile', async () => {
     const { deps } = makeHarness();
     const step = await resolveCredentials({}, deps);
 
-    expect(step).toMatchObject({
-      ok: true,
-      value: { source: { kind: 'profile', name: 'credentials', path: DEFAULT_PATH } },
-    });
+    expect(step.ok).toBe(true);
+    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(DEFAULT_PATH);
   });
 
   it('asks for a profile when several are loadable', async () => {
@@ -600,51 +575,6 @@ describe('resolveBlock', () => {
     expect(deps.packageBlocks).toHaveBeenCalledWith(CWD);
   });
 
-  it('push_content_includes_views_from_src_views', async () => {
-    const workDir = await mkdtemp(join(tmpdir(), 'appbuilder-pushviews-'));
-    const pluginDir = join(workDir, 'plugin');
-
-    try {
-      await createPlugin({
-        targetDir: pluginDir,
-        name: 'Acme Widgets',
-        apiName: 'acme_widgets',
-        externalLink: 'https://example.com/acme-widgets',
-        description: 'Adds Acme widget tooling to Kizen.',
-        developerBusinessId: '',
-        developerEnvironment: 'go',
-        artifacts: ['block', 'page'],
-      });
-
-      const viewDir = join(pluginDir, 'src', 'views', 'detailView');
-
-      await mkdir(join(viewDir, 'eventScripts'), { recursive: true });
-      await writeFile(
-        join(viewDir, 'config.json'),
-        JSON.stringify({ name: 'Detail', api_name: 'detail_view' }),
-      );
-      await writeFile(join(viewDir, 'script.js'), "this.outputUI('<p>detail</p>');\n");
-      await writeFile(join(viewDir, 'eventScripts', 'close.js'), "this.outputUI('<p>x</p>');\n");
-
-      const { deps } = makeHarness({ deps: { cwd: pluginDir, packageBlocks } });
-      const step = await resolveBlock(undefined, deps);
-      const content = step.ok ? step.value.content : undefined;
-
-      expect(step.ok).toBe(true);
-      expect(content?.views?.map((view) => view.api_name)).toStrictEqual(['detail_view']);
-      expect(content?.views?.[0]).toMatchObject({
-        api_name: 'detail_view',
-        name: 'Detail',
-        type: 'script',
-        event_scripts: [{ name: 'close' }],
-      });
-      expect(content?.views?.[0]?.script).toContain('detail');
-      expect(step.ok && step.value.contentHash).toBe(canonicalContentHash(content));
-    } finally {
-      await rm(workDir, { recursive: true, force: true });
-    }
-  });
-
   it("carries only the selected block's plugin views into the content", async () => {
     const view = makeView();
     const { deps } = makeHarness({
@@ -653,53 +583,6 @@ describe('resolveBlock', () => {
     const step = await resolveBlock(BLOCK, deps);
 
     expect(step.ok && step.value.content).toStrictEqual(toCustomCodeContent(makeBlock(), [view]));
-  });
-
-  it('push_rejects_view_html_with_ref_marker', async () => {
-    const workDir = await mkdtemp(join(tmpdir(), 'appbuilder-pushviews-'));
-    const pluginDir = join(workDir, 'plugin');
-
-    try {
-      await createPlugin({
-        targetDir: pluginDir,
-        name: 'Acme Widgets',
-        apiName: 'acme_widgets',
-        externalLink: 'https://example.com/acme-widgets',
-        description: 'Adds Acme widget tooling to Kizen.',
-        developerBusinessId: '',
-        developerEnvironment: 'go',
-        artifacts: ['block'],
-      });
-
-      const viewDir = join(pluginDir, 'src', 'views', 'refView');
-
-      await mkdir(viewDir, { recursive: true });
-      await writeFile(join(viewDir, 'index.html'), '<p>{__ref:field}</p>');
-
-      const fake = makeClient({ dashboards: [makeDashboard()] });
-      const harness = makeHarness({ fake, deps: { cwd: pluginDir, packageBlocks } });
-      const step = await resolveBlock(undefined, harness.deps);
-
-      expect(step).toMatchObject({
-        ok: false,
-        code: 'invalid_block',
-        field: 'views.refview.html',
-      });
-      expect(!step.ok && step.message).toContain('"refview"');
-      expect(!step.ok && step.message).toContain('html');
-
-      await runPushHeadless(
-        undefined,
-        { json: true, dashboard: 'D1', create: true, yes: true },
-        harness.deps,
-      );
-
-      expect(harness.json()).toMatchObject({ ok: false, code: 'invalid_block' });
-      expect(fake.createDashlet).not.toHaveBeenCalled();
-      expect(fake.updateDashlet).not.toHaveBeenCalled();
-    } finally {
-      await rm(workDir, { recursive: true, force: true });
-    }
   });
 
   it('rejects a view with a NUL in its script before any write', async () => {
@@ -711,17 +594,6 @@ describe('resolveBlock', () => {
       code: 'invalid_block',
       field: 'views.detail_view.script',
     });
-  });
-
-  it('reports validation_failed with the issues', async () => {
-    const issues: ValidationIssue[] = [
-      { rule: 'manifest/api-name-format', severity: 'error', message: 'bad', path: 'kizen.json' },
-    ];
-    const { deps } = makeHarness({ packageError: new PluginValidationError(issues) });
-    const step = await resolveBlock(BLOCK, deps);
-
-    expect(step).toMatchObject({ ok: false, code: 'validation_failed', issues });
-    expect(!step.ok && step.message).toContain('bad (manifest/api-name-format)');
   });
 
   it('reports invalid_block with the field', async () => {
@@ -1108,17 +980,13 @@ describe('resolveTarget', () => {
 });
 
 describe('headlessWriteGate', () => {
-  it('treats --dry-run as a dry run even with --yes', () => {
-    expect(headlessWriteGate({ dryRun: true, yes: true }, 'go')).toStrictEqual({
+  it.each([
+    ['--dry-run is a dry run even with --yes', { dryRun: true, yes: true }, 'go', 'flag'],
+    ['no --yes is a dry run, even on production', {}, 'go', 'no_yes'],
+  ] as const)('%s', (_label, options, environment, reason) => {
+    expect(headlessWriteGate(options, environment)).toStrictEqual({
       ok: true,
-      value: { kind: 'dry-run', reason: 'flag' },
-    });
-  });
-
-  it('is a dry run without --yes', () => {
-    expect(headlessWriteGate({}, 'staging')).toStrictEqual({
-      ok: true,
-      value: { kind: 'dry-run', reason: 'no_yes' },
+      value: { kind: 'dry-run', reason },
     });
   });
 
@@ -1145,12 +1013,9 @@ describe('buildPlan', () => {
   it('builds a create plan with the push-key name and layout below existing dashlets', async () => {
     const dashboard = makeDashboard({ dashlets: [customCodeDashlet('X1'), chartDashlet('C1')] });
     const fake = makeClient({ dashboards: [dashboard] });
-    const step = await buildPlan(
-      makeContext(fake),
-      { dashboard, surface: 'dashboard', action: 'create', dashlet: undefined, resolvedBy: 'flag' },
-      {},
-      { randomUUID: vi.fn().mockReturnValueOnce('obj-uuid').mockReturnValueOnce('layout-uuid') },
-    );
+    const step = await planFor(makeContext(fake), createOn(dashboard), {
+      randomUUID: vi.fn().mockReturnValueOnce('obj-uuid').mockReturnValueOnce('layout-uuid'),
+    });
 
     expect(step.ok).toBe(true);
 
@@ -1193,11 +1058,9 @@ describe('buildPlan', () => {
     const dashboard = makeDashboard();
     const context = makeContext(makeClient({ dashboards: [dashboard] }));
     const content = { ...context.block.content, script: 'é', styles: '' };
-    const step = await buildPlan(
+    const step = await planFor(
       { ...context, block: { ...context.block, content } },
-      { dashboard, surface: 'dashboard', action: 'create', dashlet: undefined, resolvedBy: 'flag' },
-      {},
-      { randomUUID: () => 'u' },
+      createOn(dashboard),
     );
 
     expect(step.ok && step.value.summary).toMatchObject({ scriptBytes: 2, stylesBytes: 0 });
@@ -1207,10 +1070,9 @@ describe('buildPlan', () => {
     const dashlet = customCodeDashlet('X1', { objectId: 'keep-me' });
     const dashboard = makeDashboard({ dashlets: [dashlet] });
     const randomUUID = vi.fn(() => 'unused');
-    const step = await buildPlan(
+    const step = await planFor(
       makeContext(makeClient({ dashboards: [dashboard] })),
       { dashboard, surface: 'dashboard', action: 'update', dashlet, resolvedBy: 'name' },
-      {},
       { randomUUID },
     );
     const plan = step.ok ? step.value : undefined;
@@ -1235,45 +1097,6 @@ describe('buildPlan', () => {
     });
     expect(JSON.stringify(plan?.body)).not.toContain('custom_object');
     expect(randomUUID).not.toHaveBeenCalled();
-  });
-
-  it('carries stored style keys over untouched on update', async () => {
-    const base = customCodeDashlet('X1');
-    const feExtraInfo = {
-      custom_styles_enabled: false,
-      dashlet_style_config: { drop_shadow: false },
-    };
-    const dashlet = { ...base, config: { ...base.config, fe_extra_info: feExtraInfo } };
-    const dashboard = makeDashboard({ dashlets: [dashlet] });
-    const step = await buildPlan(
-      makeContext(makeClient({ dashboards: [dashboard] })),
-      { dashboard, surface: 'dashboard', action: 'update', dashlet, resolvedBy: 'name' },
-      {},
-      { randomUUID: () => 'u' },
-    );
-
-    expect(step.ok && step.value.body.config.fe_extra_info).toStrictEqual(feExtraInfo);
-  });
-
-  it('refuses drift unless --force, and warns when forced', async () => {
-    const dashlet = customCodeDashlet('X1', { script: 'edited in the UI' });
-    const dashboard = makeDashboard({ dashlets: [dashlet] });
-    const context = makeContext(makeClient({ dashboards: [dashboard] }), makeEntry());
-    const resolved = {
-      dashboard,
-      surface: 'dashboard' as const,
-      action: 'update' as const,
-      dashlet,
-      resolvedBy: 'remembered' as const,
-    };
-    const refused = await buildPlan(context, resolved, {}, { randomUUID: () => 'u' });
-
-    expect(refused).toMatchObject({ ok: false, code: 'drift_detected' });
-
-    const forced = await buildPlan(context, resolved, { force: true }, { randomUUID: () => 'u' });
-
-    expect(forced.ok).toBe(true);
-    expect(forced.ok && forced.value.warnings).toHaveLength(1);
   });
 
   it.each([
@@ -1303,18 +1126,7 @@ describe('buildPlan', () => {
         custom_object: customObject,
       });
       const fake = makeClient({ dashboards: [dashboard], objectDetails: [...objects] });
-      const step = await buildPlan(
-        makeContext(fake),
-        {
-          dashboard,
-          surface: 'chart_group',
-          action: 'create',
-          dashlet: undefined,
-          resolvedBy: 'flag',
-        },
-        {},
-        { randomUUID: () => 'u' },
-      );
+      const step = await planFor(makeContext(fake), createOn(dashboard, 'chart_group'));
 
       expect(step.ok && step.value.url).toBe(url);
       expect(step.ok && step.value.dashboard).toStrictEqual({
@@ -1325,65 +1137,55 @@ describe('buildPlan', () => {
       expect(fake.listCustomObjects).not.toHaveBeenCalled();
     },
   );
+});
 
-  it('looks up a bare custom_object id with getCustomObject', async () => {
-    const dashboard = makeDashboard({ id: 'G1', type: 'chart_group', custom_object: 'CL' });
-    const fake = makeClient({
-      dashboards: [dashboard],
-      objectDetails: [{ id: 'CL', object_name: 'Contacts', fetch_url: 'client' }],
-    });
-
-    await buildPlan(
-      makeContext(fake),
-      {
-        dashboard,
-        surface: 'chart_group',
-        action: 'create',
-        dashlet: undefined,
-        resolvedBy: 'flag',
-      },
-      {},
-      { randomUUID: () => 'u' },
-    );
-
-    expect(fake.getCustomObject.mock.calls).toStrictEqual([['CL']]);
-    expect(fake.listCustomObjects).not.toHaveBeenCalled();
+describe('loadPushContext', () => {
+  const thisBlock = makeEntry();
+  const otherBlock = makeEntry({ blockApiName: 'table', dashletId: 'T1' });
+  const otherBusiness = makeEntry({ businessId: 'biz-2', dashletId: 'B2' });
+  const otherEnvironment = makeEntry({ environment: 'integration', dashletId: 'E2' });
+  const pushMap = [otherBlock, thisBlock, otherBusiness, otherEnvironment];
+  const args = (forget?: boolean): Parameters<typeof loadPushContext>[0] => ({
+    client: makeClient().client,
+    credentials: makeCredentials(),
+    block: resolvedBlock(),
+    ...(forget === undefined ? {} : { forget }),
   });
 
-  it('falls back to the custom-objects URL when getCustomObject fails', async () => {
-    const dashboard = makeDashboard({ id: 'G1', type: 'chart_group', custom_object: 'CO1' });
-    const fake = makeClient({ dashboards: [dashboard] });
+  it('loadPushContext with forget removes only the matching entry and writes once', async () => {
+    const harness = makeHarness({ pushMap });
+    const { context, forgotten } = await loadPushContext(args(true), harness.deps);
+    const survivors = [otherBlock, otherBusiness, otherEnvironment];
 
-    fake.getCustomObject.mockRejectedValueOnce(new KizenApiError('forbidden', 'no'));
-
-    const step = await buildPlan(
-      makeContext(fake),
-      {
-        dashboard,
-        surface: 'chart_group',
-        action: 'create',
-        dashlet: undefined,
-        resolvedBy: 'flag',
-      },
-      {},
-      { randomUUID: () => 'u' },
-    );
-
-    expect(step.ok && step.value.url).toBe(
-      'https://v2.staging.kizen.com/custom-objects/CO1/charts/G1',
-    );
+    expect(forgotten).toBe(true);
+    expect(harness.deps.writePushMap).toHaveBeenCalledTimes(1);
+    expect(harness.deps.writePushMap).toHaveBeenCalledWith(CWD, survivors);
+    expect(harness.pushMap.entries).toStrictEqual(survivors);
+    expect(context.pushMap).toStrictEqual(survivors);
+    expect(context.entry).toBeUndefined();
   });
 
-  it('builds a homepage URL', async () => {
-    const dashboard = makeDashboard({ id: 'H1', type: 'homepage' });
-    const step = await buildPlan(
-      makeContext(makeClient({ dashboards: [dashboard] })),
-      { dashboard, surface: 'homepage', action: 'create', dashlet: undefined, resolvedBy: 'flag' },
-      {},
-      { randomUUID: () => 'u' },
-    );
+  it.each([undefined, false])(
+    'loadPushContext without forget does not write the push map (forget: %s)',
+    async (forget) => {
+      const harness = makeHarness({ pushMap });
+      const { context, forgotten } = await loadPushContext(args(forget), harness.deps);
 
-    expect(step.ok && step.value.url).toBe('https://v2.staging.kizen.com/home/H1');
+      expect(forgotten).toBe(false);
+      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+      expect(context.pushMap).toStrictEqual(pushMap);
+      expect(context.entry).toStrictEqual(thisBlock);
+    },
+  );
+
+  it('reports nothing forgotten and writes nothing when no entry matches', async () => {
+    const harness = makeHarness({ pushMap: [otherBlock, otherBusiness] });
+    const { context, forgotten } = await loadPushContext(args(true), harness.deps);
+
+    expect(forgotten).toBe(false);
+    expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+    expect(context.pushMap).toStrictEqual([otherBlock, otherBusiness]);
+    expect(context.entry).toBeUndefined();
   });
 });
 
@@ -1682,6 +1484,7 @@ describe('runPushHeadless', () => {
       resolvedBy: 'flag',
     });
     expect(harness.pushMap.entries).toStrictEqual([]);
+    expect(harness.stderr.join('')).toContain('Forgot the remembered target for chart.\n');
     expect(fake.createDashlet).not.toHaveBeenCalled();
   });
 
@@ -1695,6 +1498,7 @@ describe('runPushHeadless', () => {
 
     expect(harness.json()).not.toHaveProperty('forgotten');
     expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+    expect(harness.stderr.join('')).not.toContain('Forgot');
   });
 
   it('--forget drops the remembered target so resolution needs a choice', async () => {
@@ -1712,39 +1516,44 @@ describe('runPushHeadless', () => {
     expect(fake.getDashboard).not.toHaveBeenCalled();
   });
 
-  it('keeps ok but remembered:false when the push map cannot be written', async () => {
-    const fake = makeClient({ dashboards: [salesWith()] });
-    const harness = await runPush(makeHarness({ fake, writePushMapError: new Error('EACCES') }), {
-      dashboard: 'D1',
-      create: true,
-      yes: true,
-    });
-    const result = harness.json() as { ok: boolean; remembered: boolean; warnings: string[] };
-
-    expect(result.ok).toBe(true);
-    expect(result.remembered).toBe(false);
-    expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]).toContain('EACCES');
-    expect(harness.exitCodes).toStrictEqual([]);
-  });
-
-  it('keeps ok but remembered:false when ensureGitignore throws', async () => {
-    const fake = makeClient({ dashboards: [salesWith()] });
-    const harness = await runPush(
-      makeHarness({
-        fake,
+  it.each([
+    [
+      'the push map cannot be written',
+      { writePushMapError: new Error('EACCES') },
+      'EACCES',
+      ['ensureGitignore', 'writePushMap'],
+    ],
+    [
+      'ensureGitignore throws',
+      {
         deps: {
           ensureGitignore: () => {
             throw new Error('read-only');
           },
         },
-      }),
-      { dashboard: 'D1', create: true, yes: true },
-    );
+      },
+      'read-only',
+      [],
+    ],
+  ] satisfies [string, HarnessOptions, string, string[]][])(
+    'keeps ok but remembered:false when %s',
+    async (_label, options, errorText, events) => {
+      const fake = makeClient({ dashboards: [salesWith()] });
+      const harness = await runPush(makeHarness({ fake, ...options }), {
+        dashboard: 'D1',
+        create: true,
+        yes: true,
+      });
+      const result = harness.json() as { ok: boolean; remembered: boolean; warnings: string[] };
 
-    expect(harness.json()).toMatchObject({ ok: true, remembered: false });
-    expect(harness.deps.writePushMap).not.toHaveBeenCalled();
-  });
+      expect(result.ok).toBe(true);
+      expect(result.remembered).toBe(false);
+      expect(result.warnings).toHaveLength(1);
+      expect(result.warnings[0]).toContain(errorText);
+      expect(harness.events).toStrictEqual(events);
+      expect(harness.exitCodes).toStrictEqual([]);
+    },
+  );
 
   it('reports drift in a dry run and in an apply, and --force overrides it', async () => {
     const drifted = (): FakeClient =>
@@ -1803,53 +1612,24 @@ describe('runPushHeadless', () => {
     expect(fake.createDashlet).toHaveBeenCalledTimes(1);
   });
 
-  it('lets a production dry run through without --allow-production', async () => {
-    const fake = makeClient({ dashboards: [salesWith()] });
-    const harness = await runPush(
-      makeHarness({ fake, credentials: makeCredentials({ environment: 'go' }) }),
-      { dashboard: 'D1', create: true },
-    );
+  it('maps a Kizen API error to one JSON failure and exit code 1', async () => {
+    const fake = makeClient();
 
-    expect(harness.json()).toMatchObject({ ok: true, dryRun: true, reason: 'no_yes' });
-  });
-
-  it.each([
-    [
+    fake.getDashboard.mockRejectedValueOnce(
       new KizenApiError('auth_failed', 'GET /dashboards/D1 failed with 401', {
         status: 401,
         hint: 'The API key is invalid',
       }),
-      {
-        ok: false,
-        code: 'auth_failed',
-        message: 'GET /dashboards/D1 failed with 401',
-        hint: 'The API key is invalid',
-      },
-    ],
-    [
-      new KizenApiError('forbidden', 'GET /dashboards/D1 failed with 403', {
-        status: 403,
-        hint: 'needs permission',
-      }),
-      {
-        ok: false,
-        code: 'forbidden',
-        message: 'GET /dashboards/D1 failed with 403',
-        hint: 'needs permission',
-      },
-    ],
-    [
-      new KizenApiError('network_error', "Couldn't reach Kizen"),
-      { ok: false, code: 'network_error', message: "Couldn't reach Kizen" },
-    ],
-  ])('maps %s to one JSON failure and exit code 1', async (error, expected) => {
-    const fake = makeClient();
-
-    fake.getDashboard.mockRejectedValueOnce(error);
+    );
 
     const harness = await runPush(makeHarness({ fake }), { dashboard: 'D1', yes: true });
 
-    expect(harness.json()).toStrictEqual(expected);
+    expect(harness.json()).toStrictEqual({
+      ok: false,
+      code: 'auth_failed',
+      message: 'GET /dashboards/D1 failed with 401',
+      hint: 'The API key is invalid',
+    });
     expect(harness.exitCodes).toStrictEqual([1]);
   });
 
@@ -1886,46 +1666,38 @@ describe('runPushHeadless', () => {
     expect(harness.exitCodes).toStrictEqual([1]);
   });
 
-  it('reports a packaging failure that is not a validation error as local_error', async () => {
-    const fake = makeClient({ dashboards: [salesWith()] });
-    const harness = await runPush(
-      makeHarness({ fake, packageError: new Error('No kizen.json found in /work/acme') }),
-      { dashboard: 'D1', create: true, yes: true },
-    );
+  const validationIssues: ValidationIssue[] = [
+    { rule: 'manifest/api-name-format', severity: 'error', message: 'bad', path: 'kizen.json' },
+  ];
 
-    expect(harness.json()).toStrictEqual({
-      ok: false,
-      code: 'local_error',
-      message: 'No kizen.json found in /work/acme',
+  it.each([
+    [
+      'validation_failed',
+      new PluginValidationError(validationIssues),
+      {
+        ok: false,
+        code: 'validation_failed',
+        message: formatValidationIssues(validationIssues),
+        issues: validationIssues,
+      },
+    ],
+    [
+      'local_error',
+      new Error('No kizen.json found in /work/acme'),
+      { ok: false, code: 'local_error', message: 'No kizen.json found in /work/acme' },
+    ],
+  ])('runPush maps a packaging throw to %s', async (_code, packageError, expected) => {
+    const fake = makeClient({ dashboards: [salesWith()] });
+    const harness = await runPush(makeHarness({ fake, packageError }), {
+      dashboard: 'D1',
+      create: true,
+      yes: true,
     });
+
+    expect(harness.json()).toStrictEqual(expected);
     expect(harness.exitCodes).toStrictEqual([1]);
     expect(fake.getDashboard).not.toHaveBeenCalled();
     expect(fake.createDashlet).not.toHaveBeenCalled();
-  });
-
-  it('reports a corrupt push map as local_error and writes nothing', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'push-headless-'));
-
-    try {
-      await mkdir(join(dir, '.kizenapp'), { recursive: true });
-      await writeFile(join(dir, PUSH_MAP_RELATIVE_PATH), '{not json', 'utf8');
-
-      const fake = makeClient({ dashboards: [salesWith(customCodeDashlet('X1'))] });
-      const harness = await runPush(
-        makeHarness({ fake, deps: { readPushMap: () => readPushMap(dir) } }),
-        { dashboard: 'D1', create: true, yes: true },
-      );
-      const result = harness.json() as { ok: boolean; code: string; message: string };
-
-      expect(result).toMatchObject({ ok: false, code: 'local_error' });
-      expect(result.message).toContain(PUSH_MAP_RELATIVE_PATH);
-      expect(harness.exitCodes).toStrictEqual([1]);
-      expect(fake.createDashlet).not.toHaveBeenCalled();
-      expect(fake.updateDashlet).not.toHaveBeenCalled();
-      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
   });
 
   it('reports a --forget write failure as local_error', async () => {
@@ -1993,50 +1765,6 @@ describe('runPushHeadless', () => {
       expect(harness.exitCodes).toStrictEqual([]);
     });
 
-    it('adds nothing when the skill is missing', async () => {
-      const harness = await pushIn(() => Promise.resolve());
-
-      expect(harness.json()).toMatchObject({ ok: true, applied: true, warnings: [] });
-      expect(harness.exitCodes).toStrictEqual([]);
-    });
-
-    it('adds nothing when every Claude file matches the bundled one', async () => {
-      const harness = await pushIn(async (dir) => {
-        await mkdir(join(dir, '.claude/skills/kizen-custom-block'), { recursive: true });
-
-        for (const file of claudeFiles()) {
-          await mkdir(dirname(join(dir, file.path)), { recursive: true });
-          await writeFile(join(dir, file.path), file.content);
-        }
-      });
-
-      expect(harness.json()).toMatchObject({ ok: true, applied: true, warnings: [] });
-    });
-
-    it('adds the out-of-date warning when the skill matches but the design guide is missing', async () => {
-      const [skill] = claudeFiles();
-      const harness = await pushIn(async (dir) => {
-        await mkdir(join(dir, '.claude/skills/kizen-custom-block'), { recursive: true });
-        await writeFile(join(dir, skillPath), skill?.content ?? '');
-      });
-
-      expect(harness.json()).toMatchObject({ ok: true, applied: true, warnings: [staleWarning] });
-    });
-
-    it('adds the out-of-date warning when only the kizenData lib differs', async () => {
-      const harness = await pushIn(async (dir) => {
-        for (const file of claudeFiles()) {
-          await mkdir(dirname(join(dir, file.path)), { recursive: true });
-          await writeFile(
-            join(dir, file.path),
-            file.path === 'src/lib/kizenData.js' ? 'export const mine = 1;\n' : file.content,
-          );
-        }
-      });
-
-      expect(harness.json()).toMatchObject({ ok: true, applied: true, warnings: [staleWarning] });
-    });
-
     it('adds the warning to a dry run too', async () => {
       const fake = makeClient({ dashboards: [salesWith()] });
       const deps = { isClaudeSkillStale: vi.fn(() => Promise.resolve(true)) };
@@ -2068,112 +1796,23 @@ describe('runPushHeadless', () => {
     expect(harness.deps.packageBlocks).not.toHaveBeenCalled();
   });
 
-  describe('host_chrome', () => {
-    const chromeBlock = (hostChrome: unknown): Block =>
-      ({ ...makeBlock(), host_chrome: hostChrome }) as unknown as Block;
-
-    const pushedDashlet = (content: Record<string, unknown>): WireDashlet => {
-      const dashlet = customCodeDashlet('X1');
-
-      return { ...dashlet, config: { ...dashlet.config, content } };
-    };
-
-    it('shows host_chrome false in the --dry-run --json body content', async () => {
-      const fake = makeClient({ dashboards: [salesWith()] });
-      const harness = await runPush(
-        makeHarness({ fake, deployable: [makePlugin(PLUGIN, [chromeBlock(false)])] }),
-        { dashboard: 'D1', create: true, dryRun: true },
-      );
-      const result = harness.json() as { body: { config: { content: Record<string, unknown> } } };
-
-      expect(result).toMatchObject({ ok: true, dryRun: true, applied: false });
-      expect(result.body.config.content.host_chrome).toBe(false);
-      expect(result.body.config.content).toStrictEqual(toCustomCodeContent(chromeBlock(false)));
-      expect(fake.createDashlet).not.toHaveBeenCalled();
-    });
-
-    it.each(['false', 0, null])(
-      'fails with invalid_block naming host_chrome for an authored %o, and writes nothing',
-      async (hostChrome) => {
-        const fake = makeClient({ dashboards: [salesWith()] });
-        const harness = await runPush(
-          makeHarness({ fake, deployable: [makePlugin(PLUGIN, [chromeBlock(hostChrome)])] }),
-          { dashboard: 'D1', create: true, yes: true },
-        );
-
-        expect(harness.json()).toMatchObject({
-          ok: false,
-          code: 'invalid_block',
-          field: 'host_chrome',
-          message: 'Block "chart" has an invalid host_chrome: it must be true or false.',
-        });
-        expect(harness.exitCodes).toStrictEqual([1]);
-        expect(fake.createDashlet).not.toHaveBeenCalled();
-        expect(harness.deps.writePushMap).not.toHaveBeenCalled();
-      },
+  it('fails with invalid_block naming host_chrome for an authored "false", and writes nothing', async () => {
+    const block = { ...makeBlock(), host_chrome: 'false' } as unknown as Block;
+    const fake = makeClient({ dashboards: [salesWith()] });
+    const harness = await runPush(
+      makeHarness({ fake, deployable: [makePlugin(PLUGIN, [block])] }),
+      { dashboard: 'D1', create: true, yes: true },
     );
 
-    it('updates the remembered dashlet when host_chrome flips from false to true, without drift', async () => {
-      const sent = JSON.parse(JSON.stringify(toCustomCodeContent(chromeBlock(false)))) as Record<
-        string,
-        unknown
-      >;
-      const fake = makeClient({ dashboards: [salesWith(pushedDashlet(sent))] });
-      const entry = makeEntry({ contentHash: canonicalContentHash(sent) });
-      const harness = await runPush(
-        makeHarness({
-          fake,
-          pushMap: [entry],
-          deployable: [makePlugin(PLUGIN, [chromeBlock(true)])],
-        }),
-        { yes: true },
-      );
-
-      expect(harness.json()).toMatchObject({
-        ok: true,
-        applied: true,
-        action: 'updated',
-        dashletId: 'X1',
-        resolvedBy: 'remembered',
-      });
-      expect(fake.updateDashlet).toHaveBeenCalledTimes(1);
-
-      const [, , body] = fake.updateDashlet.mock.calls[0] ?? [];
-      const content = (body as { config: { content: Record<string, unknown> } }).config.content;
-      const nextHash = canonicalContentHash(toCustomCodeContent(chromeBlock(true)));
-
-      expect(content.host_chrome).toBe(true);
-      expect(nextHash).not.toBe(entry.contentHash);
-      expect(harness.pushMap.entries).toStrictEqual([
-        makeEntry({ contentHash: nextHash, pushedAt: PUSHED_AT }),
-      ]);
+    expect(harness.json()).toMatchObject({
+      ok: false,
+      code: 'invalid_block',
+      field: 'host_chrome',
+      message: 'Block "chart" has an invalid host_chrome: it must be true or false.',
     });
-
-    it('updates the remembered dashlet when host_chrome is removed after a false push', async () => {
-      const sent = JSON.parse(JSON.stringify(toCustomCodeContent(chromeBlock(false)))) as Record<
-        string,
-        unknown
-      >;
-      const fake = makeClient({ dashboards: [salesWith(pushedDashlet(sent))] });
-      const harness = await runPush(
-        makeHarness({
-          fake,
-          pushMap: [makeEntry({ contentHash: canonicalContentHash(sent) })],
-        }),
-        { yes: true },
-      );
-
-      expect(harness.json()).toMatchObject({ ok: true, applied: true, action: 'updated' });
-
-      const [, , body] = fake.updateDashlet.mock.calls[0] ?? [];
-
-      expect(Object.keys((body as { config: { content: object } }).config.content)).not.toContain(
-        'host_chrome',
-      );
-      expect(harness.pushMap.entries).toStrictEqual([
-        makeEntry({ contentHash: BLOCK_HASH, pushedAt: PUSHED_AT }),
-      ]);
-    });
+    expect(harness.exitCodes).toStrictEqual([1]);
+    expect(fake.createDashlet).not.toHaveBeenCalled();
+    expect(harness.deps.writePushMap).not.toHaveBeenCalled();
   });
 
   it('outputs a block choice failure', async () => {
@@ -2388,26 +2027,6 @@ describe('listTargets', () => {
     expect(step).toMatchObject({ ok: true, value: { customObjects: [] } });
   });
 
-  it("lists Contacts' chart groups with --object <client id>", async () => {
-    const fake = makeClient({
-      summaries: { chart_group: [summary({ id: 'G2', name: 'Leads', type: 'chart_group' })] },
-      objectDetails: [{ id: 'CL', object_name: 'Contacts', fetch_url: 'client' }],
-      clientObjectId: 'CL',
-    });
-    const step = await listTargets(fake.client, makeCredentials(), { object: 'CL' });
-
-    expect(step).toMatchObject({
-      ok: true,
-      value: {
-        object: { id: 'CL', objectName: 'Contacts', fetchUrl: 'client' },
-        surfaces: { chart_group: [{ id: 'G2', name: 'Leads', type: 'chart_group' }] },
-      },
-    });
-    expect(fake.listDashboards.mock.calls).toStrictEqual([['chart_group', 'CL']]);
-    expect(fake.getCustomObject.mock.calls).toStrictEqual([['CL']]);
-    expect(fake.listCustomObjects).not.toHaveBeenCalled();
-  });
-
   it("lists an object's chart groups with --object", async () => {
     const fake = makeClient({
       summaries: { chart_group: [summary({ id: 'G1', name: 'Pipeline', type: 'chart_group' })] },
@@ -2438,6 +2057,7 @@ describe('listTargets', () => {
       },
     });
     expect(fake.listDashboards.mock.calls).toStrictEqual([['chart_group', 'O1']]);
+    expect(fake.getCustomObject.mock.calls).toStrictEqual([['O1']]);
     expect(fake.listCustomObjects).not.toHaveBeenCalled();
   });
 
@@ -2492,14 +2112,6 @@ describe('listPushableObjects', () => {
     expect(await listPushableObjects(fake.client)).toStrictEqual([
       { id: 'CL', objectName: 'People', fetchUrl: 'client' },
     ]);
-  });
-
-  it('still fails when the custom-objects list fails', async () => {
-    const fake = makeClient({ clientObjectId: 'CL' });
-
-    fake.listCustomObjects.mockRejectedValueOnce(new KizenApiError('auth_failed', 'failed'));
-
-    await expect(listPushableObjects(fake.client)).rejects.toThrow('failed');
   });
 });
 

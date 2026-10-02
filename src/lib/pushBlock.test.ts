@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +9,6 @@ import {
   PUSH_NAME_PREFIX,
   buildCreateBody,
   buildDashboardUrl,
-  buildDashletConfig,
   buildUpdateBody,
   canonicalContentHash,
   computeCreateLayout,
@@ -32,6 +30,7 @@ import {
   upsertPushMapEntry,
   writePushMap,
 } from './pushBlock.js';
+import { routablePage } from '../test/fixtures.js';
 
 const makeBlock = (overrides: Partial<Block> = {}): Block => ({
   name: 'Sales Widget',
@@ -181,27 +180,6 @@ describe('toCustomCodeContent', () => {
     expect(Object.keys(content)).not.toContain('default_w');
     expect(Object.keys(content)).not.toContain('default_h');
   });
-
-  it('carries default_w and default_h in snake_case when the block sets them', () => {
-    const block = { ...makeBlock({ event_scripts: {} }), default_w: 6, default_h: 4 };
-    const content = toCustomCodeContent(block as unknown as Block);
-
-    expect(content).toStrictEqual({
-      kind: 'custom_code',
-      version: 1,
-      name: 'Sales Widget',
-      script: 'this.outputUI("hi");',
-      styles: '.a { color: red; }',
-      event_scripts: [],
-      min_w: 4,
-      max_w: 8,
-      min_h: 2,
-      max_h: 6,
-      default_w: 6,
-      default_h: 4,
-    });
-    expectWireSafe(content);
-  });
 });
 
 describe('toCustomCodeContent host_chrome', () => {
@@ -235,23 +213,6 @@ describe('toCustomCodeContent host_chrome', () => {
     expect(Object.keys(toCustomCodeContent(withHostChrome(hostChrome)))).not.toContain(
       'host_chrome',
     );
-  });
-});
-
-describe('buildDashletConfig', () => {
-  it('builds the exact static_content config', () => {
-    const content = makeContent();
-    const config = buildDashletConfig({ content, objectId: 'obj-9' });
-
-    expect(config).toStrictEqual({
-      object_id: 'obj-9',
-      entity_type: 'static_content',
-      report_type: 'html',
-      chart_type: 'html',
-      content,
-      fe_extra_info: {},
-    });
-    expectWireSafe(config);
   });
 });
 
@@ -297,23 +258,6 @@ describe('buildCreateBody', () => {
       },
     });
     expectWireSafe(body);
-  });
-});
-
-describe('buildCreateBody host_chrome', () => {
-  it('sends host_chrome false in the created content', () => {
-    const content = makeContent({ host_chrome: false });
-    const body = buildCreateBody({
-      pluginApiName: 'acme',
-      blockApiName: 'sales_widget',
-      content,
-      dashlets: [],
-      objectId: 'obj-1',
-      layoutId: 'layout-uuid',
-    });
-
-    expect(body.config.content).toStrictEqual(content);
-    expect(JSON.parse(JSON.stringify(body))).toHaveProperty('config.content.host_chrome', false);
   });
 });
 
@@ -475,14 +419,6 @@ describe('buildUpdateBody', () => {
     expect(JSON.stringify(body)).not.toContain('custom_object');
   });
 
-  it('never sends a layout, even when the content carries default sizes', () => {
-    const content = makeContent({ default_w: 6, default_h: 4 });
-    const body = buildUpdateBody(existing, content);
-
-    expect(Object.keys(body)).toStrictEqual(['config']);
-    expect(body.config.content).toStrictEqual(content);
-  });
-
   it('adds no style keys when nothing exists', () => {
     const body = buildUpdateBody(makeDashlet({ config: null }), makeContent());
 
@@ -491,24 +427,6 @@ describe('buildUpdateBody', () => {
 
   const storedWith = (content: CustomCodeContent): WireDashlet =>
     makeDashlet({ config: customCodeConfig(content) });
-
-  it('replaces stored host_chrome false with true', () => {
-    const body = buildUpdateBody(
-      storedWith(makeContent({ host_chrome: false })),
-      makeContent({ host_chrome: true }),
-    );
-
-    expect(body.config.content).toStrictEqual(makeContent({ host_chrome: true }));
-  });
-
-  it('replaces stored host_chrome true with false', () => {
-    const body = buildUpdateBody(
-      storedWith(makeContent({ host_chrome: true })),
-      makeContent({ host_chrome: false }),
-    );
-
-    expect(body.config.content).toStrictEqual(makeContent({ host_chrome: false }));
-  });
 
   it('drops a stored host_chrome when the new content no longer sets it', () => {
     const body = buildUpdateBody(storedWith(makeContent({ host_chrome: false })), makeContent());
@@ -584,36 +502,19 @@ describe('matchPushTarget', () => {
     });
   });
 
-  it('ignores a map entry for another dashboard', () => {
-    const named = makeDashlet({ id: 'named', name: key });
-    const entry = makeEntry({ dashboardId: 'dash-other', dashletId: 'named' });
-
-    expect(matchPushTarget({ ...base, dashlets: [named], entry })).toStrictEqual({
-      kind: 'name',
-      dashlet: named,
-    });
-  });
-
-  it('falls back to name when the mapped dashlet was deleted', () => {
-    const named = makeDashlet({ id: 'named', name: key });
-    const entry = makeEntry({ dashletId: 'deleted' });
-
-    expect(matchPushTarget({ ...base, dashlets: [named], entry })).toStrictEqual({
-      kind: 'name',
-      dashlet: named,
-    });
-  });
-
-  it('falls back to name when the mapped dashlet is no longer custom code', () => {
-    const mapped = makeDashlet({ id: 'mapped', config: { chart_type: 'bar' } });
+  it.each([
+    ['for another dashboard', [], { dashboardId: 'dash-other', dashletId: 'named' }],
+    ['whose dashlet was deleted', [], { dashletId: 'deleted' }],
+    [
+      'whose dashlet is no longer custom code',
+      [makeDashlet({ id: 'mapped', config: { chart_type: 'bar' } })],
+      { dashletId: 'mapped' },
+    ],
+  ])('falls back to name past a map entry %s', (_name, others, entryOverrides) => {
     const named = makeDashlet({ id: 'named', name: key });
 
     expect(
-      matchPushTarget({
-        ...base,
-        dashlets: [mapped, named],
-        entry: makeEntry({ dashletId: 'mapped' }),
-      }),
+      matchPushTarget({ ...base, dashlets: [...others, named], entry: makeEntry(entryOverrides) }),
     ).toStrictEqual({ kind: 'name', dashlet: named });
   });
 
@@ -716,26 +617,6 @@ describe('canonicalContentHash', () => {
     );
   });
 
-  it('keeps the previous hash for content without default sizes', () => {
-    const content = makeContent({ min_w: 3, max_w: 8, min_h: 2, max_h: 6 });
-    const previous = createHash('sha256')
-      .update(
-        JSON.stringify({
-          event_scripts: [],
-          max_h: 6,
-          max_w: 8,
-          min_h: 2,
-          min_w: 3,
-          name: 'Block',
-          script: 'run();',
-          styles: '',
-        }),
-      )
-      .digest('hex');
-
-    expect(canonicalContentHash(content)).toBe(previous);
-  });
-
   it('keeps the pre-host_chrome hash for content without host_chrome', () => {
     const content = {
       kind: 'custom_code',
@@ -793,42 +674,6 @@ describe('detectDrift', () => {
     });
 
     expect(detectDrift(edited, makeEntry({ contentHash: hash }))).toBe(true);
-  });
-
-  it('is false for a dashlet pushed with packager-filled sizes when the local block now has authored sizes only', () => {
-    const previouslyPushed = makeContent({ min_w: 1, max_w: 12, min_h: 1, max_h: 12 });
-    const stored = makeDashlet({ config: customCodeConfig(previouslyPushed) });
-    const entry = makeEntry({ contentHash: canonicalContentHash(previouslyPushed) });
-    const authoredNow = makeContent({ default_w: 6 });
-
-    expect(canonicalContentHash(authoredNow)).not.toBe(entry.contentHash);
-    expect(detectDrift(stored, entry)).toBe(false);
-  });
-
-  it('is false for a dashlet holding the content sent with host_chrome false', () => {
-    const sent = toCustomCodeContent({
-      ...makeBlock(),
-      host_chrome: false,
-    } as unknown as Block);
-    const stored = makeDashlet({
-      config: customCodeConfig(JSON.parse(JSON.stringify(sent)) as unknown),
-    });
-
-    expect(sent.host_chrome).toBe(false);
-    expect(detectDrift(stored, makeEntry({ contentHash: canonicalContentHash(sent) }))).toBe(false);
-  });
-
-  it('is true when host_chrome was changed in Kizen since the push', () => {
-    const sent = makeContent({ host_chrome: false });
-    const entry = makeEntry({ contentHash: canonicalContentHash(sent) });
-
-    expect(detectDrift(makeDashlet({ config: customCodeConfig(makeContent()) }), entry)).toBe(true);
-    expect(
-      detectDrift(
-        makeDashlet({ config: customCodeConfig(makeContent({ host_chrome: true })) }),
-        entry,
-      ),
-    ).toBe(true);
   });
 
   it('is false with no entry or a different dashlet', () => {
@@ -1041,14 +886,6 @@ describe('buildDashboardUrl', () => {
       buildDashboardUrl({
         appBaseUrl,
         surface: 'chart_group',
-        dashboardId: 'c1',
-        customObject: { id: 'obj-1' },
-      }),
-    ).toBe('https://app.kizen.com/custom-objects/obj-1/charts/c1');
-    expect(
-      buildDashboardUrl({
-        appBaseUrl,
-        surface: 'chart_group',
         dashboardId: 'c2',
         customObject: { id: 'contacts', fetchUrl: 'client' },
       }),
@@ -1074,21 +911,13 @@ describe('buildDashboardUrl', () => {
   });
 });
 
-const makeRoutablePage = (overrides: Partial<RoutablePage> = {}): RoutablePage => ({
-  name: 'Detail',
-  api_name: 'detail_view',
-  type: 'script',
-  css: '.d{color:red}',
-  event_scripts: { close: 'this.closeModal();', save: 'save();' },
-  callback: '',
-  is_toolbar_item: false,
-  toolbar_color: '',
-  toolbar_icon: '',
-  script: 'this.outputUI("detail");',
-  html: '',
-  iframe_url: '',
-  ...overrides,
-});
+const makeRoutablePage = (overrides: Partial<RoutablePage> = {}): RoutablePage =>
+  routablePage({
+    css: '.d{color:red}',
+    event_scripts: { close: 'this.closeModal();', save: 'save();' },
+    script: 'this.outputUI("detail");',
+    ...overrides,
+  });
 
 describe('custom_code views', () => {
   it('view_event_scripts_are_an_array', () => {

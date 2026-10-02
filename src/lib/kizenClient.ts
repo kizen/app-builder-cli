@@ -1,5 +1,6 @@
 import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
 import type { Credentials } from './credentials.js';
+import { isRecord } from './guards.js';
 import type {
   CreateDashletBody,
   DashboardType,
@@ -52,8 +53,13 @@ export class KizenApiError extends Error {
   }
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
+const segment = encodeURIComponent;
+
+/** The API path of a dashboard's dashlet collection, or of one dashlet in it. */
+export const dashletPath = (dashboardId: string, dashletId?: string): string =>
+  dashletId === undefined
+    ? `/dashboards/${segment(dashboardId)}/dashlet`
+    : `/dashboards/${segment(dashboardId)}/dashlet/${segment(dashletId)}`;
 
 function collectMessages(value: unknown, prefix: string, out: string[]): void {
   const push = (text: string): void => {
@@ -228,8 +234,6 @@ export function createKizenClient(options: KizenClientOptions): KizenClient {
     return json;
   };
 
-  const segment = encodeURIComponent;
-
   const resolveNext = (next: string): string => {
     const base = new URL(baseUrl);
     const resolved = new URL(next, base.origin);
@@ -304,19 +308,11 @@ export function createKizenClient(options: KizenClientOptions): KizenClient {
     },
 
     async createDashlet(dashboardId: string, body: CreateDashletBody) {
-      return (await request(
-        'POST',
-        `/dashboards/${segment(dashboardId)}/dashlet`,
-        body,
-      )) as WireDashlet;
+      return (await request('POST', dashletPath(dashboardId), body)) as WireDashlet;
     },
 
     async updateDashlet(dashboardId: string, dashletId: string, body: UpdateDashletBody) {
-      return (await request(
-        'PATCH',
-        `/dashboards/${segment(dashboardId)}/dashlet/${segment(dashletId)}`,
-        body,
-      )) as WireDashlet;
+      return (await request('PATCH', dashletPath(dashboardId, dashletId), body)) as WireDashlet;
     },
   };
 }

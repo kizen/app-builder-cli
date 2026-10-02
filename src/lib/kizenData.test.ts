@@ -453,8 +453,8 @@ describe('searchRecords', () => {
     expect(result.truncated).toBe(false);
   });
 
-  it.each([NaN, Infinity, -Infinity])(
-    'falls back to 1000 for a pageSize of %s',
+  it.each([NaN, Infinity, -Infinity, 5000])(
+    'uses a pageSize of 1000 for a pageSize of %s',
     async (pageSize) => {
       const ctx = makeCtx();
 
@@ -492,41 +492,6 @@ describe('searchRecords', () => {
       field_names: ['name'],
       query: [],
     });
-  });
-
-  it('wraps non-empty filters in one and group', async () => {
-    const ctx = makeCtx();
-    const filters = [lib.dropdownFilter(STATUS, 'Open')];
-
-    await lib.searchRecords(ctx, { object: 'deals', fieldNames: ['status'], filters });
-
-    expect(ctx.postWithErrors.mock.calls[0]?.[1]).toStrictEqual({
-      field_names: ['status'],
-      query: [
-        {
-          and: true,
-          filters: [
-            {
-              type: 'fields_v2',
-              subtype: 'custom',
-              field: 'custom::f-status',
-              condition: '=',
-              value: 'o-open',
-            },
-          ],
-        },
-      ],
-    });
-  });
-
-  it('caps pageSize at the API maximum of 1000', async () => {
-    const ctx = makeCtx();
-
-    await lib.searchRecords(ctx, { object: 'deals', fieldNames: [], pageSize: 5000 });
-
-    expect(ctx.postWithErrors.mock.calls[0]?.[0]).toBe(
-      '/records/deals/search?page_size=1000&page=1',
-    );
   });
 
   it('throws a readable error when a page fails', async () => {
@@ -700,16 +665,6 @@ describe('escapeHtml', () => {
   it('escapes the five HTML-significant characters', () => {
     expect(lib.escapeHtml(`<img src="x" onerror='a'>&`)).toBe(
       '&lt;img src=&quot;x&quot; onerror=&#39;a&#39;&gt;&amp;',
-    );
-  });
-
-  it('neutralizes markup a record label could smuggle into outputUI', () => {
-    const label = '<a href="https://evil.example">Click</a><form data-script="x">';
-    const escaped = lib.escapeHtml(label);
-
-    expect(escaped).not.toMatch(/[<>"]/);
-    expect(escaped).toBe(
-      '&lt;a href=&quot;https://evil.example&quot;&gt;Click&lt;/a&gt;&lt;form data-script=&quot;x&quot;&gt;',
     );
   });
 

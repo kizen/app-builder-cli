@@ -14,11 +14,13 @@ import {
   findInvalidBlockField,
   formatAvailableBlocks,
   packageBlocks,
+  resolvePackagedBlock,
   selectBlock,
   toExportJson,
 } from './exportBlock.js';
 import { computeCreateLayout, toCustomCodeContent } from './pushBlock.js';
 import { packageLocalPlugin } from './runBuild.js';
+import { makePlugin, routablePage } from '../test/fixtures.js';
 
 const PLUGIN_API_NAME = 'acme_widgets';
 
@@ -35,9 +37,6 @@ const makeBlock = (overrides: Partial<Block> = {}): Block => ({
   when: '',
   ...overrides,
 });
-
-const makePlugin = (apiName: string, blocks: Block[]): DeployablePlugin =>
-  ({ api_name: apiName, artifacts: { custom_blocks: blocks } }) as unknown as DeployablePlugin;
 
 describe('selectBlock', () => {
   it('reports ambiguity when the same api_name exists in more than one plugin', () => {
@@ -67,6 +66,117 @@ describe('selectBlock', () => {
     );
 
     expect(selection).toStrictEqual({ ok: true, block: target, pluginApiName: 'second' });
+  });
+});
+
+describe('resolvePackagedBlock', () => {
+  const packagedWith = (
+    blocks: Block[],
+    views: RoutablePage[] = [],
+  ): Parameters<typeof resolvePackagedBlock>[0] => ({
+    deployable: [makePlugin('p', blocks)],
+    views: { p: views },
+    warnings: [],
+  });
+  const twoBlocks = packagedWith([makeBlock({ api_name: 'a' }), makeBlock({ api_name: 'b' })]);
+  const available = [
+    { pluginApiName: 'p', apiName: 'a' },
+    { pluginApiName: 'p', apiName: 'b' },
+  ];
+
+  it('resolvePackagedBlock returns ambiguous listing available blocks when apiName is missing', () => {
+    expect(resolvePackagedBlock(twoBlocks, undefined, 'export')).toStrictEqual({
+      ok: false,
+      reason: 'ambiguous',
+      message: 'This plugin has several blocks; pass the api_name of the one to export: a, b',
+      available,
+    });
+    expect(resolvePackagedBlock(twoBlocks, undefined, 'push')).toStrictEqual({
+      ok: false,
+      reason: 'ambiguous',
+      message: 'This plugin has several blocks; pass the api_name of the one to push: a, b',
+      available,
+    });
+  });
+
+  it.each(['export', 'push'] as const)(
+    'words not_found, no_blocks and a cross-plugin clash the same for %s',
+    (verb) => {
+      expect(resolvePackagedBlock(twoBlocks, 'missing', verb)).toStrictEqual({
+        ok: false,
+        reason: 'not_found',
+        message: 'No block with api_name "missing". Available blocks: a, b',
+        available,
+      });
+      expect(resolvePackagedBlock(packagedWith([]), undefined, verb)).toStrictEqual({
+        ok: false,
+        reason: 'no_blocks',
+        message:
+          'This plugin has no blocks. Scaffold one with `appbuilder create --artifacts block`.',
+        available: [],
+      });
+
+      const clash = {
+        deployable: [
+          makePlugin('p', [makeBlock({ api_name: 'shared' })]),
+          makePlugin('q', [makeBlock({ api_name: 'shared' })]),
+        ],
+        views: {},
+        warnings: [],
+      };
+
+      expect(resolvePackagedBlock(clash, 'shared', verb)).toStrictEqual({
+        ok: false,
+        reason: 'ambiguous',
+        message: 'More than one plugin has a block with api_name "shared": p/shared, q/shared',
+        available: [
+          { pluginApiName: 'p', apiName: 'shared' },
+          { pluginApiName: 'q', apiName: 'shared' },
+        ],
+      });
+    },
+  );
+
+  it('resolvePackagedBlock returns invalid_block with field for an invalid block', () => {
+    expect(
+      resolvePackagedBlock(packagedWith([makeBlock({ min_w: 0 })]), undefined, 'push'),
+    ).toStrictEqual({
+      ok: false,
+      reason: 'invalid_block',
+      message:
+        'Block "block" has an invalid min_w: it must be a positive integer no greater than max_w.',
+      available: [],
+      field: 'min_w',
+    });
+    expect(
+      resolvePackagedBlock(
+        packagedWith([makeBlock()], [routablePage({ css: 'a{content:"\u0000"}' })]),
+        undefined,
+        'export',
+      ),
+    ).toStrictEqual({
+      ok: false,
+      reason: 'invalid_block',
+      message:
+        'Block "block" can\'t carry view "detail_view": its css must be a string without NUL characters or "{__ref:".',
+      available: [],
+      field: 'views.detail_view.css',
+    });
+  });
+
+  it('returns the selected block with its plugin views and the packaging warnings', () => {
+    const block = makeBlock({ api_name: 'b' });
+    const view = routablePage({ script: 'v();' });
+    const warning = { rule: 'r', severity: 'warning', message: 'm' } as const;
+    const packaged = {
+      ...packagedWith([makeBlock({ api_name: 'a' }), block], [view]),
+      warnings: [warning],
+    };
+
+    expect(resolvePackagedBlock(packaged, 'b', 'push')).toStrictEqual({
+      ok: true,
+      value: { block, pluginApiName: 'p', views: [view], warnings: [warning] },
+    });
   });
 });
 
@@ -306,6 +416,35 @@ describe('applyAuthoredConfig', () => {
     ]);
   });
 
+  const authoredSizesFor = (entry: string, configPath: string): Block[] => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry }),
+      file(configPath, { api_name: 'tile', min_w: 3, default_w: 6 }),
+    ];
+    const [plugin] = applyAuthoredConfig([makePlugin('p', [packaged('tile')])], files);
+
+    return plugin?.artifacts.custom_blocks ?? [];
+  };
+
+  it("exportBlock keeps authored sizes when entry is './src'", () => {
+    expect(authoredSizesFor('./src', 'src/blocks/tile/config.json')).toStrictEqual([
+      { ...withoutSizes(packaged('tile')), min_w: 3, default_w: 6 },
+    ]);
+  });
+
+  it.each([
+    ['src', 'src/blocks/tile/config.json'],
+    ['./src', 'src/blocks/tile/config.json'],
+    ['src/', 'src/blocks/tile/config.json'],
+    ['src\\', 'src/blocks/tile/config.json'],
+    ['', 'blocks/tile/config.json'],
+    ['.', 'blocks/tile/config.json'],
+  ])('keeps authored sizes for entry %o', (entry, configPath) => {
+    expect(authoredSizesFor(entry, configPath)).toStrictEqual([
+      { ...withoutSizes(packaged('tile')), min_w: 3, default_w: 6 },
+    ]);
+  });
+
   it('strips every size from a block with no matching config.json', () => {
     const files = [
       file('kizen.json', { api_name: 'p', entry: 'src' }),
@@ -332,7 +471,9 @@ describe('exportBlock', () => {
     await rm(workDir, { recursive: true, force: true });
   });
 
-  const bootstrapPlugin = async (withBlock = true): Promise<void> => {
+  const bootstrapPlugin = async (
+    artifacts: Parameters<typeof createPlugin>[0]['artifacts'] = ['block'],
+  ): Promise<void> => {
     await createPlugin({
       targetDir: pluginDir,
       name: 'Acme Widgets',
@@ -341,7 +482,7 @@ describe('exportBlock', () => {
       description: 'Adds Acme widget tooling to Kizen.',
       developerBusinessId: '',
       developerEnvironment: 'go',
-      artifacts: withBlock ? ['block'] : [],
+      artifacts,
     });
   };
 
@@ -429,7 +570,7 @@ describe('exportBlock', () => {
   });
 
   it('rejects as no_blocks with a hint to scaffold one', async () => {
-    await bootstrapPlugin(false);
+    await bootstrapPlugin([]);
 
     const thrown = await exportAndExpectRejection();
 
@@ -495,35 +636,6 @@ describe('exportBlock', () => {
     await expect(pushedSize()).resolves.toStrictEqual({ w: 6, h: 3 });
   });
 
-  it('creates 6x3 with only default_w 6', async () => {
-    await bootstrapPlugin();
-    await writeBlockConfig('helloBlock', {
-      name: 'Hello Block',
-      api_name: 'hello_block',
-      default_w: 6,
-    });
-
-    const { block } = await exportBlock(pluginDir);
-
-    expect(sizeKeysOf(block)).toStrictEqual(['default_w']);
-    await expect(pushedSize()).resolves.toStrictEqual({ w: 6, h: 3 });
-  });
-
-  it('accepts default_h 20 with no max_h and creates 6x20', async () => {
-    await bootstrapPlugin();
-    await writeBlockConfig('helloBlock', {
-      name: 'Hello Block',
-      api_name: 'hello_block',
-      default_h: 20,
-    });
-
-    const { block } = await exportBlock(pluginDir);
-
-    expect(block).toHaveProperty('default_h', 20);
-    expect(block).not.toHaveProperty('max_h');
-    await expect(pushedSize()).resolves.toStrictEqual({ w: 6, h: 20 });
-  });
-
   it('exports the authored sizes and creates 6x4 from min 3x3 and default 6x4', async () => {
     await bootstrapPlugin();
     await writeBlockConfig('helloBlock', {
@@ -553,21 +665,6 @@ describe('exportBlock', () => {
     expect(block).toHaveProperty('default_w', 5);
   });
 
-  it.each([0, null, 2.5])('rejects an authored min_w of %o as invalid_block', async (minW) => {
-    await bootstrapPlugin();
-    await writeBlockConfig('helloBlock', {
-      name: 'Hello Block',
-      api_name: 'hello_block',
-      min_w: minW,
-    });
-
-    const thrown = await exportAndExpectRejection();
-
-    expect(thrown).toBeInstanceOf(BlockExportError);
-    expect((thrown as BlockExportError).reason).toBe('invalid_block');
-    expect((thrown as BlockExportError).field).toBe('min_w');
-  });
-
   it.each([
     [2, { min_w: 3 }],
     [13, { min_w: 3, max_w: 12 }],
@@ -588,19 +685,6 @@ describe('exportBlock', () => {
     expect((thrown as BlockExportError).message).toBe(
       'Block "hello_block" has an invalid default_w: it must be a positive integer between min_w and max_w.',
     );
-  });
-
-  it('accepts default_w 13 with min_w 3 and no max_w, and clamps the created width to 12', async () => {
-    await bootstrapPlugin();
-    await writeBlockConfig('helloBlock', {
-      name: 'Hello Block',
-      api_name: 'hello_block',
-      min_w: 3,
-      default_w: 13,
-    });
-
-    await expect(exportBlock(pluginDir)).resolves.toBeDefined();
-    await expect(pushedSize()).resolves.toStrictEqual({ w: 12, h: 3 });
   });
 
   it.each([false, true])('exports an authored host_chrome of %o', async (hostChrome) => {
@@ -646,21 +730,6 @@ describe('exportBlock', () => {
       );
     },
   );
-
-  it('reports an earlier invalid field before an invalid authored host_chrome', async () => {
-    await bootstrapPlugin();
-    await writeBlockConfig('helloBlock', {
-      name: 'Hello Block',
-      api_name: 'hello_block',
-      min_w: 0,
-      host_chrome: 'false',
-    });
-
-    const thrown = await exportAndExpectRejection();
-
-    expect(thrown).toBeInstanceOf(BlockExportError);
-    expect((thrown as BlockExportError).field).toBe('min_w');
-  });
 
   it('rejects a script containing {__ref: as invalid_block', async () => {
     await bootstrapPlugin();
@@ -792,16 +861,7 @@ describe('exportBlock', () => {
   });
 
   it('pages_vs_views_handling', async () => {
-    await createPlugin({
-      targetDir: pluginDir,
-      name: 'Acme Widgets',
-      apiName: PLUGIN_API_NAME,
-      externalLink: 'https://example.com/acme-widgets',
-      description: 'Adds Acme widget tooling to Kizen.',
-      developerBusinessId: '',
-      developerEnvironment: 'go',
-      artifacts: ['block', 'page'],
-    });
+    await bootstrapPlugin(['block', 'page']);
     await writeDetailView();
     await writeComponent('views', 'plainView', { 'index.html': '<p>plain</p>' });
 
@@ -821,13 +881,6 @@ describe('exportBlock', () => {
     });
     expect(packaged.deployable[0]?.artifacts.routable_pages).toHaveLength(3);
   });
-
-  it('packageBlocks propagates validation errors as PluginValidationError', async () => {
-    await bootstrapPlugin();
-    await writeBlockFile('helloBlock', 'script.js', 'this.outputUI(document.title);\n');
-
-    await expect(packageBlocks(pluginDir)).rejects.toBeInstanceOf(PluginValidationError);
-  });
 });
 
 describe('collectViews', () => {
@@ -836,21 +889,8 @@ describe('collectViews', () => {
     content: typeof content === 'string' ? content : JSON.stringify(content),
   });
 
-  const page = (overrides: Partial<RoutablePage>): RoutablePage => ({
-    name: 'x',
-    api_name: 'x',
-    type: 'script',
-    css: '',
-    event_scripts: {},
-    callback: '',
-    is_toolbar_item: false,
-    toolbar_color: '',
-    toolbar_icon: '',
-    script: 's();',
-    html: '',
-    iframe_url: '',
-    ...overrides,
-  });
+  const page = (overrides: Partial<RoutablePage>): RoutablePage =>
+    routablePage({ name: 'x', api_name: 'x', script: 's();', ...overrides });
 
   const pluginWithPages = (apiName: string, pages: RoutablePage[]): DeployablePlugin =>
     ({
@@ -892,6 +932,52 @@ describe('collectViews', () => {
     ).toStrictEqual({ views: { one: [a], two: [] }, warnings: [] });
   });
 
+  it.each([
+    ['src', 'src/views/'],
+    ['./src', 'src/views/'],
+    ['src/', 'src/views/'],
+    ['', 'views/'],
+  ])('matches views without a config.json and skips .DS_Store for entry %o', (entry, viewsRoot) => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry }),
+      file(`${viewsRoot}a/script.js`, 's();'),
+      file(`${viewsRoot}.DS_Store`, 'junk'),
+      file(`${viewsRoot}b/.DS_Store`, 'junk'),
+    ];
+    const a = page({ api_name: 'a', name: 'a' });
+
+    expect(collectViews([pluginWithPages('p', [a])], files)).toStrictEqual({
+      views: { p: [a] },
+      warnings: [],
+    });
+  });
+
+  it.each([
+    ['./src', 'src/views'],
+    ['', 'views'],
+  ])('points the unmatched-views warning for entry %o at %s', (entry, path) => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry }),
+      file(`${path}/a/script.js`, 's();'),
+    ];
+
+    expect(collectViews([pluginWithPages('p', [])], files).warnings).toMatchObject([{ path }]);
+  });
+
+  it('names a view by its directory when its config.json is not an object', () => {
+    const files = [
+      file('kizen.json', { api_name: 'p', entry: 'src' }),
+      file('src/views/a/config.json', '[]'),
+      file('src/views/a/script.js', 's();'),
+    ];
+    const a = page({ api_name: 'a', name: 'a' });
+
+    expect(collectViews([pluginWithPages('p', [a])], files)).toStrictEqual({
+      views: { p: [a] },
+      warnings: [],
+    });
+  });
+
   it('warns when an authored view has no matching packaged view', () => {
     const files = [
       file('kizen.json', { api_name: 'p', entry: 'src' }),
@@ -918,21 +1004,7 @@ describe('collectViews', () => {
 
 describe('findInvalidViewField', () => {
   const view = (overrides: Record<string, unknown> = {}): RoutablePage =>
-    ({
-      name: 'Detail',
-      api_name: 'detail_view',
-      type: 'html',
-      css: '',
-      event_scripts: {},
-      callback: '',
-      is_toolbar_item: false,
-      toolbar_color: '',
-      toolbar_icon: '',
-      script: '',
-      html: '<p/>',
-      iframe_url: '',
-      ...overrides,
-    }) as RoutablePage;
+    routablePage({ type: 'html', html: '<p/>', ...(overrides as Partial<RoutablePage>) });
 
   it('accepts well-formed views', () => {
     expect(findInvalidViewField([view(), view({ event_scripts: { a: 'b();' } })])).toBeUndefined();

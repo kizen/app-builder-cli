@@ -3,27 +3,27 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { Block, RoutablePage } from '@kizenapps/packager';
 import { cleanCredentialId } from '../../shared/lib/credentials.js';
-import type {
-  CreateDashletBody,
-  CustomCodeContent,
-  CustomCodeView,
-  DashboardType,
-  DashletLayout,
-  EventScriptEntry,
-  PushMapEntry,
-  Surface,
-  UpdateDashletBody,
-  WireDashboard,
-  WireDashlet,
+import { isMissingFileError, isRecord } from './guards.js';
+import {
+  BLOCK_SIZE_FIELDS,
+  type CreateDashletBody,
+  type CustomCodeContent,
+  type CustomCodeView,
+  type DashboardType,
+  type DashletLayout,
+  type EventScriptEntry,
+  type PushMapEntry,
+  type Surface,
+  type UpdateDashletBody,
+  type WireDashboard,
+  type WireDashlet,
 } from './kizenTypes.js';
 
 export const PUSH_NAME_PREFIX = 'appbuilder:';
 
 export const PUSH_MAP_RELATIVE_PATH = '.kizenapp/pushes.json';
 
-const DIMENSION_KEYS = ['min_w', 'max_w', 'min_h', 'max_h', 'default_w', 'default_h'] as const;
-
-type DimensionKey = (typeof DIMENSION_KEYS)[number];
+type DimensionKey = (typeof BLOCK_SIZE_FIELDS)[number];
 
 const PUSH_MAP_STRING_FIELDS = [
   'environment',
@@ -35,10 +35,6 @@ const PUSH_MAP_STRING_FIELDS = [
   'contentHash',
   'pushedAt',
 ] as const satisfies readonly (keyof PushMapEntry)[];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -83,7 +79,7 @@ export function parsePushKey(name: string): { pluginApiName: string; blockApiNam
 function pickDimensions(source: Record<string, unknown>): Partial<Record<DimensionKey, number>> {
   const dimensions: Partial<Record<DimensionKey, number>> = {};
 
-  for (const key of DIMENSION_KEYS) {
+  for (const key of BLOCK_SIZE_FIELDS) {
     const value = source[key];
 
     if (isFiniteNumber(value)) {
@@ -470,9 +466,6 @@ function latestPerKey(entries: readonly PushMapEntry[]): PushMapEntry[] {
 
   return [...byKey.values()];
 }
-
-const isMissingFileError = (error: unknown): boolean =>
-  error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT';
 
 const pushMapErrorDetail = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);

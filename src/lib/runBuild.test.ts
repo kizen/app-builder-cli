@@ -14,6 +14,13 @@ const UNUSED_KIZEN_DATA_WARNING = {
   severity: 'warning',
 };
 
+function expectOnlyUnusedKizenDataWarning(issues: ReturnType<typeof validatePluginApp>): void {
+  expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
+  expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
+    UNUSED_KIZEN_DATA_WARNING,
+  ]);
+}
+
 /**
  * A plausible developer business id. The bootstrap path is only meaningful when
  * the wizard-optional fields are actually filled in, so every plugin created
@@ -177,10 +184,7 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-      expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-        UNUSED_KIZEN_DATA_WARNING,
-      ]);
+      expectOnlyUnusedKizenDataWarning(issues);
     });
 
     it('has no validation errors and only the unused kizenData lib warning when no business id is configured', async () => {
@@ -196,10 +200,7 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-      expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-        UNUSED_KIZEN_DATA_WARNING,
-      ]);
+      expectOnlyUnusedKizenDataWarning(issues);
     });
 
     it('builds a full artifact scaffold with no errors and only the unused kizenData lib warning', async () => {
@@ -216,10 +217,7 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-      expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-        UNUSED_KIZEN_DATA_WARNING,
-      ]);
+      expectOnlyUnusedKizenDataWarning(issues);
 
       await expect(runBuild(pluginDir, outputDir)).resolves.toBeDefined();
     });
@@ -485,10 +483,7 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-      expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-        UNUSED_KIZEN_DATA_WARNING,
-      ]);
+      expectOnlyUnusedKizenDataWarning(issues);
 
       await runBuild(pluginDir, outputDir);
 
@@ -511,10 +506,7 @@ describe('runBuild', () => {
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 
-      expect(issues.filter((issue) => issue.severity === 'error')).toStrictEqual([]);
-      expect(issues.map(({ rule, path, severity }) => ({ rule, path, severity }))).toStrictEqual([
-        UNUSED_KIZEN_DATA_WARNING,
-      ]);
+      expectOnlyUnusedKizenDataWarning(issues);
 
       await runBuild(pluginDir, outputDir);
 

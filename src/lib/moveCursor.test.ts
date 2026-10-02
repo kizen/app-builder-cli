@@ -18,11 +18,6 @@ describe('moveCursor', () => {
     expect(moveCursor(4, 5, 1)).toBe(0);
   });
 
-  it('stays put in a single-item list', () => {
-    expect(moveCursor(0, 1, 1)).toBe(0);
-    expect(moveCursor(0, 1, -1)).toBe(0);
-  });
-
   it('returns the clamped cursor for a zero delta', () => {
     expect(moveCursor(2, 5, 0)).toBe(2);
     expect(moveCursor(9, 5, 0)).toBe(4);

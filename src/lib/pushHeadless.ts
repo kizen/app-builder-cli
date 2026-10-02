@@ -14,21 +14,10 @@ import {
   type DetailedCredentials,
   type Environment,
 } from './credentials.js';
-import {
-  findInvalidBlockField,
-  findInvalidViewField,
-  invalidBlockMessage,
-  invalidViewFieldPath,
-  invalidViewMessage,
-  packageBlocks,
-  selectBlock,
-  formatAvailableBlocks,
-  viewsFor,
-  type PackagedBlocks,
-} from './exportBlock.js';
+import { packageBlocks, resolvePackagedBlock, type PackagedBlocks } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
 import { ensureGitignore } from './gitignore.js';
-import { createKizenClient, KizenApiError } from './kizenClient.js';
+import { createKizenClient, dashletPath, KizenApiError } from './kizenClient.js';
 import type {
   CreateDashletBody,
   CustomCodeContent,
@@ -61,6 +50,7 @@ import {
   upsertPushMapEntry,
   writePushMap,
   type PushMapKey,
+  type TargetMatch,
 } from './pushBlock.js';
 import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
 
@@ -204,23 +194,22 @@ export function apiFailure(error: unknown): PushFailure {
 
 export interface ResolvedCredentials {
   credentials: Credentials;
-  source: { kind: 'file'; path: string } | { kind: 'profile'; name: string; path: string };
 }
 
 const environmentList = (): string => ENVIRONMENTS.join(', ');
 
-async function loadCredentialSource(
-  source: ResolvedCredentials['source'],
+async function loadCredentialFile(
+  path: string,
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
   let detailed: DetailedCredentials;
 
   try {
-    detailed = await deps.loadCredentialsDetailed(source.path);
+    detailed = await deps.loadCredentialsDetailed(path);
   } catch (error) {
     return failure(
       'credentials_invalid',
-      `Couldn't read credentials from ${source.path}: ${errorMessage(error)}`,
+      `Couldn't read credentials from ${path}: ${errorMessage(error)}`,
     );
   }
 
@@ -232,7 +221,7 @@ async function loadCredentialSource(
 
     return failure(
       'credentials_invalid',
-      `${source.path} ${problem}. Set it to one of: ${environmentList()}. The CLI won't default to production.`,
+      `${path} ${problem}. Set it to one of: ${environmentList()}. The CLI won't default to production.`,
     );
   }
 
@@ -244,25 +233,19 @@ async function loadCredentialSource(
   if (empty.length > 0) {
     return failure(
       'credentials_invalid',
-      `${source.path} is missing ${empty.map((field) => `"${field}"`).join(', ')}.`,
+      `${path} is missing ${empty.map((field) => `"${field}"`).join(', ')}.`,
     );
   }
 
-  return success({ credentials, source });
+  return success({ credentials });
 }
-
-const profileSource = (profile: CredentialProfile): ResolvedCredentials['source'] => ({
-  kind: 'profile',
-  name: profile.name,
-  path: profile.path,
-});
 
 export async function resolveCredentials(
   options: { credentials?: string; profile?: string },
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
   if (options.credentials !== undefined) {
-    return loadCredentialSource({ kind: 'file', path: options.credentials }, deps);
+    return loadCredentialFile(options.credentials, deps);
   }
 
   const profiles = await deps.listLoadableCredentialProfiles();
@@ -280,7 +263,7 @@ export async function resolveCredentials(
       );
     }
 
-    return loadCredentialSource(profileSource(profile), deps);
+    return loadCredentialFile(profile.path, deps);
   }
 
   const config = await deps.loadConfig(join(deps.cwd, '.kizenapp'));
@@ -298,13 +281,13 @@ export async function resolveCredentials(
       : profiles.find((candidate) => candidate.name === config.activeCredentialProfile);
 
   if (active) {
-    return loadCredentialSource(profileSource(active), deps);
+    return loadCredentialFile(active.path, deps);
   }
 
   const [only] = profiles;
 
   if (profiles.length === 1 && only) {
-    return loadCredentialSource(profileSource(only), deps);
+    return loadCredentialFile(only.path, deps);
   }
 
   if (profiles.length === 0) {
@@ -356,83 +339,37 @@ function blockChoices(
   });
 }
 
-function blockSelectionMessage(
-  selection: Extract<ReturnType<typeof selectBlock>, { ok: false }>,
-  apiName: string | undefined,
-): string {
-  const list = formatAvailableBlocks(selection.available);
-
-  if (selection.reason === 'no_blocks') {
-    return 'This plugin has no blocks. Scaffold one with `appbuilder create --artifacts block`.';
-  }
-
-  if (selection.reason === 'not_found') {
-    return `No block with api_name "${apiName ?? ''}". Available blocks: ${list}`;
-  }
-
-  return apiName === undefined
-    ? `This plugin has several blocks; pass the api_name of the one to push: ${list}`
-    : `More than one plugin has a block with api_name "${apiName}": ${list}`;
-}
-
+// A packaging throw (PluginValidationError or anything else) propagates; callers map
+// it through apiFailure.
 export async function resolveBlock(
   apiName: string | undefined,
   deps: PushDeps,
 ): Promise<Step<ResolvedBlock>> {
-  let packaged: PackagedBlocks;
+  const packaged = await deps.packageBlocks(deps.cwd);
+  const resolved = resolvePackagedBlock(packaged, apiName, 'push');
 
-  try {
-    packaged = await deps.packageBlocks(deps.cwd);
-  } catch (error) {
-    if (error instanceof PluginValidationError) {
-      return failure('validation_failed', formatValidationIssues(error.issues), {
-        issues: error.issues,
-      });
-    }
+  if (!resolved.ok) {
+    const { reason, message, field } = resolved;
 
-    throw error;
-  }
-
-  const selection = selectBlock(packaged.deployable, apiName);
-
-  if (!selection.ok) {
-    const message = blockSelectionMessage(selection, apiName);
-
-    if (selection.reason === 'no_blocks') {
-      return failure('invalid_block', message);
+    if (reason === 'no_blocks' || reason === 'invalid_block') {
+      return failure('invalid_block', message, field === undefined ? {} : { field });
     }
 
     return failure('needs_choice', message, {
       choice: 'block',
-      choices: blockChoices(packaged.deployable, selection.available),
+      choices: blockChoices(packaged.deployable, resolved.available),
     });
   }
 
-  const field = findInvalidBlockField(selection.block);
-
-  if (field !== undefined) {
-    return failure('invalid_block', invalidBlockMessage(selection.block.api_name, field), {
-      field,
-    });
-  }
-
-  const views = viewsFor(packaged.views, selection.pluginApiName);
-  const invalidView = findInvalidViewField(views);
-
-  if (invalidView !== undefined) {
-    return failure('invalid_block', invalidViewMessage(selection.block.api_name, invalidView), {
-      field: invalidViewFieldPath(invalidView),
-    });
-  }
-
-  const content = toCustomCodeContent(selection.block, views);
+  const { block, pluginApiName, views, warnings } = resolved.value;
+  const content = toCustomCodeContent(block, views);
 
   return success({
-    block: selection.block,
-    pluginApiName: selection.pluginApiName,
+    block,
+    pluginApiName,
     content,
     contentHash: canonicalContentHash(content),
-    warnings: packaged.warnings,
+    warnings,
   });
 }
 
@@ -568,13 +505,16 @@ export interface PushContext {
 
 export type ResolvedBy = 'flag' | 'remembered' | 'push_map' | 'name';
 
-export interface ResolvedTarget {
+interface ResolvedTargetBase {
   dashboard: WireDashboard;
   surface: Surface;
-  action: 'create' | 'update';
-  dashlet: WireDashlet | undefined;
   resolvedBy: ResolvedBy;
 }
+
+/** An update always names the dashlet it overwrites; a create never does. */
+export type ResolvedTarget =
+  | (ResolvedTargetBase & { action: 'create'; dashlet: undefined })
+  | (ResolvedTargetBase & { action: 'update'; dashlet: WireDashlet });
 
 const isMemberDashlet = (dashboard: WireDashboard, dashlet: WireDashlet): boolean =>
   dashlet.dashboard === dashboard.id;
@@ -600,20 +540,39 @@ export function buildTargetChoices(dashboard: WireDashboard, block: ResolvedBloc
   ];
 }
 
-function target(
+export const matchContextTarget = (
+  context: Pick<PushContext, 'block' | 'entry'>,
   dashboard: WireDashboard,
-  action: 'create' | 'update',
-  dashlet: WireDashlet | undefined,
-  resolvedBy: ResolvedBy,
-): Step<ResolvedTarget> {
-  return success({
+): TargetMatch =>
+  matchPushTarget({
+    dashboardId: dashboard.id,
+    dashlets: dashboard.dashlets,
+    pluginApiName: context.block.pluginApiName,
+    blockApiName: context.block.block.api_name,
+    entry: context.entry,
+  });
+
+const createTarget = (dashboard: WireDashboard, resolvedBy: ResolvedBy): Step<ResolvedTarget> =>
+  success({
     dashboard,
     surface: dashboardTypeToSurface(dashboard.type),
-    action,
+    action: 'create',
+    dashlet: undefined,
+    resolvedBy,
+  });
+
+const updateTarget = (
+  dashboard: WireDashboard,
+  dashlet: WireDashlet,
+  resolvedBy: ResolvedBy,
+): Step<ResolvedTarget> =>
+  success({
+    dashboard,
+    surface: dashboardTypeToSurface(dashboard.type),
+    action: 'update',
     dashlet,
     resolvedBy,
   });
-}
 
 async function chooseDashboard(context: PushContext): Promise<Step<ResolvedTarget>> {
   const [dashboards, homepages] = await Promise.all([
@@ -648,7 +607,7 @@ async function resolveFlaggedDashboard(
   const dashboard = await context.client.getDashboard(dashboardId);
 
   if (options.create) {
-    return target(dashboard, 'create', undefined, 'flag');
+    return createTarget(dashboard, 'flag');
   }
 
   const choices = (): PushChoice[] => buildTargetChoices(dashboard, context.block);
@@ -674,23 +633,17 @@ async function resolveFlaggedDashboard(
       );
     }
 
-    return target(dashboard, 'update', dashlet, 'flag');
+    return updateTarget(dashboard, dashlet, 'flag');
   }
 
-  const match = matchPushTarget({
-    dashboardId: dashboard.id,
-    dashlets: dashboard.dashlets,
-    pluginApiName: context.block.pluginApiName,
-    blockApiName: context.block.block.api_name,
-    entry: context.entry,
-  });
+  const match = matchContextTarget(context, dashboard);
 
   if (match.kind === 'map') {
-    return target(dashboard, 'update', match.dashlet, 'push_map');
+    return updateTarget(dashboard, match.dashlet, 'push_map');
   }
 
   if (match.kind === 'name') {
-    return target(dashboard, 'update', match.dashlet, 'name');
+    return updateTarget(dashboard, match.dashlet, 'name');
   }
 
   return failure(
@@ -723,7 +676,7 @@ async function resolveRemembered(
   }
 
   if (options.create) {
-    return target(dashboard, 'create', undefined, 'remembered');
+    return createTarget(dashboard, 'remembered');
   }
 
   const dashlet = dashboard.dashlets.find(
@@ -731,7 +684,7 @@ async function resolveRemembered(
   );
 
   if (dashlet && isCustomCodeDashlet(dashlet)) {
-    return target(dashboard, 'update', dashlet, 'remembered');
+    return updateTarget(dashboard, dashlet, 'remembered');
   }
 
   return failure(
@@ -787,18 +740,24 @@ export interface PushSummary {
   viewsBytes?: number;
 }
 
-export interface PushPlan {
-  action: 'create' | 'update';
-  method: 'POST' | 'PATCH';
-  path: string;
-  body: CreateDashletBody | UpdateDashletBody;
+type PushPlanAction =
+  | { action: 'create'; method: 'POST'; path: string; body: CreateDashletBody; dashletId: null }
+  | {
+      action: 'update';
+      method: 'PATCH';
+      path: string;
+      body: UpdateDashletBody;
+      dashletId: string;
+    };
+
+/** An update always carries the dashlet id it PATCHes; a create carries null. */
+export type PushPlan = PushPlanAction & {
   dashboard: { id: string; name: string; type: Surface };
-  dashletId: string | null;
   url: string;
   resolvedBy: ResolvedBy;
   summary: PushSummary;
   warnings: string[];
-}
+};
 
 async function customObjectOf(
   client: KizenClient,
@@ -834,8 +793,6 @@ async function customObjectOf(
   }
 }
 
-const segment = encodeURIComponent;
-
 export async function buildPlan(
   context: PushContext,
   resolved: ResolvedTarget,
@@ -843,16 +800,13 @@ export async function buildPlan(
   deps: Pick<PushDeps, 'randomUUID'>,
 ): Promise<Step<PushPlan>> {
   const { credentials, block } = context;
-  const { dashboard, surface, dashlet } = resolved;
+  const { dashboard, surface } = resolved;
   const warnings: string[] = [];
-  let body: CreateDashletBody | UpdateDashletBody;
-  let path: string;
+  let planAction: PushPlanAction;
   let actionLine: string;
 
   if (resolved.action === 'update') {
-    if (!dashlet) {
-      return failure('usage_error', 'An update needs a dashlet to update.');
-    }
+    const { dashlet } = resolved;
 
     if (detectDrift(dashlet, context.entry)) {
       const drift = `"${customCodeName(dashlet)}" (dashlet ${dashlet.id}) was changed in Kizen since the last push.`;
@@ -867,23 +821,32 @@ export async function buildPlan(
       warnings.push(`${drift} Overwriting it because of --force.`);
     }
 
-    body = buildUpdateBody(dashlet, block.content);
-    path = `/dashboards/${segment(dashboard.id)}/dashlet/${segment(dashlet.id)}`;
+    planAction = {
+      action: 'update',
+      method: 'PATCH',
+      path: dashletPath(dashboard.id, dashlet.id),
+      body: buildUpdateBody(dashlet, block.content),
+      dashletId: dashlet.id,
+    };
     actionLine = `Update "${customCodeName(dashlet)}" (dashlet ${dashlet.id})`;
   } else {
-    body = buildCreateBody({
-      pluginApiName: block.pluginApiName,
-      blockApiName: block.block.api_name,
-      content: block.content,
-      dashlets: dashboard.dashlets,
-      objectId: deps.randomUUID(),
-      layoutId: deps.randomUUID(),
-    });
-    path = `/dashboards/${segment(dashboard.id)}/dashlet`;
+    planAction = {
+      action: 'create',
+      method: 'POST',
+      path: dashletPath(dashboard.id),
+      body: buildCreateBody({
+        pluginApiName: block.pluginApiName,
+        blockApiName: block.block.api_name,
+        content: block.content,
+        dashlets: dashboard.dashlets,
+        objectId: deps.randomUUID(),
+        layoutId: deps.randomUUID(),
+      }),
+      dashletId: null,
+    };
     actionLine = `Create a new block on "${dashboard.name}"`;
   }
 
-  const dashletId = resolved.action === 'update' && dashlet ? dashlet.id : null;
   const url = buildDashboardUrl({
     appBaseUrl: APP_URLS[credentials.environment],
     surface,
@@ -892,12 +855,8 @@ export async function buildPlan(
   });
 
   return success({
-    action: resolved.action,
-    method: resolved.action === 'update' ? 'PATCH' : 'POST',
-    path,
-    body,
+    ...planAction,
     dashboard: { id: dashboard.id, name: dashboard.name, type: surface },
-    dashletId,
     url,
     resolvedBy: resolved.resolvedBy,
     warnings,
@@ -910,7 +869,7 @@ export async function buildPlan(
       dashboardName: dashboard.name,
       action: resolved.action,
       actionLine,
-      dashletId,
+      dashletId: planAction.dashletId,
       blockName: block.block.name,
       blockApiName: block.block.api_name,
       pluginApiName: block.pluginApiName,
@@ -945,10 +904,7 @@ export async function applyPlan(
 
   try {
     if (plan.action === 'create') {
-      const created = await context.client.createDashlet(
-        plan.dashboard.id,
-        plan.body as CreateDashletBody,
-      );
+      const created = await context.client.createDashlet(plan.dashboard.id, plan.body);
 
       const createdId: unknown = created.id;
 
@@ -961,10 +917,6 @@ export async function applyPlan(
 
       dashletId = createdId;
     } else {
-      if (plan.dashletId === null) {
-        return failure('usage_error', 'An update needs a dashlet to update.');
-      }
-
       await context.client.updateDashlet(plan.dashboard.id, plan.dashletId, plan.body);
       dashletId = plan.dashletId;
     }
@@ -1013,19 +965,52 @@ export function buildBrowserRefresh(dashboardId: string): BrowserRefresh | null 
   };
 }
 
+/** Removes this block's remembered target; returns the written entries, or null if none was remembered. */
 export async function forgetRemembered(
   context: Pick<PushContext, 'credentials' | 'block' | 'pushMap'>,
   deps: Pick<PushDeps, 'cwd' | 'writePushMap'>,
-): Promise<boolean> {
+): Promise<PushMapEntry[] | null> {
   const key = pushMapKeyOf(context);
 
   if (!findPushMapEntry(context.pushMap, key)) {
-    return false;
+    return null;
   }
 
-  await deps.writePushMap(deps.cwd, removePushMapEntry(context.pushMap, key));
+  const remaining = removePushMapEntry(context.pushMap, key);
 
-  return true;
+  await deps.writePushMap(deps.cwd, remaining);
+
+  return remaining;
+}
+
+/** Reads the push map, applies --forget, and finds this block's remembered target. */
+export async function loadPushContext(
+  args: { client: KizenClient; credentials: Credentials; block: ResolvedBlock; forget?: boolean },
+  deps: Pick<PushDeps, 'cwd' | 'readPushMap' | 'writePushMap'>,
+): Promise<{ context: PushContext; forgotten: boolean }> {
+  const { client, credentials, block } = args;
+  let pushMap = await deps.readPushMap(deps.cwd);
+  let forgotten = false;
+
+  if (args.forget) {
+    const remaining = await forgetRemembered({ credentials, block, pushMap }, deps);
+
+    if (remaining) {
+      pushMap = remaining;
+      forgotten = true;
+    }
+  }
+
+  return {
+    context: {
+      client,
+      credentials,
+      block,
+      pushMap,
+      entry: findPushMapEntry(pushMap, pushMapKeyOf({ credentials, block })),
+    },
+    forgotten,
+  };
 }
 
 export type WriteGate = { kind: 'dry-run'; reason: 'flag' | 'no_yes' } | { kind: 'apply' };
@@ -1053,6 +1038,9 @@ export function headlessWriteGate(
 }
 
 export const DRY_RUN_NOTE = 'Dry run only: pass --yes to write.';
+
+export const warningLines = (warnings: readonly string[]): string[] =>
+  warnings.map((warning) => `Warning: ${warning}`);
 
 export function formatSummaryLines(summary: PushSummary): string[] {
   return [
@@ -1113,6 +1101,16 @@ function writeFailure(
   }
 
   output.deps.setExitCode(1);
+}
+
+// --json puts the result on stdout and the human-readable lines on stderr.
+function writeResult(output: Output, result: unknown, text: string, jsonText = text): void {
+  if (output.json) {
+    output.deps.writeStdout(`${JSON.stringify(result, null, 2)}\n`);
+    output.deps.writeStderr(jsonText);
+  } else {
+    output.deps.writeStdout(text);
+  }
 }
 
 const credentialArgs = (options: { credentials?: string; profile?: string }): string[] => {
@@ -1182,22 +1180,14 @@ export async function runPushHeadless(
       deps.writeStderr(`${formatValidationIssues(block.warnings)}\n`);
     }
 
-    const context: PushContext = { client, credentials, block, pushMap: [], entry: undefined };
+    const { context, forgotten } = await loadPushContext(
+      { client, credentials, block, forget: options.forget === true },
+      deps,
+    );
 
-    context.pushMap = await deps.readPushMap(deps.cwd);
-
-    let forgotten = false;
-
-    if (options.forget) {
-      forgotten = await forgetRemembered(context, deps);
-
-      if (forgotten) {
-        context.pushMap = removePushMapEntry(context.pushMap, pushMapKeyOf(context));
-        deps.writeStderr(`Forgot the remembered target for ${block.block.api_name}.\n`);
-      }
+    if (forgotten) {
+      deps.writeStderr(`Forgot the remembered target for ${block.block.api_name}.\n`);
     }
-
-    context.entry = findPushMapEntry(context.pushMap, pushMapKeyOf(context));
 
     const targetStep = await resolveTarget(context, options);
 
@@ -1260,26 +1250,20 @@ export async function runPushHeadless(
         ...(forgotten ? { forgotten: true as const } : {}),
       };
 
-      if (output.json) {
-        deps.writeStdout(`${JSON.stringify(result, null, 2)}\n`);
-        deps.writeStderr(
-          [...formatSummaryLines(plan.summary), ...warnings.map((w) => `Warning: ${w}`), ''].join(
-            '\n',
-          ),
-        );
-      } else {
-        deps.writeStdout(
-          [
-            ...formatSummaryLines(plan.summary),
-            `URL: ${plan.url}`,
-            ...warnings.map((warning) => `Warning: ${warning}`),
-            '',
-            `${plan.method} ${plan.path}`,
-            JSON.stringify(plan.body, null, 2),
-            '',
-          ].join('\n'),
-        );
-      }
+      writeResult(
+        output,
+        result,
+        [
+          ...formatSummaryLines(plan.summary),
+          `URL: ${plan.url}`,
+          ...warningLines(warnings),
+          '',
+          `${plan.method} ${plan.path}`,
+          JSON.stringify(plan.body, null, 2),
+          '',
+        ].join('\n'),
+        [...formatSummaryLines(plan.summary), ...warningLines(warnings), ''].join('\n'),
+      );
 
       if (gate.reason === 'no_yes') {
         deps.writeStderr(`${DRY_RUN_NOTE}\n`);
@@ -1315,21 +1299,18 @@ export async function runPushHeadless(
       ...(forgotten ? { forgotten: true as const } : {}),
     };
 
-    const text = [
-      `✓ ${result.action === 'created' ? 'Created' : 'Updated'} ${block.block.name} on "${plan.dashboard.name}" (dashlet ${applied.dashletId})`,
-      ...formatSummaryLines(plan.summary),
-      `URL: ${plan.url}`,
-      ...(refresh ? [`Refresh an open tab: ${refresh.script}`] : []),
-      ...warnings.map((warning) => `Warning: ${warning}`),
-      '',
-    ].join('\n');
-
-    if (output.json) {
-      deps.writeStdout(`${JSON.stringify(result, null, 2)}\n`);
-      deps.writeStderr(text);
-    } else {
-      deps.writeStdout(text);
-    }
+    writeResult(
+      output,
+      result,
+      [
+        `✓ ${result.action === 'created' ? 'Created' : 'Updated'} ${block.block.name} on "${plan.dashboard.name}" (dashlet ${applied.dashletId})`,
+        ...formatSummaryLines(plan.summary),
+        `URL: ${plan.url}`,
+        ...(refresh ? [`Refresh an open tab: ${refresh.script}`] : []),
+        ...warningLines(warnings),
+        '',
+      ].join('\n'),
+    );
   } catch (error) {
     fail(apiFailure(error));
   }

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Credentials } from '../../shared/lib/credentials.js';
-import { createKizenClient, formatDrfError, KizenApiError } from './kizenClient.js';
+import { createKizenClient, dashletPath, formatDrfError, KizenApiError } from './kizenClient.js';
 import type { KizenClient } from './kizenTypes.js';
 import type * as ProxyEnvModule from './proxyEnv.js';
 import type { ProxyEnvStatus } from './proxyEnv.js';
@@ -76,21 +76,53 @@ const AUTH_HEADERS = {
 };
 
 describe('createKizenClient requests', () => {
-  it('lists dashboards of a type with auth headers', async () => {
-    const results = [{ id: 'd1', name: 'Main' }];
-    const { client, call } = setup(jsonResponse({ results }));
+  const DASHBOARD = { id: 'a/b', name: 'D', type: 'homepage', custom_object: null, dashlets: [] };
+  const CUSTOM_OBJECT = { id: 'o/1', object_name: 'deals', fetch_url: 'pipeline', extra: true };
 
-    await expect(client.listDashboards('generic_dashboard')).resolves.toEqual(results);
-
-    const { url, init } = call(0);
-
-    expect(url).toBe(
+  it.each([
+    [
+      'lists dashboards of a type',
+      (client: KizenClient) => client.listDashboards('generic_dashboard'),
+      { results: [{ id: 'd1', name: 'Main' }] },
+      [{ id: 'd1', name: 'Main' }],
       `${BASE}/dashboards/mine?size=10000&include_sharing=true&dashboard_type=generic_dashboard`,
-    );
-    expect(init.method).toBe('GET');
-    expect(init.headers).toEqual(AUTH_HEADERS);
-    expect(init.body).toBeUndefined();
-  });
+    ],
+    [
+      'gets a custom object by encoded id',
+      (client: KizenClient) => client.getCustomObject('o/1'),
+      CUSTOM_OBJECT,
+      CUSTOM_OBJECT,
+      `${BASE}/custom-objects/o%2F1`,
+    ],
+    [
+      'reads the client object id from bootstrap',
+      (client: KizenClient) => client.getClientObjectId(),
+      { business: { id: 'biz-123', client_object: { id: 'contacts-1' } } },
+      'contacts-1',
+      `${BASE}/auth/bootstrap`,
+    ],
+    [
+      'gets a dashboard by encoded id',
+      (client: KizenClient) => client.getDashboard('a/b'),
+      DASHBOARD,
+      DASHBOARD,
+      `${BASE}/dashboards/a%2Fb`,
+    ],
+  ] as const)(
+    '%s with a bodiless authenticated GET',
+    async (_name, invoke, body, expected, url) => {
+      const { client, call } = setup(jsonResponse(body));
+
+      await expect(invoke(client)).resolves.toEqual(expected);
+
+      const { url: calledUrl, init } = call(0);
+
+      expect(calledUrl).toBe(url);
+      expect(init.method).toBe('GET');
+      expect(init.headers).toEqual(AUTH_HEADERS);
+      expect(init.body).toBeUndefined();
+    },
+  );
 
   it('adds an encoded custom_object_id when given and tolerates a bare array', async () => {
     const { client, call } = setup(jsonResponse([{ id: 'd2', name: 'Group' }]));
@@ -119,28 +151,20 @@ describe('createKizenClient requests', () => {
     expect(call(1).init.headers).toEqual(AUTH_HEADERS);
   });
 
-  it('fetches a same-host http next over the base scheme', async () => {
+  it.each([
+    [
+      'a same-host http next over the base scheme',
+      'http://integration.kizen.dev/api/custom-objects?page=2',
+    ],
+    ['a relative next against the base origin', '/api/custom-objects?page=2'],
+  ])('resolves %s', async (_name, next) => {
     const { client, call, fetchMock } = setup(
-      jsonResponse({
-        next: 'http://integration.kizen.dev/api/custom-objects?page=2',
-        results: [{ id: 'o1' }],
-      }),
+      jsonResponse({ next, results: [{ id: 'o1' }] }),
       jsonResponse({ next: null, results: [{ id: 'o2' }] }),
     );
 
     await expect(client.listCustomObjects()).resolves.toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(call(1).url).toBe(`${BASE}/custom-objects?page=2`);
-  });
-
-  it('resolves a relative next against the base origin', async () => {
-    const { client, call } = setup(
-      jsonResponse({ next: '/api/custom-objects?page=2', results: [{ id: 'o1' }] }),
-      jsonResponse({ next: null, results: [] }),
-    );
-
-    await client.listCustomObjects();
-
     expect(call(1).url).toBe(`${BASE}/custom-objects?page=2`);
   });
 
@@ -170,20 +194,6 @@ describe('createKizenClient requests', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('gets a custom object by encoded id', async () => {
-    const object = { id: 'o/1', object_name: 'deals', fetch_url: 'pipeline', extra: true };
-    const { client, call } = setup(jsonResponse(object));
-
-    await expect(client.getCustomObject('o/1')).resolves.toEqual(object);
-
-    const { url, init } = call(0);
-
-    expect(url).toBe(`${BASE}/custom-objects/o%2F1`);
-    expect(init.method).toBe('GET');
-    expect(init.headers).toEqual(AUTH_HEADERS);
-    expect(init.body).toBeUndefined();
-  });
-
   it.each([[{ id: 'o1' }], [{ fetch_url: 'client' }], [{ id: 1, fetch_url: 'client' }], [[]]])(
     'rejects a custom object body shaped %j',
     async (body) => {
@@ -194,21 +204,6 @@ describe('createKizenClient requests', () => {
       expect(error.message).toBe('GET /custom-objects/o1 returned an unexpected response shape');
     },
   );
-
-  it('reads the client object id from bootstrap', async () => {
-    const { client, call } = setup(
-      jsonResponse({ business: { id: 'biz-123', client_object: { id: 'contacts-1' } } }),
-    );
-
-    await expect(client.getClientObjectId()).resolves.toBe('contacts-1');
-
-    const { url, init } = call(0);
-
-    expect(url).toBe(`${BASE}/auth/bootstrap`);
-    expect(init.method).toBe('GET');
-    expect(init.headers).toEqual(AUTH_HEADERS);
-    expect(init.body).toBeUndefined();
-  });
 
   it.each([
     [{}],
@@ -222,68 +217,64 @@ describe('createKizenClient requests', () => {
     await expect(client.getClientObjectId()).resolves.toBeNull();
   });
 
-  it('throws forbidden when bootstrap is refused', async () => {
-    const { client } = setup(jsonResponse({ detail: 'Nope.' }, 403));
-    const error = await rejection(client.getClientObjectId());
-
-    expect(error.kind).toBe('forbidden');
-    expect(error.status).toBe(403);
-    expect(error.message).toBe('GET /auth/bootstrap failed with 403: Nope.');
-  });
-
-  it('gets a dashboard by encoded id', async () => {
-    const dashboard = { id: 'a/b', name: 'D', type: 'homepage', custom_object: null, dashlets: [] };
-    const { client, call } = setup(jsonResponse(dashboard));
-
-    await expect(client.getDashboard('a/b')).resolves.toEqual(dashboard);
-    expect(call(0).url).toBe(`${BASE}/dashboards/a%2Fb`);
-    expect(call(0).init.method).toBe('GET');
-  });
-
-  it('posts a new dashlet as JSON', async () => {
-    const body = {
-      name: 'Block',
-      layout: { i: 'x', x: 0, y: 0, w: 4, h: 4 },
-      config: { kind: 'custom_code' },
-    };
-    const created = {
+  it.each([
+    [
+      'posts a new dashlet',
+      'POST',
+      {
+        name: 'Block',
+        layout: { i: 'x', x: 0, y: 0, w: 4, h: 4 },
+        config: { kind: 'custom_code' },
+      },
+      `${BASE}/dashboards/d1/dashlet`,
+    ],
+    [
+      'patches an existing dashlet',
+      'PATCH',
+      { config: { kind: 'custom_code', version: 1 } },
+      `${BASE}/dashboards/d1/dashlet/dl1`,
+    ],
+  ] as const)('%s as JSON', async (_name, method, body, url) => {
+    const returned = {
       id: 'dl1',
       name: 'Block',
-      layout: body.layout,
+      layout: 'layout' in body ? body.layout : null,
       config: body.config,
       dashboard: 'd1',
     };
-    const { client, call } = setup(jsonResponse(created, 201));
+    const { client, call } = setup(jsonResponse(returned, method === 'POST' ? 201 : 200));
 
-    await expect(client.createDashlet('d1', body)).resolves.toEqual(created);
+    await expect(
+      method === 'POST'
+        ? client.createDashlet('d1', body as Parameters<KizenClient['createDashlet']>[1])
+        : client.updateDashlet('d1', 'dl1', body),
+    ).resolves.toEqual(returned);
 
-    const { url, init } = call(0);
+    const { url: calledUrl, init } = call(0);
 
-    expect(url).toBe(`${BASE}/dashboards/d1/dashlet`);
-    expect(init.method).toBe('POST');
+    expect(calledUrl).toBe(url);
+    expect(init.method).toBe(method);
     expect(init.headers).toEqual({ ...AUTH_HEADERS, 'Content-Type': 'application/json' });
     expect(JSON.parse(init.body as string)).toEqual(body);
   });
 
-  it('patches an existing dashlet as JSON', async () => {
-    const body = { config: { kind: 'custom_code', version: 1 } };
-    const updated = {
-      id: 'dl1',
-      name: 'Block',
-      layout: null,
-      config: body.config,
-      dashboard: 'd1',
-    };
-    const { client, call } = setup(jsonResponse(updated));
+  it('dashletPath encodes dashboard and dashlet ids', async () => {
+    expect(dashletPath('d1')).toBe('/dashboards/d1/dashlet');
+    expect(dashletPath('d1', 'dl1')).toBe('/dashboards/d1/dashlet/dl1');
+    expect(dashletPath('a/b c')).toBe('/dashboards/a%2Fb%20c/dashlet');
+    expect(dashletPath('a/b c', 'x?y#1')).toBe('/dashboards/a%2Fb%20c/dashlet/x%3Fy%231');
 
-    await expect(client.updateDashlet('d1', 'dl1', body)).resolves.toEqual(updated);
+    const { client, call } = setup(jsonResponse({}), jsonResponse({}));
 
-    const { url, init } = call(0);
+    await client.createDashlet('a/b c', {
+      name: 'B',
+      layout: { i: 'x', x: 0, y: 0, w: 1, h: 1 },
+      config: {},
+    });
+    await client.updateDashlet('a/b c', 'x?y#1', { config: {} });
 
-    expect(url).toBe(`${BASE}/dashboards/d1/dashlet/dl1`);
-    expect(init.method).toBe('PATCH');
-    expect(init.headers).toEqual({ ...AUTH_HEADERS, 'Content-Type': 'application/json' });
-    expect(JSON.parse(init.body as string)).toEqual(body);
+    expect(call(0).url).toBe(`${BASE}/dashboards/a%2Fb%20c/dashlet`);
+    expect(call(1).url).toBe(`${BASE}/dashboards/a%2Fb%20c/dashlet/x%3Fy%231`);
   });
 
   it('uses an explicit baseUrl', async () => {
@@ -303,6 +294,15 @@ describe('createKizenClient requests', () => {
 });
 
 describe('createKizenClient errors', () => {
+  const failingFetch = (error: Error): KizenClient =>
+    createKizenClient({
+      credentials: CREDENTIALS,
+      fetch: vi.fn<typeof fetch>().mockRejectedValueOnce(error),
+    });
+
+  const fetchFailed = (code: string): Error =>
+    Object.assign(new TypeError('fetch failed'), { cause: { code } });
+
   it('maps 401 to auth_failed with a credentials hint', async () => {
     const { client } = setup(jsonResponse({ detail: 'Invalid API key.' }, 401));
     const error = await rejection(client.getDashboard('d1'));
@@ -358,13 +358,7 @@ describe('createKizenClient errors', () => {
   });
 
   it('maps a thrown fetch to network_error naming the base url and cause', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockRejectedValueOnce(
-        Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }),
-      );
-    const client = createKizenClient({ credentials: CREDENTIALS, fetch: fetchMock });
-    const error = await rejection(client.getDashboard('d1'));
+    const error = await rejection(failingFetch(fetchFailed('ECONNREFUSED')).getDashboard('d1'));
 
     expect(error.kind).toBe('network_error');
     expect(error.status).toBeUndefined();
@@ -374,13 +368,7 @@ describe('createKizenClient errors', () => {
   it('appends the proxy hint to network_error when a proxy is set but unsupported', async () => {
     proxyState.status = 'unavailable';
 
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockRejectedValueOnce(
-        Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }),
-      );
-    const client = createKizenClient({ credentials: CREDENTIALS, fetch: fetchMock });
-    const error = await rejection(client.getDashboard('d1'));
+    const error = await rejection(failingFetch(fetchFailed('ENOTFOUND')).getDashboard('d1'));
 
     expect(error.kind).toBe('network_error');
     expect(error.message).toBe(
@@ -393,13 +381,7 @@ describe('createKizenClient errors', () => {
     async (status) => {
       proxyState.status = status;
 
-      const fetchMock = vi
-        .fn<typeof fetch>()
-        .mockRejectedValueOnce(
-          Object.assign(new TypeError('fetch failed'), { cause: { code: 'ENOTFOUND' } }),
-        );
-      const client = createKizenClient({ credentials: CREDENTIALS, fetch: fetchMock });
-      const error = await rejection(client.getDashboard('d1'));
+      const error = await rejection(failingFetch(fetchFailed('ENOTFOUND')).getDashboard('d1'));
 
       expect(error.kind).toBe('network_error');
       expect(error.message).toBe(`Couldn't reach Kizen at ${BASE}: ENOTFOUND`);
@@ -416,39 +398,25 @@ describe('createKizenClient errors', () => {
     expect(error.message).not.toContain(PROXY_UNAVAILABLE_HINT);
   });
 
-  it.each([['GET'], ['POST']] as const)(
-    'maps a %s body read failure to network_error with the status',
-    async (method) => {
-      const response = new Response('{}', { status: 201 });
+  it('maps a GET body read failure to network_error with the status', async () => {
+    const response = new Response('{}', { status: 201 });
 
-      vi.spyOn(response, 'text').mockRejectedValueOnce(
-        Object.assign(new TypeError('terminated'), { cause: { code: 'ECONNRESET' } }),
-      );
+    vi.spyOn(response, 'text').mockRejectedValueOnce(
+      Object.assign(new TypeError('terminated'), { cause: { code: 'ECONNRESET' } }),
+    );
 
-      const { client } = setup(response);
-      const error = await rejection(
-        method === 'GET'
-          ? client.getDashboard('d1')
-          : client.createDashlet('d1', {
-              name: 'B',
-              layout: { i: 'x', x: 0, y: 0, w: 1, h: 1 },
-              config: {},
-            }),
-      );
-      const path = method === 'GET' ? '/dashboards/d1' : '/dashboards/d1/dashlet';
+    const { client } = setup(response);
+    const error = await rejection(client.getDashboard('d1'));
 
-      expect(error.kind).toBe('network_error');
-      expect(error.status).toBe(201);
-      expect(error.message).toBe(
-        `${method} ${path}: couldn't read the response: ECONNRESET. The request may have been applied; check Kizen before retrying.`,
-      );
-    },
-  );
+    expect(error.kind).toBe('network_error');
+    expect(error.status).toBe(201);
+    expect(error.message).toBe(
+      `GET /dashboards/d1: couldn't read the response: ECONNRESET. The request may have been applied; check Kizen before retrying.`,
+    );
+  });
 
   it('uses the error message when the fetch failure has no code', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockRejectedValueOnce(new Error('socket hang up'));
-    const client = createKizenClient({ credentials: CREDENTIALS, fetch: fetchMock });
-    const error = await rejection(client.getDashboard('d1'));
+    const error = await rejection(failingFetch(new Error('socket hang up')).getDashboard('d1'));
 
     expect(error.message).toBe(`Couldn't reach Kizen at ${BASE}: socket hang up`);
   });

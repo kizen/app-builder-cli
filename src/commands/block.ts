@@ -14,12 +14,20 @@ import {
 } from '../lib/pushHeadless.js';
 import { PushUI } from '../ui/PushUI.js';
 
+const errorLine = (error: unknown): string =>
+  `Error: ${error instanceof Error ? error.message : String(error)}`;
+
 const describeError = (error: unknown): string => {
   if (error instanceof PluginValidationError) {
     return formatValidationIssues(error.issues);
   }
 
-  return `Error: ${error instanceof Error ? error.message : String(error)}`;
+  return errorLine(error);
+};
+
+const fail = (error: unknown): void => {
+  console.error(errorLine(error));
+  process.exitCode = 1;
 };
 
 export function blockCommand(program: Command): void {
@@ -89,8 +97,7 @@ export function blockCommand(program: Command): void {
 
         await waitUntilExit();
       } catch (error) {
-        console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-        process.exitCode = 1;
+        fail(error);
       }
     });
 
@@ -105,8 +112,7 @@ export function blockCommand(program: Command): void {
       try {
         await runTargetsHeadless(options, createDefaultPushDeps(process.cwd()));
       } catch (error) {
-        console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-        process.exitCode = 1;
+        fail(error);
       }
     });
 }

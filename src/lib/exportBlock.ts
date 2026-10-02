@@ -11,7 +11,8 @@ import type {
   RoutablePage,
   ValidationIssue,
 } from '@kizenapps/packager';
-import type { CustomCodeView } from './kizenTypes.js';
+import { isRecord, normalizeEntryDir } from './guards.js';
+import { BLOCK_SIZE_FIELDS, type CustomCodeView } from './kizenTypes.js';
 import { toCustomCodeViews } from './pushBlock.js';
 import { packageLocalPlugin } from './runBuild.js';
 
@@ -61,9 +62,7 @@ type DefaultSizeField = keyof typeof DEFAULT_SIZE_BOUNDS;
 
 const DEFAULT_SIZE_FIELDS = Object.keys(DEFAULT_SIZE_BOUNDS) as DefaultSizeField[];
 
-const SIZE_FIELDS = [...DIMENSION_FIELDS, ...DEFAULT_SIZE_FIELDS] as const;
-
-const AUTHORED_FIELDS = [...SIZE_FIELDS, 'host_chrome'] as const;
+const AUTHORED_FIELDS = [...BLOCK_SIZE_FIELDS, 'host_chrome'] as const;
 
 type AuthoredField = (typeof AUTHORED_FIELDS)[number];
 
@@ -139,9 +138,6 @@ export function selectBlock(deployable: DeployablePlugin[], apiName?: string): B
 
   return { ok: true, ...match };
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
 
 const isPositiveInteger = (value: unknown): boolean =>
   typeof value === 'number' && Number.isInteger(value) && value > 0;
@@ -315,36 +311,26 @@ export const invalidBlockMessage = (apiName: string, field: string): string => {
   return `Block "${apiName}" has an invalid ${field}: it must be a string without NUL characters or "{__ref:".`;
 };
 
-export const selectionError = (
-  selection: Extract<BlockSelection, { ok: false }>,
+export type BlockSelectionVerb = 'export' | 'push';
+
+const selectionMessage = (
+  { reason, available }: Extract<BlockSelection, { ok: false }>,
   apiName: string | undefined,
-): BlockExportError => {
-  const { reason, available } = selection;
+  verb: BlockSelectionVerb,
+): string => {
   const list = formatAvailableBlocks(available);
 
   if (reason === 'no_blocks') {
-    return new BlockExportError(
-      reason,
-      'This plugin has no blocks. Scaffold one with `appbuilder create --artifacts block`.',
-      { available },
-    );
+    return 'This plugin has no blocks. Scaffold one with `appbuilder create --artifacts block`.';
   }
 
   if (reason === 'not_found') {
-    return new BlockExportError(
-      reason,
-      `No block with api_name "${apiName ?? ''}". Available blocks: ${list}`,
-      { available },
-    );
+    return `No block with api_name "${apiName ?? ''}". Available blocks: ${list}`;
   }
 
-  return new BlockExportError(
-    reason,
-    apiName === undefined
-      ? `This plugin has several blocks; pass the api_name of the one to export: ${list}`
-      : `More than one plugin has a block with api_name "${apiName}": ${list}`,
-    { available },
-  );
+  return apiName === undefined
+    ? `This plugin has several blocks; pass the api_name of the one to ${verb}: ${list}`
+    : `More than one plugin has a block with api_name "${apiName}": ${list}`;
 };
 
 const parseJsonRecord = (content: string): Record<string, unknown> | undefined => {
@@ -376,34 +362,70 @@ const manifestEntries = (files: readonly FileContent[]): Map<string, string> => 
   return entries;
 };
 
-const authoredBlockConfig = (
+// The root-relative directory of one component kind under a plugin entry, e.g.
+// "src/blocks". An entry of "", "." or "./" is the plugin root.
+const componentRoot = (entry: string, dirName: string): string => {
+  const entryDir = normalizeEntryDir(entry);
+
+  return entryDir === '' ? dirName : `${entryDir}/${dirName}`;
+};
+
+interface ComponentDirectories {
+  /** Every component directory with at least one file, .DS_Store aside. */
+  directories: Set<string>;
+  /** Each directory's parsed config.json, in file order. */
+  configs: [directory: string, config: Record<string, unknown>][];
+}
+
+const componentDirectories = (
   files: readonly FileContent[],
   entry: string,
-): Map<string, Partial<Record<AuthoredField, unknown>>> => {
-  const prefix = `${entry.replace(/\/+$/, '')}/${BLOCKS_DIRECTORY_NAME}/`;
-  const authoredByApiName = new Map<string, Partial<Record<AuthoredField, unknown>>>();
+  dirName: string,
+): ComponentDirectories => {
+  const prefix = `${componentRoot(entry, dirName)}/`;
+  const directories = new Set<string>();
+  const configs: ComponentDirectories['configs'] = [];
 
   for (const file of files) {
-    if (!file.path.startsWith(prefix)) {
+    if (!file.path.startsWith(prefix) || file.path.endsWith('.DS_Store')) {
       continue;
     }
 
     const [directory, fileName, ...rest] = file.path.slice(prefix.length).split('/');
 
-    if (!directory || fileName !== CONFIG_FILE_NAME || rest.length > 0) {
+    if (!directory) {
       continue;
     }
 
-    const config = parseJsonRecord(file.content);
+    directories.add(directory);
 
-    if (!config) {
-      continue;
+    if (fileName === CONFIG_FILE_NAME && rest.length === 0) {
+      const config = parseJsonRecord(file.content);
+
+      if (config) {
+        configs.push([directory, config]);
+      }
     }
+  }
 
-    const apiName =
-      typeof config.api_name === 'string' && config.api_name !== ''
-        ? config.api_name
-        : sanitizeToAPIName(directory);
+  return { directories, configs };
+};
+
+// The packager's api_name for a component: config.api_name, else the sanitized directory.
+const componentApiName = (config: Record<string, unknown>, directory: string): string =>
+  typeof config.api_name === 'string' && config.api_name !== ''
+    ? config.api_name
+    : sanitizeToAPIName(directory);
+
+const authoredBlockConfig = (
+  files: readonly FileContent[],
+  entry: string,
+): Map<string, Partial<Record<AuthoredField, unknown>>> => {
+  const authoredByApiName = new Map<string, Partial<Record<AuthoredField, unknown>>>();
+
+  for (const [directory, config] of componentDirectories(files, entry, BLOCKS_DIRECTORY_NAME)
+    .configs) {
+    const apiName = componentApiName(config, directory);
     const authored: Partial<Record<AuthoredField, unknown>> = {};
 
     for (const field of AUTHORED_FIELDS) {
@@ -461,42 +483,14 @@ const viewKey = (apiName: unknown, name: unknown): string =>
 // source marker, so rebuild each view's packaged (api_name, name) from the
 // source tree the same way the packager does and match on that pair.
 const authoredViewKeys = (files: readonly FileContent[], entry: string): Set<string> => {
-  const prefix = `${entry.replace(/\/+$/, '')}/${VIEWS_DIRECTORY_NAME}/`;
-  const configs = new Map<string, Record<string, unknown>>();
-  const directories = new Set<string>();
-
-  for (const file of files) {
-    if (!file.path.startsWith(prefix) || file.path.endsWith('.DS_Store')) {
-      continue;
-    }
-
-    const [directory, fileName, ...rest] = file.path.slice(prefix.length).split('/');
-
-    if (!directory) {
-      continue;
-    }
-
-    directories.add(directory);
-
-    if (fileName === CONFIG_FILE_NAME && rest.length === 0) {
-      const config = parseJsonRecord(file.content);
-
-      if (config) {
-        configs.set(directory, config);
-      }
-    }
-  }
-
+  const { directories, configs } = componentDirectories(files, entry, VIEWS_DIRECTORY_NAME);
+  const configByDirectory = new Map(configs);
   const keys = new Set<string>();
 
   for (const directory of directories) {
-    const config = configs.get(directory) ?? {};
-    const apiName =
-      typeof config.api_name === 'string' && config.api_name !== ''
-        ? config.api_name
-        : sanitizeToAPIName(directory);
+    const config = configByDirectory.get(directory) ?? {};
 
-    keys.add(viewKey(apiName, config.name || directory));
+    keys.add(viewKey(componentApiName(config, directory), config.name || directory));
   }
 
   return keys;
@@ -530,7 +524,7 @@ export function collectViews(
         rule: VIEWS_UNMATCHED_RULE,
         severity: 'warning',
         message: `Found ${String(keys.size)} ${VIEWS_DIRECTORY_NAME}/ components but matched ${String(matched.length)} packaged views; the pushed block carries only the matched ones.`,
-        path: `${entry.replace(/\/+$/, '')}/${VIEWS_DIRECTORY_NAME}`,
+        path: componentRoot(entry, VIEWS_DIRECTORY_NAME),
         pluginApiName: plugin.api_name,
       });
     }
@@ -561,39 +555,78 @@ export async function packageBlocks(pluginDir: string): Promise<PackagedBlocks> 
   };
 }
 
-export async function exportBlock(pluginDir: string, apiName?: string): Promise<ExportedBlock> {
-  const { deployable, views, warnings } = await packageBlocks(pluginDir);
+export type PackagedBlockResolution =
+  | { ok: true; value: ExportedBlock }
+  | {
+      ok: false;
+      reason: BlockExportReason;
+      message: string;
+      available: AvailableBlock[];
+      field?: string;
+    };
+
+/**
+ * Selects one block from packaged plugins and validates it and its plugin's views.
+ * `verb` only changes the "several blocks" message ("one to export" / "one to push").
+ */
+export function resolvePackagedBlock(
+  { deployable, views, warnings }: PackagedBlocks,
+  apiName: string | undefined,
+  verb: BlockSelectionVerb,
+): PackagedBlockResolution {
   const selection = selectBlock(deployable, apiName);
 
   if (!selection.ok) {
-    throw selectionError(selection, apiName);
+    return {
+      ok: false,
+      reason: selection.reason,
+      message: selectionMessage(selection, apiName, verb),
+      available: selection.available,
+    };
   }
 
   const invalidField = findInvalidBlockField(selection.block);
 
   if (invalidField !== undefined) {
-    throw new BlockExportError(
-      'invalid_block',
-      invalidBlockMessage(selection.block.api_name, invalidField),
-      { field: invalidField },
-    );
+    return {
+      ok: false,
+      reason: 'invalid_block',
+      message: invalidBlockMessage(selection.block.api_name, invalidField),
+      available: [],
+      field: invalidField,
+    };
   }
 
   const blockViews = viewsFor(views, selection.pluginApiName);
   const invalidView = findInvalidViewField(blockViews);
 
   if (invalidView !== undefined) {
-    throw new BlockExportError(
-      'invalid_block',
-      invalidViewMessage(selection.block.api_name, invalidView),
-      { field: invalidViewFieldPath(invalidView) },
-    );
+    return {
+      ok: false,
+      reason: 'invalid_block',
+      message: invalidViewMessage(selection.block.api_name, invalidView),
+      available: [],
+      field: invalidViewFieldPath(invalidView),
+    };
   }
 
   return {
-    block: selection.block,
-    pluginApiName: selection.pluginApiName,
-    views: blockViews,
-    warnings,
+    ok: true,
+    value: {
+      block: selection.block,
+      pluginApiName: selection.pluginApiName,
+      views: blockViews,
+      warnings,
+    },
   };
+}
+
+export async function exportBlock(pluginDir: string, apiName?: string): Promise<ExportedBlock> {
+  const resolved = resolvePackagedBlock(await packageBlocks(pluginDir), apiName, 'export');
+
+  if (!resolved.ok) {
+    throw new BlockExportError(resolved.reason, resolved.message, resolved);
+  }
+
+  return resolved.value;
 }

@@ -16,16 +16,13 @@ export interface SelectListProps {
   onSelect: (item: SelectItem, index: number) => void;
   onCancel?: () => void;
   hint?: string;
-  initialIndex?: number;
-  windowSize?: number;
-  isActive?: boolean;
 }
 
 const DEFAULT_HINT = '↑/↓ to move, Enter to select, Esc to cancel';
-const DEFAULT_WINDOW_SIZE = 10;
+const PAGE_SIZE = 10;
 
-const initialCursor = (items: readonly SelectItem[], initialIndex: number): number => {
-  const clamped = moveCursor(initialIndex, items.length, 0);
+const initialCursor = (items: readonly SelectItem[]): number => {
+  const clamped = moveCursor(0, items.length, 0);
 
   if (items[clamped]?.disabled !== true) {
     return clamped;
@@ -42,43 +39,36 @@ export const SelectList: FC<SelectListProps> = ({
   onSelect,
   onCancel,
   hint = DEFAULT_HINT,
-  initialIndex = 0,
-  windowSize = DEFAULT_WINDOW_SIZE,
-  isActive = true,
 }) => {
-  const [cursorState, setCursorState] = useState(() => initialCursor(items, initialIndex));
+  const [cursorState, setCursorState] = useState(() => initialCursor(items));
   const disabled = useMemo(() => items.map((item) => item.disabled === true), [items]);
   const cursor = moveCursor(cursorState, items.length, 0);
-  const pageSize = Math.max(1, Math.floor(windowSize));
 
-  useInput(
-    (input, key) => {
-      const move = (delta: number): void => {
-        setCursorState(moveCursor(cursor, items.length, delta, { disabled }));
-      };
+  useInput((input, key) => {
+    const move = (delta: number): void => {
+      setCursorState(moveCursor(cursor, items.length, delta, { disabled }));
+    };
 
-      if (key.upArrow || input === 'k') {
-        move(-1);
-      } else if (key.downArrow || input === 'j') {
-        move(1);
-      } else if (key.pageUp) {
-        move(-pageSize);
-      } else if (key.pageDown) {
-        move(pageSize);
-      } else if (key.return) {
-        const item = items[cursor];
+    if (key.upArrow || input === 'k') {
+      move(-1);
+    } else if (key.downArrow || input === 'j') {
+      move(1);
+    } else if (key.pageUp) {
+      move(-PAGE_SIZE);
+    } else if (key.pageDown) {
+      move(PAGE_SIZE);
+    } else if (key.return) {
+      const item = items[cursor];
 
-        if (item !== undefined && item.disabled !== true) {
-          onSelect(item, cursor);
-        }
-      } else if (key.escape) {
-        onCancel?.();
+      if (item !== undefined && item.disabled !== true) {
+        onSelect(item, cursor);
       }
-    },
-    { isActive },
-  );
+    } else if (key.escape) {
+      onCancel?.();
+    }
+  });
 
-  const { start, end } = visibleWindow(cursor, items.length, pageSize);
+  const { start, end } = visibleWindow(cursor, items.length, PAGE_SIZE);
   const above = start;
   const below = items.length - end;
 
