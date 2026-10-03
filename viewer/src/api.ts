@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
-import { useCredentials, type Environment } from './CredentialsContext.js';
+import { useCredentials } from './CredentialsContext.js';
+import { BASE_URLS } from '@shared/lib/kizenUrls.js';
 import { isMockError, type KizenApiClient } from './lib/kizenApiClient.js';
 import {
   createKizenProxyError,
@@ -8,21 +9,7 @@ import {
 } from '@kizenapps/engine/util';
 import type { OnNetworkRequestFn } from '@kizenapps/engine';
 
-export const BASE_URLS: Record<Environment, string> = {
-  go: 'https://app.go.kizen.com/api',
-  fmo: 'https://app.fmo.kizen.com/api',
-  staging: 'https://staging.kizen.com/api',
-  integration: 'https://integration.kizen.dev/api',
-  test1: 'https://test1.kizen.dev/api',
-};
-
-export const APP_URLS: Record<Environment, string> = {
-  go: 'https://go.kizen.com',
-  fmo: 'https://fmo.kizen.com',
-  staging: 'https://v2.staging.kizen.com',
-  integration: 'https://v2.integration.kizen.dev',
-  test1: 'https://test1.kizen.dev',
-};
+export { BASE_URLS, APP_URLS } from '@shared/lib/kizenUrls.js';
 
 /**
  * Returns an authenticated `request` function that proxies through the local

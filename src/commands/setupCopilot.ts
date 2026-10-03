@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { precheckTargetDir } from '../lib/createPlugin.js';
+import { formatManagedFileLine } from '../lib/managedFiles.js';
 import { setupCopilot } from '../lib/setupCopilot.js';
 
 export function setupCopilotCommand(program: Command): void {
@@ -26,7 +27,7 @@ export function setupCopilotCommand(program: Command): void {
         const result = await setupCopilot(pluginDir, { dryRun });
 
         for (const file of result.files) {
-          console.log(`${file.status.padEnd(9)} ${file.path}`);
+          console.log(formatManagedFileLine(file));
         }
 
         if (dryRun) {

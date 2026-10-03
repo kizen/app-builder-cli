@@ -1,8 +1,18 @@
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
-export { ENVIRONMENTS, type Environment, type Credentials } from '../../shared/lib/credentials.js';
+import {
+  ENVIRONMENTS,
+  normalizeCredentialIds,
+  type Environment,
+  type Credentials,
+} from '../../shared/lib/credentials.js';
+export {
+  ENVIRONMENTS,
+  normalizeCredentialIds,
+  type Environment,
+  type Credentials,
+} from '../../shared/lib/credentials.js';
 
 export interface CredentialProfile {
   name: string;
@@ -18,26 +28,50 @@ function isValidEnvironment(value: unknown): value is Environment {
   return ENVIRONMENTS.includes(value as Environment);
 }
 
-function parseCredentials(raw: unknown): Credentials {
+function trimString(value: unknown): unknown {
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+export type EnvironmentSource = 'explicit' | 'missing' | 'invalid';
+
+export interface DetailedCredentials {
+  credentials: Credentials;
+  environmentSource: EnvironmentSource;
+}
+
+function environmentSourceOf(env: unknown): EnvironmentSource {
+  if (isValidEnvironment(env)) {
+    return 'explicit';
+  }
+
+  return env === undefined || env === null || env === '' ? 'missing' : 'invalid';
+}
+
+function parseCredentials(raw: unknown): DetailedCredentials {
   if (typeof raw !== 'object' || raw === null) {
     throw new Error('Credentials must be a JSON object');
   }
 
   const obj = raw as Record<string, unknown>;
-  const env = obj.environment;
+  const env = trimString(obj.environment);
 
   return {
-    apiKey: typeof obj.apiKey === 'string' ? obj.apiKey : '',
-    userId: typeof obj.userId === 'string' ? obj.userId : '',
-    businessId: typeof obj.businessId === 'string' ? obj.businessId : '',
-    environment: isValidEnvironment(env) ? env : 'go',
+    credentials: {
+      ...normalizeCredentialIds(obj),
+      environment: isValidEnvironment(env) ? env : 'go',
+    },
+    environmentSource: environmentSourceOf(env),
   };
 }
 
-export async function loadCredentialsFromFile(filePath: string): Promise<Credentials> {
+export async function loadCredentialsDetailed(filePath: string): Promise<DetailedCredentials> {
   const content = await readFile(filePath, 'utf-8');
 
   return parseCredentials(JSON.parse(content) as unknown);
+}
+
+export async function loadCredentialsFromFile(filePath: string): Promise<Credentials> {
+  return (await loadCredentialsDetailed(filePath)).credentials;
 }
 
 export async function loadGlobalCredentials(): Promise<Credentials | null> {
@@ -110,4 +144,18 @@ export async function loadCredentialProfile(name: string): Promise<Credentials |
   } catch {
     return null;
   }
+}
+
+export async function listLoadableCredentialProfiles(): Promise<CredentialProfile[]> {
+  const profiles = await listCredentialProfiles();
+  const loadable = await Promise.all(
+    profiles.map((profile) =>
+      loadCredentialsDetailed(profile.path).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+
+  return profiles.filter((_, index) => loadable[index] === true);
 }

@@ -8,6 +8,7 @@ import {
   listCredentialProfiles,
   loadCredentialProfile,
   loadGlobalCredentials,
+  normalizeCredentialIds,
   saveCredentialProfile,
 } from '../lib/credentials.js';
 import type { CredentialProfile, Credentials } from '../lib/credentials.js';
@@ -112,9 +113,7 @@ export const CredentialSetupUI: FC<CredentialSetupUIProps> = ({
     async (values: Partial<Credentials>, envCursor: number) => {
       const environment = ENVIRONMENTS[envCursor] ?? 'go';
       const credentials: Credentials = {
-        apiKey: values.apiKey ?? '',
-        userId: values.userId ?? '',
-        businessId: values.businessId ?? '',
+        ...normalizeCredentialIds(values),
         environment,
       };
 

@@ -8,7 +8,7 @@ import {
   transformFiles,
   validatePluginApp,
 } from '@kizenapps/packager';
-import type { DeployablePlugin } from '@kizenapps/packager';
+import type { DeployablePlugin, FileContent, ValidationIssue } from '@kizenapps/packager';
 import { readLocalFiles } from './readFiles.js';
 
 export type BuildStepName =
@@ -44,13 +44,16 @@ export interface BuildResult {
   bundleSize: number;
 }
 
-export async function runBuild(
-  pluginDir: string,
-  outputDir: string,
-  onStep?: (step: BuildStepName) => void,
-): Promise<BuildResult> {
-  await mkdir(outputDir, { recursive: true });
+export interface PackagedLocalPlugin {
+  files: FileContent[];
+  deployable: DeployablePlugin[];
+  issues: ValidationIssue[];
+}
 
+export async function packageLocalPlugin(
+  pluginDir: string,
+  onStep?: (step: BuildStepName) => void,
+): Promise<PackagedLocalPlugin> {
   onStep?.('reading-files');
 
   const files = await readLocalFiles(pluginDir);
@@ -72,6 +75,18 @@ export async function runBuild(
   const manifests = parseManifestFromFiles(minified);
   const packaged = packagePlugin(minified, manifests);
   const deployable = Object.values(packaged).map(transformDeployablePlugin);
+
+  return { files, deployable, issues };
+}
+
+export async function runBuild(
+  pluginDir: string,
+  outputDir: string,
+  onStep?: (step: BuildStepName) => void,
+): Promise<BuildResult> {
+  await mkdir(outputDir, { recursive: true });
+
+  const { files, deployable } = await packageLocalPlugin(pluginDir, onStep);
 
   onStep?.('writing-bundle');
 

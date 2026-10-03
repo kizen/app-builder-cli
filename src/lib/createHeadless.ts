@@ -15,7 +15,12 @@ export interface CreateOptions {
   businessId?: string;
   environment?: string;
   artifacts?: string;
+  includeLib?: boolean;
 }
+
+/** Whether `options` force a non-interactive run. `--include-lib` alone keeps the wizard. */
+export const hasNonInteractiveFlags = (options: CreateOptions): boolean =>
+  Object.entries(options).some(([key, value]) => key !== 'includeLib' && value !== undefined);
 
 export interface HeadlessDefaults {
   businessId: string;
@@ -79,6 +84,7 @@ export function resolveHeadlessInput(
     developerBusinessId,
     developerEnvironment,
     artifacts: parseArtifactSelection(options.artifacts),
+    includeLib: options.includeLib === true,
   };
 }
 

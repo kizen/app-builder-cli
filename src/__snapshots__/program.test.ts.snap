@@ -11,6 +11,8 @@ Options:
 
 Commands:
   create [options]         Scaffold a new Kizen plugin project
+  setup-claude [options]   Install or refresh the Claude Code skill for building
+                           custom blocks
   setup-copilot [options]  Add or refresh the Copilot code-review setup in an
                            existing plugin repo
   build                    Bundle the plugin app into .kizenapp directory
@@ -20,6 +22,7 @@ Commands:
   report [options]         Generate a self-contained HTML report of the plugin
   icons                    List all valid icon names accepted by toolbar items,
                            pages, and adornments
+  block                    Work with plugin content blocks
   help [command]           display help for command
 "
 `;

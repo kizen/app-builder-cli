@@ -12,6 +12,7 @@
  */
 import { encrypt, serializeEnvelope } from '@kizenapps/packager';
 import type { Credentials } from './credentials.js';
+import { getProxyEnvStatus, PROXY_UNAVAILABLE_HINT } from './proxyEnv.js';
 import { resolveWizardBase } from './wizardUrl.js';
 
 export interface EncryptionContext {
@@ -57,7 +58,7 @@ async function wizardFetch(wizardBase: string, path: string, init: RequestInit):
     throw new Error(
       isConnRefused(err)
         ? `Plugin-wizard is not running at ${wizardBase}`
-        : `Failed to reach plugin-wizard: ${(err as Error).message}`,
+        : `Failed to reach plugin-wizard: ${(err as Error).message}${getProxyEnvStatus() === 'unavailable' ? ` ${PROXY_UNAVAILABLE_HINT}` : ''}`,
     );
   }
 }

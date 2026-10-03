@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   PLACEHOLDER_DESCRIPTION,
+  hasNonInteractiveFlags,
   parseArtifactSelection,
   resolveHeadlessInput,
   runHeadlessCreate,
 } from './createHeadless.js';
-import type { HeadlessDeps } from './createHeadless.js';
+import type { CreateOptions, HeadlessDeps } from './createHeadless.js';
 import { ARTIFACT_TYPES } from './createArtifacts.js';
 
 const defaults = { businessId: 'biz-1', environment: 'go' } as const;
@@ -33,6 +34,22 @@ describe('parseArtifactSelection', () => {
 
   it('rejects an unknown type by name', () => {
     expect(() => parseArtifactSelection('block,nope')).toThrow(/nope/);
+  });
+});
+
+describe('hasNonInteractiveFlags', () => {
+  it.each<{ options: CreateOptions; expected: boolean }>([
+    { options: {}, expected: false },
+    { options: { includeLib: true }, expected: false },
+    { options: { name: 'My Plugin' }, expected: true },
+    { options: { apiName: 'my_plugin', includeLib: true }, expected: true },
+    { options: { description: 'Does a thing.' }, expected: true },
+    { options: { externalLink: 'https://example.com' }, expected: true },
+    { options: { businessId: 'biz-1' }, expected: true },
+    { options: { environment: 'go' }, expected: true },
+    { options: { artifacts: 'block' }, expected: true },
+  ])('returns $expected for $options', ({ options, expected }) => {
+    expect(hasNonInteractiveFlags(options)).toBe(expected);
   });
 });
 
@@ -120,6 +137,13 @@ describe('resolveHeadlessInput', () => {
     expect(resolveHeadlessInput({ name: 'My Plugin' }, defaults, '/tmp/x').artifacts).toEqual([
       ...ARTIFACT_TYPES,
     ]);
+  });
+
+  it('leaves the data lib out unless --include-lib is passed', () => {
+    expect(resolveHeadlessInput({ name: 'My Plugin' }, defaults, '/tmp/x').includeLib).toBe(false);
+    expect(
+      resolveHeadlessInput({ name: 'My Plugin', includeLib: true }, defaults, '/tmp/x').includeLib,
+    ).toBe(true);
   });
 });
 

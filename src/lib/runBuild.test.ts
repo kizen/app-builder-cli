@@ -166,7 +166,7 @@ describe('runBuild', () => {
       });
     });
 
-    it('scaffolds a plugin with no validation errors and no warnings', async () => {
+    it('a fresh plugin validates with no issues', async () => {
       await bootstrapPlugin();
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
@@ -201,6 +201,37 @@ describe('runBuild', () => {
         developerEnvironment: 'go',
         artifacts: ARTIFACT_TYPES,
       });
+
+      const issues = validatePluginApp(await readLocalFiles(pluginDir));
+
+      expect(issues).toEqual([]);
+
+      await expect(runBuild(pluginDir, outputDir)).resolves.toBeDefined();
+    });
+
+    it('validates clean when created with the data lib and a block that imports it', async () => {
+      await createPlugin({
+        targetDir: pluginDir,
+        name: PLUGIN_NAME,
+        apiName: PLUGIN_API_NAME,
+        externalLink: PLUGIN_EXTERNAL_LINK,
+        description: PLUGIN_DESCRIPTION,
+        developerBusinessId: DEVELOPER_BUSINESS_ID,
+        developerEnvironment: 'go',
+        artifacts: ['block'],
+        includeLib: true,
+      });
+
+      await writeFile(
+        join(pluginDir, 'src', 'blocks', 'helloBlock', 'script.js'),
+        [
+          "import { formatNumber } from '../../lib/kizenData.js';",
+          '',
+          'this.outputUI(`<p>${formatNumber(1234)}</p>`);',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
 
       const issues = validatePluginApp(await readLocalFiles(pluginDir));
 

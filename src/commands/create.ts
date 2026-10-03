@@ -4,7 +4,7 @@ import type { Command } from 'commander';
 import { CreateUI } from '../ui/CreateUI.js';
 import { loadGlobalCredentials } from '../lib/credentials.js';
 import { createPlugin, precheckTargetDir } from '../lib/createPlugin.js';
-import { runHeadlessCreate } from '../lib/createHeadless.js';
+import { hasNonInteractiveFlags, runHeadlessCreate } from '../lib/createHeadless.js';
 import type { CreateOptions } from '../lib/createHeadless.js';
 import { ARTIFACT_TYPES } from '../lib/createArtifacts.js';
 import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
@@ -26,15 +26,15 @@ export function createCommand(program: Command): void {
       '--artifacts <list>',
       `comma-separated artifact types, or "all" / "none" (default: all). Types: ${ARTIFACT_TYPES.join(', ')}`,
     )
+    .option('--include-lib', 'also install the Kizen data helper library (src/lib/kizenData.js)')
     .action(async (options: CreateOptions) => {
       const parentDir = process.cwd();
       const globalCreds = await loadGlobalCredentials();
       const defaultBusinessId = globalCreds?.businessId ?? '';
       const defaultEnvironment = globalCreds?.environment ?? 'go';
 
-      const suppliedFlags = Object.values(options).some((value) => value !== undefined);
-
-      const isNonInteractive = !process.stdin.isTTY || !process.stdout.isTTY || suppliedFlags;
+      const isNonInteractive =
+        !process.stdin.isTTY || !process.stdout.isTTY || hasNonInteractiveFlags(options);
 
       if (isNonInteractive) {
         await runHeadlessCreate(
@@ -60,7 +60,12 @@ export function createCommand(program: Command): void {
       }
 
       const { waitUntilExit } = render(
-        createElement(CreateUI, { parentDir, defaultBusinessId, defaultEnvironment }),
+        createElement(CreateUI, {
+          parentDir,
+          defaultBusinessId,
+          defaultEnvironment,
+          includeLib: options.includeLib === true,
+        }),
         { exitOnCtrlC: false },
       );
 
