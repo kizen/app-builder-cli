@@ -123,13 +123,16 @@ As with `create`, the workflow only runs once it has reached the repository's de
 Installs or refreshes the Claude Code skill for building custom blocks (`.claude/skills/kizen-custom-block/SKILL.md`) in the plugin in the current directory. `appbuilder create` writes the skill once; run `setup-claude` in an existing plugin to add it, or after upgrading the CLI to pick up the bundled version.
 
 ```sh
-appbuilder setup-claude [--dry-run] [--include-lib]
+appbuilder setup-claude [--dry-run] [--include-lib] [--mcp [--env <env>] [--force]]
 ```
 
-| Flag            | Default | Purpose                                                      |
-| --------------- | ------- | ------------------------------------------------------------ |
-| `--dry-run`     | off     | Report what would change without writing files.              |
-| `--include-lib` | off     | Also install the Kizen data helper library (`kizenData.js`). |
+| Flag            | Default | Purpose                                                                                                                                |
+| --------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `--dry-run`     | off     | Report what would change without writing files.                                                                                        |
+| `--include-lib` | off     | Also install the Kizen data helper library (`kizenData.js`).                                                                           |
+| `--mcp`         | off     | Also register the Kizen MCP server in Claude Code (see [Using the session from Claude Code](#using-the-session-from-claude-code-mcp)). |
+| `--env <env>`   | `go`    | Environment of the MCP server to register. Only with `--mcp`.                                                                          |
+| `--force`       | off     | Replace an existing registration of that MCP server. Only with `--mcp`.                                                                |
 
 It also installs the skill's design guide (`.claude/skills/kizen-custom-block/design.md`), which tells the agent how to make blocks match native dashlets. With `--include-lib`, it installs the Kizen data helper library that block scripts import to read records and apply the dashboard's date and team filters. The library goes under the `entry` directory from `kizen.json` (`<entry>/lib/kizenData.js`, one per entry in a multi-plugin `kizen.json`), and under `src/` when `kizen.json` has no usable `entry`. Without the flag, it refreshes only the libraries that already exist. `appbuilder create --include-lib` writes it to `src/lib/kizenData.js`.
 
@@ -236,22 +239,24 @@ Interactive by default: pick credentials, the block, the surface (dashboard, hom
 
 It runs headless when stdin or stdout is not a TTY, or when `--json` is passed. `--yes` never selects the mode. Headless runs never prompt: anything that would be a question fails with `needs_choice` and lists the choices.
 
-| Argument / flag            | Default                         | Purpose                                                                                     |
-| -------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
-| `[api_name]`               | the plugin's only block         | Block to push. Required when the plugin has more than one block.                            |
-| `-c, --credentials <path>` | see resolution below            | Credentials JSON file to use                                                                |
-| `--profile <name>`         | see resolution below            | Stored credential profile to use                                                            |
-| `--dashboard <id>`         | the remembered target           | Dashboard, homepage or chart group to push to                                               |
-| `--dashlet <id>`           | matched by push history or name | Existing custom code dashlet to update. Needs `--dashboard`; can't be used with `--create`. |
-| `--create`                 | off                             | Create a new dashlet instead of updating one                                                |
-| `--dry-run`                | off                             | Resolve everything and print the request without writing                                    |
-| `--yes`                    | off                             | Write without asking. Headless runs without it are dry runs.                                |
-| `--allow-production`       | off                             | Allow headless writes to `go` / `fmo`                                                       |
-| `--force`                  | off                             | Overwrite a dashlet that was edited in Kizen since the last push                            |
-| `--forget`                 | off                             | Clear the remembered target for this block before resolving                                 |
-| `--json`                   | off                             | Print a JSON result to stdout (forces headless); the human summary goes to stderr           |
+| Argument / flag            | Default                         | Purpose                                                                                                                                                   |
+| -------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[api_name]`               | the plugin's only block         | Block to push. Required when the plugin has more than one block.                                                                                          |
+| `-c, --credentials <path>` | see resolution below            | Credentials JSON file to use                                                                                                                              |
+| `--profile <name>`         | see resolution below            | Stored credential profile to use                                                                                                                          |
+| `--dashboard <id>`         | the remembered target           | Dashboard, homepage or chart group to push to                                                                                                             |
+| `--dashlet <id>`           | matched by push history or name | Existing custom code dashlet to update. Needs `--dashboard`; can't be used with `--create`.                                                               |
+| `--create`                 | off                             | Create a new dashlet instead of updating one                                                                                                              |
+| `--dry-run`                | off                             | Resolve everything and print the request without writing                                                                                                  |
+| `--yes`                    | off                             | Write without asking. Headless runs without it are dry runs.                                                                                              |
+| `--allow-production`       | off                             | Allow headless writes to `go` / `fmo`                                                                                                                     |
+| `--force`                  | off                             | Overwrite a dashlet that was edited in Kizen since the last push                                                                                          |
+| `--forget`                 | off                             | Clear the remembered target for this block before resolving                                                                                               |
+| `--json`                   | off                             | Print a JSON result to stdout (forces headless); the human summary goes to stderr                                                                         |
+| `--oauth`                  | off                             | Use the session from [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header) instead of an API key. Can't be used with `-c` or `--profile`. |
+| `--env <env>`              | the only signed-in environment  | Environment of the session to use. Only with `--oauth`.                                                                                                   |
 
-**Credentials** resolve in this order: `-c`, then `--profile`, then the project's active profile from `.kizenapp/config.json`, then the only loadable stored profile; several profiles without a choice is `needs_choice`. A project set to local browser-only credentials must pass `-c` or `--profile`. The credentials file must name a valid `environment` (`go`, `fmo`, `staging`, `integration`, `test1`); a missing or invalid one is refused with `credentials_invalid` rather than defaulting to production. Empty `apiKey`, `userId` or `businessId` are refused the same way.
+**Credentials** resolve in this order: `-c`, then `--profile`, then the project's active profile from `.kizenapp/config.json`, then the only loadable stored profile; several profiles without a choice is `needs_choice`. A project set to local browser-only credentials must pass `-c` or `--profile`. The credentials file must name a valid `environment` (`go`, `fmo`, `staging`, `integration`, `test1`); a missing or invalid one is refused with `credentials_invalid` rather than defaulting to production. Empty `apiKey`, `userId` or `businessId` are refused the same way. With `--oauth`, none of this applies: the push uses the stored session for `--env`, or for the only environment you're signed in to (see [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header)). Not being signed in is `credentials_invalid`; being signed in to several environments without `--env` is `usage_error`.
 
 **Write gating (headless).** `--dry-run` is always a dry run. Without `--yes` the run is a dry run too, and stderr says `Dry run only: pass --yes to write.` With `--yes`, `go` and `fmo` also need `--allow-production` (else `production_requires_flag`). If the target dashlet was pushed from here before and its content has since been changed in Kizen, both dry runs and writes stop with `drift_detected` unless `--force` is passed.
 
@@ -351,22 +356,22 @@ A failure exits 1:
 
 Optional failure fields: `choice` (`profile`, `block`, `dashboard` or `target`) and `choices` with `needs_choice`, `remembered_target_missing` and a `--dashlet` that is `not_found`; `issues` (the packager's validation issues) with `validation_failed`; `field` with `invalid_block`; `hint` with `auth_failed` and `forbidden`. Each choice's `args` are the exact CLI arguments that select it, to be appended to the command (dashboard choices also carry `surface` and `canEdit`).
 
-| Code                        | Meaning                                                                                                                                  |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `needs_choice`              | A profile, block, dashboard or target must be chosen; see `choice` and `choices`                                                         |
-| `validation_failed`         | The plugin failed validation                                                                                                             |
-| `invalid_block`             | The plugin has no blocks, or the block would be rejected (`field` names the problem)                                                     |
-| `credentials_invalid`       | No usable credentials, or the file's `environment` is missing or invalid                                                                 |
-| `auth_failed`               | Kizen rejected the credentials                                                                                                           |
-| `forbidden`                 | The credentials can't access the dashboard                                                                                               |
-| `not_found`                 | The dashboard, or the `--dashlet` on it, doesn't exist                                                                                   |
-| `remembered_target_missing` | The remembered dashboard or dashlet is gone; nothing is created without `--create`                                                       |
-| `drift_detected`            | The dashlet was edited in Kizen since the last push; `--force` overwrites                                                                |
-| `production_requires_flag`  | `--yes` against `go` / `fmo` without `--allow-production`                                                                                |
-| `usage_error`               | Conflicting flags (`--dashlet` with `--create`, `--dashlet` without `--dashboard`), or a non-custom-code `--dashlet`                     |
-| `network_error`             | Kizen couldn't be reached                                                                                                                |
-| `api_error`                 | Any other Kizen API failure                                                                                                              |
-| `local_error`               | A local failure that isn't a validation error: no `kizen.json`, packaging, reading `.kizenapp/pushes.json`, or writing it for `--forget` |
+| Code                        | Meaning                                                                                                                                                                                                                                                |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `needs_choice`              | A profile, block, dashboard or target must be chosen; see `choice` and `choices`                                                                                                                                                                       |
+| `validation_failed`         | The plugin failed validation                                                                                                                                                                                                                           |
+| `invalid_block`             | The plugin has no blocks, or the block would be rejected (`field` names the problem)                                                                                                                                                                   |
+| `credentials_invalid`       | No usable credentials, the file's `environment` is missing or invalid, or (with `--oauth`) you aren't signed in                                                                                                                                        |
+| `auth_failed`               | Kizen rejected the credentials, or (with `--oauth`) the session needs a new `appbuilder login`: expired, rejected, or unreadable                                                                                                                       |
+| `forbidden`                 | The credentials can't access the dashboard                                                                                                                                                                                                             |
+| `not_found`                 | The dashboard, or the `--dashlet` on it, doesn't exist                                                                                                                                                                                                 |
+| `remembered_target_missing` | The remembered dashboard or dashlet is gone; nothing is created without `--create`                                                                                                                                                                     |
+| `drift_detected`            | The dashlet was edited in Kizen since the last push; `--force` overwrites                                                                                                                                                                              |
+| `production_requires_flag`  | `--yes` against `go` / `fmo` without `--allow-production`                                                                                                                                                                                              |
+| `usage_error`               | Conflicting flags (`--dashlet` with `--create`, `--dashlet` without `--dashboard`, `--oauth` with `-c` or `--profile`, `--env` without `--oauth`), an unknown `--env`, several signed-in environments and no `--env`, or a non-custom-code `--dashlet` |
+| `network_error`             | Kizen, or (with `--oauth`) its token endpoint, couldn't be reached                                                                                                                                                                                     |
+| `api_error`                 | Any other Kizen API failure, including any other failure to refresh the `--oauth` session                                                                                                                                                              |
+| `local_error`               | A local failure that isn't a validation error: no `kizen.json`, packaging, reading `.kizenapp/pushes.json`, or writing it for `--forget`                                                                                                               |
 
 ### `appbuilder block targets`
 
@@ -376,12 +381,14 @@ The CLI honors `HTTP_PROXY`/`HTTPS_PROXY` and `NO_PROXY` on Node versions that s
 
 `customObjects` is sorted by name and ends with Contacts (`"fetchUrl": "client"`) when the CLI can look up the business's contacts object; Kizen doesn't list Contacts with the other custom objects, so if that lookup fails the row is silently left out. `--object <contacts id>` lists Contacts' chart groups like any other object's.
 
-| Flag                       | Default             | Purpose                                                   |
-| -------------------------- | ------------------- | --------------------------------------------------------- |
-| `-c, --credentials <path>` | as for `block push` | Credentials JSON file to use                              |
-| `--profile <name>`         | as for `block push` | Stored credential profile to use                          |
-| `--object <id>`            | —                   | List the chart groups of this custom object (or Contacts) |
-| `--json`                   | off                 | Print JSON instead of tables                              |
+| Flag                       | Default             | Purpose                                                                                                                               |
+| -------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `-c, --credentials <path>` | as for `block push` | Credentials JSON file to use                                                                                                          |
+| `--profile <name>`         | as for `block push` | Stored credential profile to use                                                                                                      |
+| `--object <id>`            | —                   | List the chart groups of this custom object (or Contacts)                                                                             |
+| `--json`                   | off                 | Print JSON instead of tables                                                                                                          |
+| `--oauth`                  | off                 | Use the session from [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header) instead of an API key, as for `block push` |
+| `--env <env>`              | as for `block push` | Environment of the session to use. Only with `--oauth`.                                                                               |
 
 ```json
 {
@@ -435,11 +442,75 @@ Guardrails:
 - On `needs_choice`, ask the user using `choices` (labels to show, `args` to append).
 - On `remembered_target_missing`, ask whether to `--create` a new block rather than creating one.
 
+### `appbuilder login`, `logout`, `whoami` and `auth-header`
+
+Browser sign-in, a supported alternative to a downloaded API key. `block push` and `block targets` use it when you pass `--oauth`. Without `--oauth`, they use API-key credentials exactly as before.
+
+```sh
+appbuilder login [--env <env>]     # default env: go
+appbuilder whoami [--env <env>]
+appbuilder logout [--env <env>]
+appbuilder auth-header [--env <env>]
+appbuilder block push [api_name] --oauth [--env <env>] [flags]
+appbuilder block targets --oauth [--env <env>] [flags]
+```
+
+`login` opens Kizen's consent page in your browser and prints the URL in case the browser doesn't open. There, you pick the business the session is for. The CLI waits up to 5 minutes for the browser to return to `http://127.0.0.1:<port>/callback`. It uses OAuth 2.0 authorization code with PKCE (S256). It only trusts the server's OAuth metadata when its `issuer` is exactly the environment's origin (for example `https://staging.kizen.com`). It registers itself with the server on first use (dynamic client registration), so you don't need an API key or a client secret. A request to the callback with the wrong `state` gets a `400` and is otherwise ignored, so the sign-in keeps waiting for the real callback. Each session belongs to one user and one business. Signing in again replaces the session for that environment. If the browser shows an error instead of the consent page, the saved app registration is probably stale. The sign-in then times out and clears that app registration, so running `appbuilder login` again registers afresh.
+
+| Command       | `--env` default                                                                                      | What it does                                                                                                                                           |
+| ------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `login`       | `go`                                                                                                 | Signs in and stores the session                                                                                                                        |
+| `whoami`      | the only environment you're signed in to                                                             | Calls `/auth/bootstrap` with the session and prints the user and business. Tokens are never printed.                                                   |
+| `logout`      | the only environment you're signed in to                                                             | Deletes the stored session. It's local only: the server has no revocation endpoint, so the refresh token remains valid on the server until it expires. |
+| `auth-header` | the environment matching `CLAUDE_CODE_MCP_SERVER_URL`, else the only environment you're signed in to | Prints `{"Authorization":"Bearer <access token>"}` for a Claude Code MCP `headersHelper`. See below.                                                   |
+
+With `--oauth`, `block push` and `block targets` authenticate as the session for `--env`, or for the only environment you're signed in to. `--oauth` can't be combined with `-c` or `--profile`, and `--env` only applies with `--oauth`. The production write gate (`--allow-production`) and every other flag work the same as with an API key.
+
+Sessions are stored in `~/.kizenappbuilder/oauth/<env>.json` (directory `0700`, files `0600`), separate from API-key profiles. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Signing in, signing out and refreshing coordinate through a lock in `~/.kizenappbuilder/oauth/`, so concurrent `appbuilder` processes refresh a session only once. A lock left by a process that crashed is taken over right away, or after 30 seconds if the CLI can't tell whether that process is still running. If the refresh token is rejected, the session is deleted, and the command asks you to run `appbuilder login --env <env>` again.
+
+A session file that is corrupt or can't be read isn't treated as "not signed in". Commands that use it report the file's path and ask you to run `appbuilder login --env <env>`, and `appbuilder logout --env <env>` removes it.
+
+#### Using the session from Claude Code (MCP)
+
+Kizen's MCP server at `/api/mcp` accepts the same session. `appbuilder auth-header` is a Claude Code `headersHelper`: it prints `{"Authorization":"Bearer <access token>"}` as one line on stdout, refreshing the token first if it's about to expire.
+
+The easiest way to set it up is from a plugin directory:
+
+```sh
+npx @kizenapps/cli setup-claude --mcp --env staging    # default env: go
+npx @kizenapps/cli login --env staging
+```
+
+`setup-claude --mcp` installs the skill files as usual, then registers the server `kizen-<env>` at user scope by running `claude mcp add-json`. The helper is pinned to the version of the CLI you ran it with. For CLI version 1.16.0, for example, it's equivalent to this POSIX-shell command:
+
+```sh
+claude mcp add-json --scope user kizen-staging '{"type":"http","url":"https://staging.kizen.com/api/mcp","headersHelper":"npx -y @kizenapps/cli@1.16.0 auth-header"}'
+```
+
+- If a server with that name already exists, it's left unchanged; pass `--force` to replace it. After upgrading the CLI, run `setup-claude --mcp --force` to pin the helper to the new version.
+- `--force` only replaces the user-scope server. A server with the same name at local or project scope (for example, one you added by hand without `--scope user`) takes precedence over it in that project. Remove that one with `claude mcp remove kizen-<env>` (run in the project) if you want the user-scope server there.
+- If the `claude` command isn't installed, it prints this command for you to run instead, and still succeeds.
+- `--dry-run` prints the command without running anything.
+- If you aren't signed in to that environment yet, it reminds you to run `appbuilder login --env <env>`. If the saved session can't be read, it prints that error, with the file's path, instead. Either way the server is still registered.
+- If registering fails, the skill files stay installed and the command exits with code 1.
+
+The helper runs through `npx`, which reuses its cached copy of the CLI (running `setup-claude` through `npx` fills that cache), so it starts in about a second. That works when Claude Code was started from a shell with `node` on `PATH`. If it wasn't (for example, with nvm and Claude Code launched outside a terminal), use absolute paths instead, from `which node` and `which appbuilder`: `"headersHelper":"/absolute/path/to/node /absolute/path/to/appbuilder auth-header"`. `appbuilder` starts with `#!/usr/bin/env node`, so the path to `appbuilder` alone isn't enough. Use the absolute paths too when testing a local or `pnpm link` build whose version isn't published, because `npx` can't fetch that version.
+
+User scope is recommended: Claude Code then passes the helper its environment variables and doesn't wait for project trust before running it.
+
+The helper picks the environment from the MCP server URL that Claude Code passes it (`CLAUDE_CODE_MCP_SERVER_URL`): the environment whose API origin (scheme, host and port) matches that URL's origin. A URL that matches no environment is an error, so a token is never sent to a server it doesn't belong to. If you also pass `--env`, it must name that same environment, or the helper fails without printing a token. When the variable isn't set (for example, when you run the command yourself), it uses `--env`, or the only environment you're signed in to.
+
+Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts than the other commands: 3s to wait for another process's refresh, and 5s for the token request. On failure, it prints one line to stderr, such as a reminder to run `appbuilder login --env <env>`, and nothing to stdout.
+
+`auth-header` prints a live access token by design: treat its output like a password. The token acts as you, in the one business you chose when signing in, until it expires (up to an hour).
+
+Known limitation: the CLI only refreshes a token when less than a minute is left, so if Kizen revokes a token with more time left, `auth-header` keeps returning it until it expires or you run `appbuilder login` again.
+
 ## Reference
 
 ### Environment variables
 
-The CLI reads four environment variables, all of which point it at a different Plugin Wizard (encryption API) host. Precedence for the `dev` target:
+Four environment variables point the CLI at a different Plugin Wizard (encryption API) host. Precedence for the `dev` target:
 
 1. **`PLUGIN_WIZARD_URL`** — forces a single host for **all** targets, dev and prod alike.
 2. **`PLUGIN_WIZARD_URL_DEV`** — explicit dev host.
@@ -447,6 +518,8 @@ The CLI reads four environment variables, all of which point it at a different P
 4. Default: `https://plugin-wizard.kizen.dev`.
 
 Prod follows the same order minus step 3: `PLUGIN_WIZARD_URL`, then **`PLUGIN_WIZARD_URL_PROD`**, then the default `https://plugin-wizard.kizen.com`. An empty-string value is treated as unset at every level.
+
+**`CLAUDE_CODE_MCP_SERVER_URL`** is set by Claude Code when it runs `appbuilder auth-header`, which then signs only for the environment whose API origin matches it (see [Using the session from Claude Code](#using-the-session-from-claude-code-mcp)).
 
 ### The `.kizenapp/` directory
 

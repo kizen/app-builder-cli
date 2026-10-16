@@ -2,8 +2,7 @@ import { ARTIFACT_TYPES } from './createArtifacts.js';
 import type { ArtifactType } from './createArtifacts.js';
 import { API_NAME_HINT, API_NAME_PATTERN, inferApiName } from './createForm.js';
 import type { CreatePluginInput, PrecheckResult } from './createPlugin.js';
-import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
-import type { Environment } from '../../shared/lib/credentials.js';
+import { ENVIRONMENTS, isEnvironment, type Environment } from './credentials.js';
 
 export const PLACEHOLDER_DESCRIPTION = 'A hello-world Kizen plugin.';
 
@@ -86,10 +85,6 @@ export function resolveHeadlessInput(
     artifacts: parseArtifactSelection(options.artifacts),
     includeLib: options.includeLib === true,
   };
-}
-
-function isEnvironment(value: string): value is Environment {
-  return (ENVIRONMENTS as readonly string[]).includes(value);
 }
 
 function resolveEnvironment(options: CreateOptions, defaults: HeadlessDefaults): Environment {

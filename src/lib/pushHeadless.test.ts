@@ -26,6 +26,7 @@ import { canonicalContentHash, pushKey, toCustomCodeContent } from './pushBlock.
 import {
   apiFailure,
   buildBrowserRefresh,
+  createDefaultPushDeps,
   buildPlan,
   buildTargetChoices,
   headlessWriteGate,
@@ -39,6 +40,7 @@ import {
   runTargetsHeadless,
   toTargetRow,
   type PushCommandOptions,
+  type OAuthPushDeps,
   type PushContext,
   type PushDeps,
   type ResolvedBlock,
@@ -2193,6 +2195,117 @@ describe('runTargetsHeadless', () => {
 
     expect(harness.stderr.join('')).toContain(
       'staging  →  appbuilder block targets --profile staging --object O1',
+    );
+  });
+});
+
+describe('--oauth', () => {
+  const IDENTITY = {
+    userId: 'oauth-user',
+    businessId: 'oauth-biz',
+    businessName: 'Acme',
+    fullName: 'Ada L',
+    email: 'ada@example.com',
+  };
+
+  const oauthDeps = (sessions: Environment[]): OAuthPushDeps & { getIdentity: Mock } => ({
+    listSessions: vi.fn(() => Promise.resolve(sessions)),
+    getIdentity: vi.fn(() => Promise.resolve(IDENTITY)),
+  });
+
+  it('without the flag, default deps have no OAuth session support', () => {
+    expect('oauth' in createDefaultPushDeps(CWD)).toBe(false);
+    expect('oauth' in createDefaultPushDeps(CWD, { oauth: true })).toBe(true);
+  });
+
+  it('builds credentials from the session identity for --env, without reading API-key profiles', async () => {
+    const oauth = oauthDeps(['go', 'staging']);
+    const { deps } = makeHarness({ deps: { oauth } });
+    const step = await resolveCredentials({ oauth: true, env: 'staging' }, deps);
+
+    expect(step).toStrictEqual({
+      ok: true,
+      value: {
+        credentials: {
+          apiKey: '',
+          userId: 'oauth-user',
+          businessId: 'oauth-biz',
+          environment: 'staging',
+        },
+      },
+    });
+    expect(oauth.getIdentity).toHaveBeenCalledWith('staging');
+    expect(oauth.listSessions).not.toHaveBeenCalled();
+    expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
+    expect(deps.loadCredentialsDetailed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [['integration'] as Environment[], { ok: true }],
+    [[] as Environment[], { ok: false, code: 'credentials_invalid' }],
+    [['go', 'staging'] as Environment[], { ok: false, code: 'usage_error' }],
+  ])('without --env, signed in to %j resolves to %j', async (sessions, expected) => {
+    const oauth = oauthDeps(sessions);
+    const step = await resolveCredentials({ oauth: true }, makeHarness({ deps: { oauth } }).deps);
+
+    expect(step).toMatchObject(expected);
+
+    if (step.ok) {
+      expect(step.value.credentials.environment).toBe('integration');
+    }
+  });
+
+  it.each([
+    [{ oauth: true, profile: 'staging' }, "can't be combined"],
+    [{ oauth: true, credentials: '/tmp/c.json' }, "can't be combined"],
+    [{ oauth: true, env: 'prod' }, 'Unknown --env "prod"'],
+    [{ env: 'staging' }, '--env only applies with --oauth'],
+  ])('refuses %j as a usage error', async (options, message) => {
+    const oauth = oauthDeps(['staging']);
+    const { deps } = makeHarness({ deps: { oauth } });
+    const step = await resolveCredentials(options, deps);
+
+    expect(step).toMatchObject({ ok: false, code: 'usage_error' });
+    expect(!step.ok && step.message).toContain(message);
+    expect(oauth.getIdentity).not.toHaveBeenCalled();
+  });
+
+  it('reports a rejected session as auth_failed with its hint', async () => {
+    const oauth = oauthDeps(['staging']);
+
+    oauth.getIdentity.mockRejectedValueOnce(
+      new KizenApiError('auth_failed', 'GET /auth/bootstrap failed with 401', {
+        status: 401,
+        hint: 'Run `appbuilder login --env staging`',
+      }),
+    );
+
+    const step = await resolveCredentials({ oauth: true }, makeHarness({ deps: { oauth } }).deps);
+
+    expect(step).toMatchObject({
+      ok: false,
+      code: 'auth_failed',
+      hint: 'Run `appbuilder login --env staging`',
+    });
+  });
+
+  it('carries --oauth --env into the follow-up commands it prints', async () => {
+    const fake = makeClient({ summaries: { generic_dashboard: [summary()] } });
+    const harness = await runPush(makeHarness({ fake, deps: { oauth: oauthDeps(['staging']) } }), {
+      json: false,
+      oauth: true,
+      env: 'staging',
+    });
+
+    expect(harness.deps.createClient).toHaveBeenCalledWith({
+      apiKey: '',
+      userId: 'oauth-user',
+      businessId: 'oauth-biz',
+      environment: 'staging',
+    });
+    expect(harness.exitCodes).toStrictEqual([1]);
+    expect(harness.stderr.join('')).toContain(
+      `appbuilder block push ${BLOCK} --oauth --env staging --dashboard`,
     );
   });
 });

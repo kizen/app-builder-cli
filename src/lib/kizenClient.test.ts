@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Credentials } from '../../shared/lib/credentials.js';
 import { createKizenClient, dashletPath, formatDrfError, KizenApiError } from './kizenClient.js';
 import type { KizenClient } from './kizenTypes.js';
+import { OAuthError } from './oauth.js';
+import type { BearerTokenProvider } from './oauthSession.js';
 import type * as ProxyEnvModule from './proxyEnv.js';
 import type { ProxyEnvStatus } from './proxyEnv.js';
 import { PROXY_UNAVAILABLE_HINT } from './proxyEnv.js';
@@ -439,4 +441,191 @@ describe('formatDrfError', () => {
       expect(formatDrfError(body)).toBeUndefined();
     },
   );
+});
+
+describe('bearer auth', () => {
+  const STAGING = 'https://staging.kizen.com/api';
+
+  interface FakeTokens extends BearerTokenProvider {
+    refreshes: string[];
+  }
+
+  /** Hands out tok-1, then tok-2, tok-3… on each refresh. */
+  const fakeTokens = (): FakeTokens => {
+    let current = 1;
+    const refreshes: string[] = [];
+
+    return {
+      environment: 'staging',
+      refreshes,
+      getAccessToken: () => Promise.resolve(`tok-${String(current)}`),
+      refreshAccessToken: (rejected) => {
+        refreshes.push(rejected);
+        current += 1;
+
+        return Promise.resolve(`tok-${String(current)}`);
+      },
+    };
+  };
+
+  const bearerSetup = (
+    tokens: BearerTokenProvider,
+    ...responses: Response[]
+  ): { fetchMock: ReturnType<typeof vi.fn<typeof fetch>>; headersOf: (i: number) => unknown } => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    for (const response of responses) {
+      fetchMock.mockResolvedValueOnce(response);
+    }
+
+    return {
+      fetchMock,
+      headersOf: (i) => fetchMock.mock.calls[i]?.[1]?.headers,
+    };
+  };
+
+  it('bearer client sends Authorization and no X-API-KEY/X-USER-ID/X-BUSINESS-ID', async () => {
+    const tokens = fakeTokens();
+    const { fetchMock, headersOf } = bearerSetup(
+      tokens,
+      jsonResponse({ id: 'd1' }),
+      jsonResponse({ id: 'x1' }),
+    );
+    const client = createKizenClient({ bearer: tokens, fetch: fetchMock });
+
+    await client.getDashboard('d1');
+    await client.createDashlet('d1', { name: 'n' } as never);
+
+    // The base URL comes from the provider's environment.
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${STAGING}/dashboards/d1`);
+    expect(headersOf(0)).toStrictEqual({
+      Authorization: 'Bearer tok-1',
+      Accept: 'application/json',
+    });
+    expect(headersOf(1)).toStrictEqual({
+      Authorization: 'Bearer tok-1',
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+    });
+    expect(tokens.refreshes).toStrictEqual([]);
+  });
+
+  it('bearer mode rejects a baseUrl on another origin', () => {
+    const fetchMock = vi.fn<typeof fetch>();
+
+    expect(() =>
+      createKizenClient({ bearer: fakeTokens(), fetch: fetchMock, baseUrl: BASE }),
+    ).toThrow(
+      'createKizenClient: baseUrl https://integration.kizen.dev/api is not on the staging API origin; a staging token is only sent to https://staging.kizen.com.',
+    );
+    expect(() =>
+      createKizenClient({
+        bearer: fakeTokens(),
+        fetch: fetchMock,
+        baseUrl: 'https://staging.kizen.com.evil.example/api',
+      }),
+    ).toThrow(/is not on the staging API origin/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('bearer mode accepts a baseUrl on its own origin', async () => {
+    const tokens = fakeTokens();
+    const { fetchMock } = bearerSetup(tokens, jsonResponse({ id: 'd1' }));
+
+    await createKizenClient({
+      bearer: tokens,
+      fetch: fetchMock,
+      baseUrl: 'https://staging.kizen.com/api/v2',
+    }).getDashboard('d1');
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://staging.kizen.com/api/v2/dashboards/d1');
+  });
+
+  it('401 with bearer triggers one refresh and retry; second 401 surfaces the auth error', async () => {
+    const recovering = fakeTokens();
+    const ok = bearerSetup(
+      recovering,
+      jsonResponse({ detail: 'expired' }, 401),
+      jsonResponse({ id: 'x1' }),
+    );
+
+    await expect(
+      createKizenClient({ bearer: recovering, fetch: ok.fetchMock }).createDashlet('d1', {
+        name: 'n',
+      } as never),
+    ).resolves.toStrictEqual({ id: 'x1' });
+    expect(recovering.refreshes).toStrictEqual(['tok-1']);
+    expect(ok.fetchMock).toHaveBeenCalledTimes(2);
+    expect(ok.headersOf(1)).toMatchObject({ Authorization: 'Bearer tok-2' });
+    // The retried write carries the same body.
+    expect(ok.fetchMock.mock.calls[1]?.[1]?.body).toBe(ok.fetchMock.mock.calls[0]?.[1]?.body);
+
+    const rejected = fakeTokens();
+    const denied = bearerSetup(
+      rejected,
+      jsonResponse({ detail: 'nope' }, 401),
+      jsonResponse({ detail: 'still nope' }, 401),
+    );
+    const error = await rejection(
+      createKizenClient({ bearer: rejected, fetch: denied.fetchMock }).getDashboard('d1'),
+    );
+
+    expect(rejected.refreshes).toStrictEqual(['tok-1']);
+    expect(denied.fetchMock).toHaveBeenCalledTimes(2);
+    expect(error.kind).toBe('auth_failed');
+    expect(error.status).toBe(401);
+    expect(error.message).toBe('GET /dashboards/d1 failed with 401: still nope');
+    expect(error.hint).toContain('appbuilder login --env staging');
+  });
+
+  it('does not refresh on a non-401 failure', async () => {
+    const tokens = fakeTokens();
+    const { fetchMock } = bearerSetup(tokens, jsonResponse({ detail: 'no' }, 403));
+    const error = await rejection(
+      createKizenClient({ bearer: tokens, fetch: fetchMock }).getDashboard('d1'),
+    );
+
+    expect(error.kind).toBe('forbidden');
+    expect(error.hint).not.toContain('API key');
+    expect(tokens.refreshes).toStrictEqual([]);
+  });
+
+  it('turns a login-required token failure into auth_failed without calling Kizen', async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    const tokens: BearerTokenProvider = {
+      environment: 'staging',
+      getAccessToken: () =>
+        Promise.reject(new OAuthError('login_required', 'Run `appbuilder login --env staging`.')),
+      refreshAccessToken: () => Promise.reject(new Error('unused')),
+    };
+    const error = await rejection(
+      createKizenClient({ bearer: tokens, fetch: fetchMock }).getDashboard('d1'),
+    );
+
+    expect(error.kind).toBe('auth_failed');
+    expect(error.message).toContain('appbuilder login --env staging');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('reads the identity from /auth/bootstrap', async () => {
+    const tokens = fakeTokens();
+    const { fetchMock } = bearerSetup(
+      tokens,
+      jsonResponse({
+        team: { id: 't1', user: 'u1', full_name: 'Ada L', email: 'ada@example.com' },
+        business: { id: 'b1', name: 'Acme' },
+      }),
+    );
+
+    await expect(
+      createKizenClient({ bearer: tokens, fetch: fetchMock }).getIdentity(),
+    ).resolves.toStrictEqual({
+      userId: 'u1',
+      businessId: 'b1',
+      businessName: 'Acme',
+      fullName: 'Ada L',
+      email: 'ada@example.com',
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${STAGING}/auth/bootstrap`);
+  });
 });

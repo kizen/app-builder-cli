@@ -1,6 +1,6 @@
 import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
-import type { Credentials } from './credentials.js';
-import { isRecord } from './guards.js';
+import type { Credentials, Environment } from './credentials.js';
+import { errorCause, isRecord } from './guards.js';
 import type {
   CreateDashletBody,
   DashboardType,
@@ -12,19 +12,53 @@ import type {
   WireDashboardSummary,
   WireDashlet,
 } from './kizenTypes.js';
+import { loginCommandFor, OAuthError } from './oauth.js';
+import type { BearerTokenProvider } from './oauthSession.js';
 import { getProxyEnvStatus, PROXY_UNAVAILABLE_HINT } from './proxyEnv.js';
 
-export interface KizenClientOptions {
-  credentials: Credentials;
+/**
+ * API-key auth sends `credentials` as X-API-KEY/X-USER-ID/X-BUSINESS-ID headers.
+ * Bearer auth sends only `Authorization: Bearer <token>`; the token is bound to
+ * one user and business server-side.
+ */
+export type KizenClientAuth =
+  | { credentials: Credentials; bearer?: undefined }
+  | { bearer: BearerTokenProvider; credentials?: undefined };
+
+export type KizenClientOptions = KizenClientAuth & {
   fetch?: typeof fetch;
   baseUrl?: string;
+};
+
+/** Who a session belongs to, from `/auth/bootstrap`. */
+export interface KizenIdentity {
+  userId: string;
+  businessId: string;
+  businessName: string | undefined;
+  fullName: string | undefined;
+  email: string | undefined;
 }
+
+export type KizenSessionClient = KizenClient & { getIdentity: () => Promise<KizenIdentity> };
 
 const AUTH_FAILED_HINT =
   "The API key is invalid for this business, or the user id doesn't match. Check the credentials file's apiKey, userId and businessId.";
 
 const FORBIDDEN_HINT =
   "The API key's user needs the Standard API Keys permission and edit access to this dashboard. Homepages also need the Customize Homepages permission.";
+
+const bearerAuthFailedHint = (environment: Environment): string =>
+  `Kizen rejected the signed-in session. Run \`${loginCommandFor(environment)}\` to sign in again.`;
+
+const BEARER_FORBIDDEN_HINT =
+  'The signed-in user needs edit access to this dashboard. Homepages also need the Customize Homepages permission.';
+
+interface StatusHints {
+  authFailed: string;
+  forbidden: string;
+}
+
+const API_KEY_HINTS: StatusHints = { authFailed: AUTH_FAILED_HINT, forbidden: FORBIDDEN_HINT };
 
 interface ListPage {
   results: unknown[];
@@ -123,12 +157,6 @@ export function formatDrfError(body: unknown): string | undefined {
   return messages.length > 0 ? messages.join('; ') : undefined;
 }
 
-function errorCause(err: unknown): string {
-  const e = err as { code?: string; message?: string; cause?: { code?: string; message?: string } };
-
-  return e.cause?.code ?? e.code ?? e.cause?.message ?? e.message ?? String(err);
-}
-
 async function readBody(res: Response): Promise<{ text: string; json: unknown }> {
   const text = await res.text();
 
@@ -143,16 +171,22 @@ async function readBody(res: Response): Promise<{ text: string; json: unknown }>
   }
 }
 
-function statusError(method: string, path: string, status: number, body: unknown): KizenApiError {
+function statusError(
+  method: string,
+  path: string,
+  status: number,
+  body: unknown,
+  hints: StatusHints,
+): KizenApiError {
   const detail = formatDrfError(body);
   const message = `${method} ${path} failed with ${String(status)}${detail === undefined ? '' : `: ${detail}`}`;
 
   if (status === 401) {
-    return new KizenApiError('auth_failed', message, { status, hint: AUTH_FAILED_HINT });
+    return new KizenApiError('auth_failed', message, { status, hint: hints.authFailed });
   }
 
   if (status === 403) {
-    return new KizenApiError('forbidden', message, { status, hint: FORBIDDEN_HINT });
+    return new KizenApiError('forbidden', message, { status, hint: hints.forbidden });
   }
 
   if (status === 404) {
@@ -174,36 +208,119 @@ function listResults(method: string, path: string, data: unknown): ListPage {
   throw new KizenApiError('api_error', `${method} ${path} returned an unexpected response shape`);
 }
 
-export function createKizenClient(options: KizenClientOptions): KizenClient {
-  const { credentials } = options;
+const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value !== '' ? value : undefined;
+
+const recordOrEmpty = (value: unknown): Record<string, unknown> => (isRecord(value) ? value : {});
+
+/** The `business` and `team` objects of an `/auth/bootstrap` response, each {} when absent. */
+function bootstrapParts(data: unknown): {
+  business: Record<string, unknown>;
+  team: Record<string, unknown>;
+} {
+  const root = recordOrEmpty(data);
+
+  return { business: recordOrEmpty(root.business), team: recordOrEmpty(root.team) };
+}
+
+/** Re-throws a token-provider failure as the client's own error type. */
+function tokenError(err: unknown, environment: Environment): KizenApiError {
+  if (err instanceof KizenApiError) {
+    return err;
+  }
+
+  const message = err instanceof Error ? err.message : String(err);
+
+  if (err instanceof OAuthError && err.code === 'login_required') {
+    return new KizenApiError('auth_failed', message);
+  }
+
+  if (err instanceof OAuthError && err.code === 'network_error') {
+    return new KizenApiError('network_error', message);
+  }
+
+  return new KizenApiError('api_error', `Couldn't refresh the ${environment} session: ${message}`);
+}
+
+export function createKizenClient(options: KizenClientOptions): KizenSessionClient {
+  const { bearer } = options;
   const fetchImpl = options.fetch ?? fetch;
-  const baseUrl = options.baseUrl ?? BASE_URLS[credentials.environment];
+  const environment = options.bearer ? options.bearer.environment : options.credentials.environment;
+  const apiKeyHeaders = (): Record<string, string> => {
+    const { credentials } = options;
+
+    return credentials === undefined
+      ? {}
+      : {
+          'X-API-KEY': credentials.apiKey,
+          'X-USER-ID': credentials.userId,
+          'X-BUSINESS-ID': credentials.businessId,
+        };
+  };
+
+  const baseUrl = options.baseUrl ?? BASE_URLS[environment];
+
+  // A Bearer token belongs to one environment, so it never goes to another origin.
+  const apiOrigin = new URL(BASE_URLS[environment]).origin;
+
+  if (bearer && new URL(baseUrl).origin !== apiOrigin) {
+    throw new Error(
+      `createKizenClient: baseUrl ${baseUrl} is not on the ${environment} API origin; a ${environment} token is only sent to ${apiOrigin}.`,
+    );
+  }
+
+  const hints: StatusHints = bearer
+    ? { authFailed: bearerAuthFailedHint(environment), forbidden: BEARER_FORBIDDEN_HINT }
+    : API_KEY_HINTS;
+
+  const withToken = async (get: () => Promise<string>): Promise<string> => {
+    try {
+      return await get();
+    } catch (err) {
+      throw tokenError(err, environment);
+    }
+  };
 
   const request = async (method: string, target: string, body?: unknown): Promise<unknown> => {
     const url = /^https?:\/\//.test(target) ? target : `${baseUrl}${target}`;
     const path = url.startsWith(baseUrl) ? url.slice(baseUrl.length) : url;
-    const headers: Record<string, string> = {
-      'X-API-KEY': credentials.apiKey,
-      'X-USER-ID': credentials.userId,
-      'X-BUSINESS-ID': credentials.businessId,
-      Accept: 'application/json',
-    };
-    const init: RequestInit = { method, headers };
 
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
+    const send = async (token: string | undefined): Promise<Response> => {
+      const headers: Record<string, string> = {
+        ...(token === undefined ? apiKeyHeaders() : { Authorization: `Bearer ${token}` }),
+        Accept: 'application/json',
+      };
+      const init: RequestInit = { method, headers };
+
+      if (body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
+      }
+
+      try {
+        return await fetchImpl(url, init);
+      } catch (err) {
+        throw new KizenApiError(
+          'network_error',
+          `Couldn't reach Kizen at ${baseUrl}: ${errorCause(err)}${getProxyEnvStatus() === 'unavailable' ? ` ${PROXY_UNAVAILABLE_HINT}` : ''}`,
+        );
+      }
+    };
 
     let res: Response;
 
-    try {
-      res = await fetchImpl(url, init);
-    } catch (err) {
-      throw new KizenApiError(
-        'network_error',
-        `Couldn't reach Kizen at ${baseUrl}: ${errorCause(err)}${getProxyEnvStatus() === 'unavailable' ? ` ${PROXY_UNAVAILABLE_HINT}` : ''}`,
-      );
+    if (bearer) {
+      const token = await withToken(() => bearer.getAccessToken());
+
+      res = await send(token);
+
+      // One refresh and retry; a second 401 falls through to the auth error below.
+      if (res.status === 401) {
+        await res.body?.cancel().catch(() => undefined);
+        res = await send(await withToken(() => bearer.refreshAccessToken(token)));
+      }
+    } else {
+      res = await send(undefined);
     }
 
     let text: string;
@@ -220,7 +337,7 @@ export function createKizenClient(options: KizenClientOptions): KizenClient {
     }
 
     if (!res.ok) {
-      throw statusError(method, path, res.status, json);
+      throw statusError(method, path, res.status, json, hints);
     }
 
     if (json === undefined && text !== '') {
@@ -294,13 +411,31 @@ export function createKizenClient(options: KizenClientOptions): KizenClient {
       return data as unknown as WireCustomObject;
     },
 
-    async getClientObjectId() {
-      const data = await request('GET', '/auth/bootstrap');
-      const business = isRecord(data) ? data.business : undefined;
-      const clientObject = isRecord(business) ? business.client_object : undefined;
-      const id = isRecord(clientObject) ? clientObject.id : undefined;
+    async getIdentity() {
+      const { business, team } = bootstrapParts(await request('GET', '/auth/bootstrap'));
+      const businessId = nonEmptyString(business.id);
+      const userId = nonEmptyString(team.user);
 
-      return typeof id === 'string' && id !== '' ? id : null;
+      if (businessId === undefined || userId === undefined) {
+        throw new KizenApiError(
+          'api_error',
+          'GET /auth/bootstrap returned an unexpected response shape',
+        );
+      }
+
+      return {
+        userId,
+        businessId,
+        businessName: nonEmptyString(business.name),
+        fullName: nonEmptyString(team.full_name),
+        email: nonEmptyString(team.email),
+      };
+    },
+
+    async getClientObjectId() {
+      const { business } = bootstrapParts(await request('GET', '/auth/bootstrap'));
+
+      return nonEmptyString(recordOrEmpty(business.client_object).id) ?? null;
     },
 
     async getDashboard(id: string) {

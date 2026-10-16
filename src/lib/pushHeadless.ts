@@ -17,7 +17,12 @@ import {
 import { packageBlocks, resolvePackagedBlock, type PackagedBlocks } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
 import { ensureGitignore } from './gitignore.js';
-import { createKizenClient, dashletPath, KizenApiError } from './kizenClient.js';
+import {
+  createKizenClient,
+  dashletPath,
+  KizenApiError,
+  type KizenIdentity,
+} from './kizenClient.js';
 import type {
   CreateDashletBody,
   CustomCodeContent,
@@ -52,6 +57,12 @@ import {
   type PushMapKey,
   type TargetMatch,
 } from './pushBlock.js';
+import {
+  createDefaultTokenProvider,
+  resolveSessionEnvironment,
+  type BearerTokenProvider,
+} from './oauthSession.js';
+import { createOAuthStore } from './oauthStore.js';
 import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
 
 export type PushErrorCode =
@@ -107,6 +118,8 @@ export interface PushCommandOptions {
   force?: boolean;
   forget?: boolean;
   json?: boolean;
+  oauth?: boolean;
+  env?: string;
 }
 
 export interface TargetsCommandOptions {
@@ -114,6 +127,14 @@ export interface TargetsCommandOptions {
   profile?: string;
   object?: string;
   json?: boolean;
+  oauth?: boolean;
+  env?: string;
+}
+
+/** The stored `appbuilder login` sessions, for `--oauth`. */
+export interface OAuthPushDeps {
+  listSessions: () => Promise<Environment[]>;
+  getIdentity: (environment: Environment) => Promise<KizenIdentity>;
 }
 
 export interface PushDeps {
@@ -132,16 +153,27 @@ export interface PushDeps {
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
   setExitCode: (code: number) => void;
+  /** Present when the command runs with `--oauth`; `createClient` then uses Bearer auth. */
+  oauth?: OAuthPushDeps;
 }
 
-export function createDefaultPushDeps(cwd: string): PushDeps {
+/**
+ * `oauth: true` swaps in Bearer auth from the stored login session: `createClient`
+ * ignores the credentials' (empty) API key and authenticates as the session for
+ * `credentials.environment`, sharing one token provider per environment.
+ */
+export function createDefaultPushDeps(cwd: string, options: { oauth?: boolean } = {}): PushDeps {
+  const oauth = options.oauth === true ? createOAuthPushParts() : undefined;
+
   return {
     cwd,
     loadCredentialsDetailed,
     listLoadableCredentialProfiles,
     loadConfig,
     packageBlocks,
-    createClient: (credentials) => createKizenClient({ credentials }),
+    createClient: oauth
+      ? (credentials) => createKizenClient({ bearer: oauth.providerFor(credentials.environment) })
+      : (credentials) => createKizenClient({ credentials }),
     readPushMap,
     writePushMap,
     ensureGitignore,
@@ -156,6 +188,34 @@ export function createDefaultPushDeps(cwd: string): PushDeps {
     },
     setExitCode: (code) => {
       process.exitCode = code;
+    },
+    ...(oauth && { oauth: oauth.deps }),
+  };
+}
+
+function createOAuthPushParts(): {
+  deps: OAuthPushDeps;
+  providerFor: (environment: Environment) => BearerTokenProvider;
+} {
+  const store = createOAuthStore();
+  const providers = new Map<Environment, BearerTokenProvider>();
+  const providerFor = (environment: Environment): BearerTokenProvider => {
+    let provider = providers.get(environment);
+
+    if (!provider) {
+      provider = createDefaultTokenProvider(environment, store);
+      providers.set(environment, provider);
+    }
+
+    return provider;
+  };
+
+  return {
+    providerFor,
+    deps: {
+      listSessions: () => store.listSessions(),
+      getIdentity: (environment) =>
+        createKizenClient({ bearer: providerFor(environment) }).getIdentity(),
     },
   };
 }
@@ -196,8 +256,6 @@ export interface ResolvedCredentials {
   credentials: Credentials;
 }
 
-const environmentList = (): string => ENVIRONMENTS.join(', ');
-
 async function loadCredentialFile(
   path: string,
   deps: PushDeps,
@@ -221,7 +279,7 @@ async function loadCredentialFile(
 
     return failure(
       'credentials_invalid',
-      `${path} ${problem}. Set it to one of: ${environmentList()}. The CLI won't default to production.`,
+      `${path} ${problem}. Set it to one of: ${ENVIRONMENTS.join(', ')}. The CLI won't default to production.`,
     );
   }
 
@@ -240,10 +298,61 @@ async function loadCredentialFile(
   return success({ credentials });
 }
 
-export async function resolveCredentials(
-  options: { credentials?: string; profile?: string },
+async function resolveOAuthCredentials(
+  options: { credentials?: string; profile?: string; env?: string },
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
+  if (options.credentials !== undefined || options.profile !== undefined) {
+    return failure('usage_error', "--oauth can't be combined with -c or --profile.");
+  }
+
+  if (!deps.oauth) {
+    return failure('local_error', 'Sessions are not available here.');
+  }
+
+  const resolved = await resolveSessionEnvironment(options.env, deps.oauth.listSessions);
+
+  if (!resolved.ok) {
+    return failure(
+      resolved.problem === 'not_signed_in' ? 'credentials_invalid' : 'usage_error',
+      resolved.message,
+    );
+  }
+
+  const { environment } = resolved;
+
+  let identity: KizenIdentity;
+
+  try {
+    identity = await deps.oauth.getIdentity(environment);
+  } catch (error) {
+    return apiFailure(error);
+  }
+
+  // The session's token carries the user and business server-side; the IDs fill
+  // in the push map key and display. There is no API key in this mode.
+  return success({
+    credentials: {
+      apiKey: '',
+      userId: identity.userId,
+      businessId: identity.businessId,
+      environment,
+    },
+  });
+}
+
+export async function resolveCredentials(
+  options: { credentials?: string; profile?: string; oauth?: boolean; env?: string },
+  deps: PushDeps,
+): Promise<Step<ResolvedCredentials>> {
+  if (options.oauth === true) {
+    return resolveOAuthCredentials(options, deps);
+  }
+
+  if (options.env !== undefined) {
+    return failure('usage_error', '--env only applies with --oauth.');
+  }
+
   if (options.credentials !== undefined) {
     return loadCredentialFile(options.credentials, deps);
   }
@@ -1113,7 +1222,16 @@ function writeResult(output: Output, result: unknown, text: string, jsonText = t
   }
 }
 
-const credentialArgs = (options: { credentials?: string; profile?: string }): string[] => {
+const credentialArgs = (options: {
+  credentials?: string;
+  profile?: string;
+  oauth?: boolean;
+  env?: string;
+}): string[] => {
+  if (options.oauth === true) {
+    return options.env === undefined ? ['--oauth'] : ['--oauth', '--env', options.env];
+  }
+
   if (options.credentials !== undefined) {
     return ['-c', options.credentials];
   }

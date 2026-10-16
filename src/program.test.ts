@@ -4,11 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Command, Option } from 'commander';
 import { ALL_VALID_ICONS_LIST, CUSTOM_ICON_NAMES } from '../shared/lib/validIcons.js';
+import { setupClaudeDepsFor } from './commands/setupClaude.js';
+import { mcpServerPlan } from './lib/setupClaude.js';
 import { createProgram } from './program.js';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The nine commands, in the order `createProgram` registers them. */
+/** The thirteen commands, in the order `createProgram` registers them. */
 const COMMAND_NAMES = [
   'create',
   'setup-claude',
@@ -19,6 +21,10 @@ const COMMAND_NAMES = [
   'report',
   'icons',
   'block',
+  'login',
+  'logout',
+  'whoami',
+  'auth-header',
 ];
 
 /** Every command's `--help` blurb, verbatim. */
@@ -32,6 +38,11 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   report: 'Generate a self-contained HTML report of the plugin',
   icons: 'List all valid icon names accepted by toolbar items, pages, and adornments',
   block: 'Work with plugin content blocks',
+  login: 'Sign in to Kizen in the browser and store the session on this machine',
+  logout: 'Remove the stored session from this machine',
+  whoami: 'Show the user and business of the stored session',
+  'auth-header':
+    'Print an Authorization header for the stored session as JSON (for a Claude Code MCP headersHelper)',
 };
 
 /** The flag strings each command declares, in declaration order. */
@@ -46,7 +57,7 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '--artifacts <list>',
     '--include-lib',
   ],
-  'setup-claude': ['--dry-run', '--include-lib'],
+  'setup-claude': ['--dry-run', '--include-lib', '--mcp', '--env <env>', '--force'],
   'setup-copilot': ['--dry-run'],
   build: [],
   dev: [
@@ -68,6 +79,10 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
   report: ['-o, --output <path>'],
   icons: [],
   block: [],
+  login: ['--env <env>'],
+  logout: ['--env <env>'],
+  whoami: ['--env <env>'],
+  'auth-header': ['--env <env>'],
 };
 
 const BLOCK_PUSH_FLAGS = [
@@ -82,6 +97,8 @@ const BLOCK_PUSH_FLAGS = [
   '--force',
   '--forget',
   '--json',
+  '--oauth',
+  '--env <env>',
 ];
 
 const BLOCK_TARGETS_FLAGS = [
@@ -89,6 +106,8 @@ const BLOCK_TARGETS_FLAGS = [
   '--profile <name>',
   '--object <id>',
   '--json',
+  '--oauth',
+  '--env <env>',
 ];
 
 function subcommand(program: Command, name: string): Command {
@@ -152,7 +171,7 @@ describe('createProgram', () => {
 });
 
 describe('command wiring', () => {
-  it('registers exactly the nine documented commands, in order', () => {
+  it('registers exactly the thirteen documented commands, in order', () => {
     expect(createProgram().commands.map((command) => command.name())).toStrictEqual(COMMAND_NAMES);
   });
 
@@ -311,8 +330,17 @@ describe('block command', () => {
       'force',
       'forget',
       'json',
+      'oauth',
+      'env',
     ]);
-    expect(attributeNames('targets')).toStrictEqual(['credentials', 'profile', 'object', 'json']);
+    expect(attributeNames('targets')).toStrictEqual([
+      'credentials',
+      'profile',
+      'object',
+      'json',
+      'oauth',
+      'env',
+    ]);
   });
 
   it('leaves every push and targets option unset before parsing', () => {
@@ -380,5 +408,23 @@ describe('icons command', () => {
 
     expect(lines).toContain('kizen-k');
     expect(lines).toContain('form-entity');
+  });
+});
+
+describe('setup-claude --mcp helper', () => {
+  it("the helper pins the CLI's own version", () => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')) as {
+      name: string;
+      version: string;
+    };
+    // The deps the registered setup-claude action uses carry the program's version.
+    const deps = setupClaudeDepsFor(createProgram());
+
+    expect(deps.cliVersion).toBe(pkg.version);
+
+    const plan = mcpServerPlan('staging', deps.cliVersion ?? '');
+    const config = JSON.parse(plan.addArgs[5] ?? '') as { headersHelper: string };
+
+    expect(config.headersHelper).toBe(`npx -y ${pkg.name}@${pkg.version} auth-header`);
   });
 });

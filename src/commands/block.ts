@@ -78,10 +78,14 @@ export function blockCommand(program: Command): void {
     .option('--force', 'overwrite even if the block was edited in Kizen since the last push')
     .option('--forget', 'clear the remembered target for this block first')
     .option('--json', 'print a JSON result to stdout (always headless)')
+    .option('--oauth', 'use the session from `appbuilder login` instead of an API key')
+    .option('--env <env>', 'environment of the session to use (with --oauth)')
     .action(async (apiName: string | undefined, options: PushCommandOptions) => {
       try {
+        const deps = createDefaultPushDeps(process.cwd(), { oauth: options.oauth === true });
+
         if (!process.stdin.isTTY || !process.stdout.isTTY || options.json === true) {
-          await runPushHeadless(apiName, options, createDefaultPushDeps(process.cwd()));
+          await runPushHeadless(apiName, options, deps);
 
           return;
         }
@@ -90,7 +94,7 @@ export function blockCommand(program: Command): void {
           createElement(PushUI, {
             ...(apiName !== undefined && { apiName }),
             options,
-            deps: createDefaultPushDeps(process.cwd()),
+            deps,
           }),
           { exitOnCtrlC: false },
         );
@@ -108,9 +112,14 @@ export function blockCommand(program: Command): void {
     .option('--profile <name>', 'stored credential profile to use')
     .option('--object <id>', 'list the chart groups of this custom object')
     .option('--json', 'print a JSON result to stdout')
+    .option('--oauth', 'use the session from `appbuilder login` instead of an API key')
+    .option('--env <env>', 'environment of the session to use (with --oauth)')
     .action(async (options: TargetsCommandOptions) => {
       try {
-        await runTargetsHeadless(options, createDefaultPushDeps(process.cwd()));
+        await runTargetsHeadless(
+          options,
+          createDefaultPushDeps(process.cwd(), { oauth: options.oauth === true }),
+        );
       } catch (error) {
         fail(error);
       }
