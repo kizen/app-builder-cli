@@ -14,12 +14,25 @@ import {
   runLogout,
   runWhoami,
   type AuthCommandDeps,
-  type TokenProviderOptions,
 } from './oauthCommands.js';
-import { createTokenProvider, FORGET_CLIENT_WAIT_MS, type LoginDeps } from './oauthSession.js';
+import {
+  createTokenProvider,
+  FORGET_CLIENT_WAIT_MS,
+  type LoginDeps,
+  type TokenProviderOptions,
+} from './oauthSession.js';
 import { createOAuthStore, type OAuthSession, type OAuthStore } from './oauthStore.js';
+import {
+  deferred,
+  hangUntilAbort,
+  ISSUER,
+  jsonResponse,
+  NOW,
+  oauthSession,
+  pausingStore,
+  rejectionOf,
+} from '../test/oauth.js';
 
-const NOW = 1_700_000_000_000;
 const ACCESS = 'secret-access-7f3a';
 const REFRESH = 'secret-refresh-91bc';
 const ROTATED_ACCESS = 'secret-access-rotated-22d0';
@@ -37,23 +50,15 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const json = (body: unknown, status = 200): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-
-const session = (
-  environment: Environment,
-  overrides: Partial<OAuthSession> = {},
-): OAuthSession => ({
-  environment,
-  issuer: 'https://staging.kizen.com',
-  clientId: 'client-1',
-  tokenEndpoint: 'https://staging.kizen.com/oauth2/token',
-  accessToken: ACCESS,
-  refreshToken: REFRESH,
-  expiresAt: NOW + 3600 * 1000,
-  scope: 'read write offline_access',
-  ...overrides,
-});
+const session = (environment: Environment, overrides: Partial<OAuthSession> = {}): OAuthSession =>
+  oauthSession({
+    environment,
+    loginId: 'login-1',
+    tokenEndpoint: 'https://staging.kizen.com/oauth2/token',
+    accessToken: ACCESS,
+    refreshToken: REFRESH,
+    ...overrides,
+  });
 
 const BOOTSTRAP = {
   team: { id: 't1', user: 'user-9', full_name: 'Ada Lovelace', email: 'ada@example.com' },
@@ -78,7 +83,7 @@ interface HarnessOptions {
 }
 
 const rotatedTokens = (): Response =>
-  json({
+  jsonResponse({
     access_token: ROTATED_ACCESS,
     refresh_token: ROTATED_REFRESH,
     token_type: 'Bearer',
@@ -151,6 +156,18 @@ const expectNoSecrets = (text: string): void => {
   }
 };
 
+/** A failed auth-header: nothing on stdout, exit 1, one token-free stderr line containing `contains`. */
+const expectHeaderFailure = (
+  h: Pick<Harness, 'stdout' | 'stderr' | 'exitCodes'>,
+  contains = '',
+): void => {
+  expect(h.stdout).toStrictEqual([]);
+  expect(h.exitCodes).toStrictEqual([1]);
+  expect(h.stderr).toHaveLength(1);
+  expect(h.stderr[0]).toContain(contains);
+  expectNoSecrets(h.stderr.join(''));
+};
+
 describe('whoami', () => {
   it('whoami output never contains the access or refresh token', async () => {
     // Fixture 1: fresh token, used as is.
@@ -158,8 +175,8 @@ describe('whoami', () => {
 
     const fresh = harness((url, auth) =>
       url.endsWith('/auth/bootstrap') && auth === `Bearer ${ACCESS}`
-        ? json(BOOTSTRAP)
-        : json({ detail: 'unexpected' }, 400),
+        ? jsonResponse(BOOTSTRAP)
+        : jsonResponse({ detail: 'unexpected' }, 400),
     );
 
     await runWhoami({ env: 'staging' }, fresh.deps);
@@ -174,7 +191,9 @@ describe('whoami', () => {
     await store.writeSession(session('staging', { expiresAt: NOW + 10_000 }));
 
     const refreshed = harness((url, auth) =>
-      auth === `Bearer ${ROTATED_ACCESS}` ? json(BOOTSTRAP) : json({ detail: 'old token' }, 401),
+      auth === `Bearer ${ROTATED_ACCESS}`
+        ? jsonResponse(BOOTSTRAP)
+        : jsonResponse({ detail: 'old token' }, 401),
     );
 
     await runWhoami({}, refreshed.deps);
@@ -186,7 +205,7 @@ describe('whoami', () => {
     expectNoSecrets(refreshed.all());
 
     // Fixture 3: Kizen rejects the session; the error output is token-free too.
-    const rejected = harness(() => json({ detail: 'Invalid token.' }, 401));
+    const rejected = harness(() => jsonResponse({ detail: 'Invalid token.' }, 401));
 
     await runWhoami({ env: 'staging' }, rejected.deps);
 
@@ -196,7 +215,7 @@ describe('whoami', () => {
   });
 
   it('asks to log in when there is no session', async () => {
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
 
     await runWhoami({}, h.deps);
 
@@ -209,7 +228,7 @@ describe('whoami', () => {
     await store.writeSession(session('staging'));
     await store.writeSession(session('integration'));
 
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
 
     await runWhoami({}, h.deps);
     await runWhoami({ env: 'prod' }, h.deps);
@@ -226,7 +245,7 @@ describe('logout', () => {
     await store.writeSession(session('staging'));
     await store.writeSession(session('integration'));
 
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
 
     await runLogout({ env: 'staging' }, h.deps);
 
@@ -252,28 +271,22 @@ describe('logout under the session lock', () => {
   it('logout during an in-flight refresh leaves no session on disk', async () => {
     await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
 
-    let logoutAtLock!: () => void;
-    const atLock = new Promise<void>((resolve) => {
-      logoutAtLock = resolve;
-    });
+    const atLock = deferred();
     let logoutDone = new Promise<unknown>(() => undefined);
-    let refreshStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      refreshStarted = resolve;
-    });
-    const h = harness(() => json(BOOTSTRAP), {
+    const started = deferred();
+    const h = harness(() => jsonResponse(BOOTSTRAP), {
       // The refresh holds the lock until logout is waiting for it (or, if logout
       // didn't take the lock, has already deleted the session).
       tokenEndpoint: async () => {
-        refreshStarted();
-        await Promise.race([atLock, logoutDone]);
+        started.resolve();
+        await Promise.race([atLock.promise, logoutDone]);
 
         return rotatedTokens();
       },
     });
     const refreshing = h.deps.tokenProvider('staging').getAccessToken();
 
-    await started;
+    await started.promise;
 
     const logout = runLogout(
       { env: 'staging' },
@@ -282,7 +295,7 @@ describe('logout under the session lock', () => {
         store: {
           ...store,
           acquireLock: (environment, options) => {
-            logoutAtLock();
+            atLock.resolve();
 
             return store.acquireLock(environment, options);
           },
@@ -299,8 +312,42 @@ describe('logout under the session lock', () => {
     expect(h.exitCodes).toStrictEqual([]);
   });
 
+  it('a logout paused past staleMs before deleting waits for the process that took the lock over', async () => {
+    await store.writeSession(session('staging'));
+
+    // Paused between taking the lock and deleting.
+    const paused = pausingStore(store, 'deleteSession');
+    const h = harness(() => jsonResponse(BOOTSTRAP));
+    const logout = runLogout({ env: 'staging' }, { ...h.deps, store: paused.store });
+
+    await paused.holding;
+
+    // Another process (a refresh, say) takes the stale lock over, reads the
+    // session, and writes rotated tokens once logout has acted.
+    const other = createOAuthStore(dir);
+    const lock = await other.acquireLock('staging', { staleMs: 20, retryMs: 5, waitMs: 2000 });
+    const current = await other.readSession('staging');
+
+    expect(current).not.toBeNull();
+    paused.resume();
+    await paused.acted;
+
+    expect(await lock.confirm()).toBe(true);
+    await other.writeSession(
+      session('staging', { accessToken: ROTATED_ACCESS, refreshToken: ROTATED_REFRESH }),
+    );
+    await lock();
+    await logout;
+
+    // Logout deleted after the other process finished, not underneath it.
+    await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(paused.lockCalls()).toBe(2);
+    expect(h.stdout.join('')).toContain('Signed out of staging');
+    expect(h.exitCodes).toStrictEqual([]);
+  });
+
   it('logout removes a corrupt session file', async () => {
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
     const path = store.sessionPath('staging');
 
     await mkdir(store.dir, { recursive: true });
@@ -331,7 +378,7 @@ describe('unreadable session', () => {
 
   it("whoami reports the unreadable file rather than 'not signed in'", async () => {
     const path = await corrupt();
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
 
     await runWhoami({}, h.deps);
 
@@ -345,8 +392,101 @@ describe('unreadable session', () => {
 });
 
 describe('login', () => {
+  /** A server and browser that approve at once, so the real `login` signs in to staging. */
+  const approvingLoginDeps = (): LoginDeps => ({
+    store,
+    fetch: (input) => {
+      const url = input as string;
+
+      return Promise.resolve(
+        url.endsWith('/.well-known/oauth-authorization-server')
+          ? jsonResponse({
+              issuer: ISSUER,
+              authorization_endpoint: `${ISSUER}/oauth2/authorize`,
+              token_endpoint: `${ISSUER}/oauth2/token`,
+              registration_endpoint: `${ISSUER}/oauth2/register`,
+            })
+          : url.endsWith('/oauth2/register')
+            ? jsonResponse({ client_id: 'client-1' }, 201)
+            : rotatedTokens(),
+      );
+    },
+    now: () => NOW,
+    print: () => undefined,
+    openBrowser: () => undefined,
+    startLoopbackServer: () =>
+      Promise.resolve({
+        host: '127.0.0.1',
+        port: 1,
+        redirectUri: 'http://127.0.0.1:1/callback',
+        result: Promise.resolve({ code: 'auth-code' }),
+        close: () => Promise.resolve(),
+      }),
+  });
+
+  it('login prints Signed in and the account identity', async () => {
+    const h = harness(() => jsonResponse({ detail: 'login never calls Kizen' }, 500));
+
+    await runLogin(
+      { env: 'staging' },
+      {
+        ...h.deps,
+        loginDeps: approvingLoginDeps(),
+        getIdentity: () =>
+          Promise.resolve({
+            userId: 'user-9',
+            businessId: 'biz-9',
+            businessName: 'Acme Corp',
+            fullName: 'Ada Lovelace',
+            email: 'ada@example.com',
+          }),
+      },
+    );
+
+    expect(h.stdout).toStrictEqual([
+      'Signed in to staging.\n',
+      'Environment: staging\nUser: Ada Lovelace <ada@example.com> (user-9)\nBusiness: Acme Corp (biz-9)\n',
+    ]);
+    expect(h.stderr).toStrictEqual(['Signing in to staging.\n']);
+    expect(h.exitCodes).toStrictEqual([]);
+    expect(await store.readSession('staging')).toMatchObject({ accessToken: ROTATED_ACCESS });
+    expectNoSecrets(h.all());
+  });
+
+  it("login still succeeds when the account details can't be loaded", async () => {
+    const h = harness(() => jsonResponse({ detail: 'login never calls Kizen' }, 500));
+
+    await runLogin(
+      { env: 'staging' },
+      {
+        ...h.deps,
+        loginDeps: approvingLoginDeps(),
+        getIdentity: () => Promise.reject(new Error('Kizen is unavailable')),
+      },
+    );
+
+    expect(h.stdout).toStrictEqual(['Signed in to staging.\n']);
+    expect(h.stderr).toStrictEqual([
+      'Signing in to staging.\n',
+      "Signed in, but couldn't load the account details: Kizen is unavailable\n",
+    ]);
+    expect(h.exitCodes).toStrictEqual([]);
+    expect(await store.readSession('staging')).toMatchObject({ accessToken: ROTATED_ACCESS });
+  });
+
+  it('login progress lines from the production deps go to stderr', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    try {
+      createDefaultAuthCommandDeps(store).loginDeps.print('Opening your browser');
+      expect(write).toHaveBeenCalledWith('Opening your browser\n');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it('rejects an unknown --env before contacting anything', async () => {
-    const h = harness(() => json(BOOTSTRAP));
+    const h = harness(() => jsonResponse(BOOTSTRAP));
 
     await runLogin({ env: 'nope' }, h.deps);
 
@@ -358,7 +498,7 @@ describe('login', () => {
 
 describe('auth-header', () => {
   const STAGING_MCP = 'https://staging.kizen.com/api/mcp';
-  const noKizen = (): Response => json({ detail: 'auth-header never calls Kizen' }, 500);
+  const noKizen = (): Response => jsonResponse({ detail: 'auth-header never calls Kizen' }, 500);
   const header = (token: string): string =>
     `${JSON.stringify({ Authorization: `Bearer ${token}` })}\n`;
 
@@ -401,15 +541,12 @@ describe('auth-header', () => {
 
     await runAuthHeader({ env: 'integration' }, other.deps);
 
+    expectHeaderFailure(none, 'appbuilder login --env go');
+    expectHeaderFailure(other, 'appbuilder login --env integration');
+
     for (const h of [none, other]) {
-      expect(h.stdout).toStrictEqual([]);
-      expect(h.exitCodes).toStrictEqual([1]);
-      expect(h.stderr).toHaveLength(1);
       expect(h.stderr[0]?.trimEnd().includes('\n')).toBe(false);
     }
-
-    expect(none.stderr[0]).toContain('appbuilder login --env go');
-    expect(other.stderr[0]).toContain('appbuilder login --env integration');
   });
 
   it('auth-header resolves env from CLAUDE_CODE_MCP_SERVER_URL', async () => {
@@ -432,8 +569,7 @@ describe('auth-header', () => {
     const unset = harness(noKizen);
 
     await runAuthHeader({}, unset.deps);
-    expect(unset.stdout).toStrictEqual([]);
-    expect(unset.stderr[0]).toContain('pass --env <env>');
+    expectHeaderFailure(unset, 'pass --env <env>');
   });
 
   it('auth-header errors on a server URL matching no environment', async () => {
@@ -446,8 +582,7 @@ describe('auth-header', () => {
 
     await runAuthHeader({}, h.deps);
 
-    expect(h.stdout).toStrictEqual([]);
-    expect(h.exitCodes).toStrictEqual([1]);
+    expectHeaderFailure(h);
     expect(h.stderr).toStrictEqual([
       "appbuilder auth-header: No Kizen environment matches the MCP server https://mcp.example.com, so auth-header won't send it a token.\n",
     ]);
@@ -477,19 +612,14 @@ describe('auth-header', () => {
 
       await runAuthHeader({ env }, h.deps);
 
-      expect(h.stdout).toStrictEqual([]);
-      expect(h.exitCodes).toStrictEqual([1]);
-      expect(h.stderr).toHaveLength(1);
-      expect(h.stderr[0]).toContain(message);
+      expectHeaderFailure(h, message);
       expect(h.providerOptions).toStrictEqual([]);
-      expectNoSecrets(h.stderr.join(''));
     }
 
     const unknown = harness(noKizen, { processEnv: { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP } });
 
     await runAuthHeader({ env: 'prod' }, unknown.deps);
-    expect(unknown.stdout).toStrictEqual([]);
-    expect(unknown.stderr[0]).toContain('Unknown --env "prod"');
+    expectHeaderFailure(unknown, 'Unknown --env "prod"');
   });
 
   it('--env agreeing with CLAUDE_CODE_MCP_SERVER_URL prints the token', async () => {
@@ -523,27 +653,18 @@ describe('auth-header', () => {
     // the real clock, so the session expires 30s from now (inside the refresh leeway).
     await store.writeSession(session('staging', { expiresAt: Date.now() + 30_000 }));
 
-    const hang = vi.fn<typeof fetch>(
-      (_input, init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(init.signal?.reason as Error);
-          });
-        }),
-    );
+    const hang = vi.fn<typeof fetch>((_input, init) => hangUntilAbort(init));
 
     vi.stubGlobal('fetch', hang);
 
     try {
       const deps = createDefaultAuthCommandDeps(store);
       const started = Date.now();
-      const error = await deps
-        .tokenProvider('staging', { requestTimeoutMs: 150, lock: { waitMs: 150 } })
-        .getAccessToken()
-        .then(
-          () => null,
-          (err: unknown) => err,
-        );
+      const error = await rejectionOf(
+        deps
+          .tokenProvider('staging', { requestTimeoutMs: 150, lock: { waitMs: 150 } })
+          .getAccessToken(),
+      );
       const elapsed = Date.now() - started;
 
       expect(error).toMatchObject({ code: 'network_error' });
@@ -554,8 +675,7 @@ describe('auth-header', () => {
       expect(elapsed).toBeLessThan(2_000);
 
       // And runAuthHeader on the production deps passes its own timeouts through.
-      const stdout: string[] = [];
-      const stderr: string[] = [];
+      const out = { stdout: [] as string[], stderr: [] as string[], exitCodes: [] as number[] };
       const headerStarted = Date.now();
 
       await runAuthHeader(
@@ -564,15 +684,14 @@ describe('auth-header', () => {
           ...deps,
           authHeaderTimeouts: { requestTimeoutMs: 150, lockWaitMs: 150 },
           processEnv: { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP },
-          writeStdout: (text) => stdout.push(text),
-          writeStderr: (text) => stderr.push(text),
-          setExitCode: () => undefined,
+          writeStdout: (text) => out.stdout.push(text),
+          writeStderr: (text) => out.stderr.push(text),
+          setExitCode: (code) => out.exitCodes.push(code),
         },
       );
 
       expect(Date.now() - headerStarted).toBeLessThan(2_000);
-      expect(stdout).toStrictEqual([]);
-      expect(stderr[0]).toContain('timed out');
+      expectHeaderFailure(out, 'timed out');
       expect(await store.readSession('staging')).toMatchObject({ refreshToken: REFRESH });
     } finally {
       vi.unstubAllGlobals();
@@ -620,29 +739,10 @@ describe('auth-header', () => {
       },
     ]);
 
-    // A token endpoint that never answers fails on the request timeout (small
-    // injected value), with nothing on stdout.
+    // A lock held by another process fails on the lock wait (small injected
+    // value): an expiring session, so a refresh is needed.
     await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
 
-    const hanging = harness(noKizen, {
-      timeouts: { requestTimeoutMs: 50, lockWaitMs: 50 },
-      tokenEndpoint: (init) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => {
-            reject(init.signal?.reason as Error);
-          });
-        }),
-    });
-    const started = Date.now();
-
-    await runAuthHeader({}, hanging.deps);
-
-    expect(Date.now() - started).toBeLessThan(2_000);
-    expect(hanging.stdout).toStrictEqual([]);
-    expect(hanging.exitCodes).toStrictEqual([1]);
-    expect(hanging.stderr[0]).toContain('timed out');
-
-    // A lock held by another process fails on the lock wait the same way.
     const release = await createOAuthStore(dir).acquireLock('staging');
     const locked = harness(noKizen, { timeouts: { requestTimeoutMs: 50, lockWaitMs: 50 } });
     const lockedStart = Date.now();
@@ -651,8 +751,7 @@ describe('auth-header', () => {
     await release();
 
     expect(Date.now() - lockedStart).toBeLessThan(2_000);
-    expect(locked.stdout).toStrictEqual([]);
-    expect(locked.stderr[0]).toContain('Timed out waiting for another appbuilder process');
+    expectHeaderFailure(locked, 'Timed out waiting for another appbuilder process');
     expect(locked.fetchMock).not.toHaveBeenCalled();
   });
 
@@ -672,28 +771,12 @@ describe('auth-header', () => {
 
       await runAuthHeader(options, h.deps);
 
-      expect(h.stdout).toStrictEqual([]);
-      expect(h.exitCodes).toStrictEqual([1]);
+      expectHeaderFailure(h);
       expect(h.stderr).toStrictEqual([
         `appbuilder auth-header: The saved staging session at ${store.sessionPath('staging')} can't be read. Run \`appbuilder login --env staging\` to sign in again.\n`,
       ]);
-      expectNoSecrets(h.all());
       expect(h.fetchMock).not.toHaveBeenCalled();
     }
-
-    // And a lock that's never released: an expiring session, so a refresh is needed.
-    await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
-
-    const release = await createOAuthStore(dir).acquireLock('staging');
-    const locked = harness(noKizen, { timeouts: { requestTimeoutMs: 50, lockWaitMs: 50 } });
-
-    await runAuthHeader({ env: 'staging' }, locked.deps);
-    await release();
-
-    expect(locked.stdout).toStrictEqual([]);
-    expect(locked.exitCodes).toStrictEqual([1]);
-    expect(locked.stderr).toHaveLength(1);
-    expect(locked.stderr[0]).toContain('Timed out waiting for another appbuilder process');
   });
 
   it('auth-header never writes tokens to stderr', async () => {
@@ -701,7 +784,8 @@ describe('auth-header', () => {
     await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
 
     const revoked = harness(noKizen, {
-      tokenEndpoint: () => json({ error: 'invalid_grant', error_description: 'Revoked' }, 400),
+      tokenEndpoint: () =>
+        jsonResponse({ error: 'invalid_grant', error_description: 'Revoked' }, 400),
     });
 
     await runAuthHeader({}, revoked.deps);
@@ -726,13 +810,8 @@ describe('auth-header', () => {
 
     await runAuthHeader({}, mismatched.deps);
 
-    const failures = [revoked, unreachable, mismatched];
-
-    for (const h of failures) {
-      expect(h.stdout).toStrictEqual([]);
-      expect(h.exitCodes).toStrictEqual([1]);
-      expect(h.stderr).toHaveLength(1);
-      expectNoSecrets(h.stderr.join(''));
+    for (const h of [revoked, unreachable, mismatched]) {
+      expectHeaderFailure(h);
     }
   });
 });

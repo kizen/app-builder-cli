@@ -22,12 +22,13 @@ function readVersion(): string {
 
 export function createProgram(): Command {
   const program = new Command();
+  const version = readVersion();
 
-  program.name('appbuilder').description('Kizen plugin app builder').version(readVersion());
+  program.name('appbuilder').description('Kizen plugin app builder').version(version);
 
   createCommand(program);
 
-  setupClaudeCommand(program);
+  setupClaudeCommand(program, version);
 
   setupCopilotCommand(program);
 

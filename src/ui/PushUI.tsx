@@ -8,7 +8,6 @@ import {
 } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { type ValidationIssue } from '@kizenapps/packager';
-import { type Credentials } from '../lib/credentials.js';
 import { formatValidationIssues } from '../lib/formatValidationIssues.js';
 import { type Surface } from '../lib/kizenTypes.js';
 import { surfaceToDashboardType } from '../lib/pushBlock.js';
@@ -29,12 +28,14 @@ import {
   toTargetRow,
   warningLines,
   type AppliedPush,
+  type PushAccount,
   type PushChoice,
   type PushCommandOptions,
   type PushContext,
   type PushDeps,
   type PushPlan,
   type ResolvedBlock,
+  type ResolvedCredentials,
   type ResolvedTarget,
   type TargetCustomObject,
   type TargetRow,
@@ -57,7 +58,7 @@ interface ErrorView {
 }
 
 interface Session {
-  credentials: Credentials | null;
+  credentials: PushAccount | null;
   warnings: ValidationIssue[];
   notices: string[];
 }
@@ -74,7 +75,7 @@ type Phase =
   | {
       type: 'block-select';
       options: PushCommandOptions;
-      credentials: Credentials;
+      resolved: ResolvedCredentials;
       choices: PushChoice[];
     }
   | ({ type: 'surface-select' } & Resolving)
@@ -324,12 +325,12 @@ function createPushFlow(
 
   const prepare = async (
     options: PushCommandOptions,
-    credentials: Credentials,
+    { credentials, client }: ResolvedCredentials,
     block: ResolvedBlock,
   ): Promise<void> => {
     const { context, forgotten } = await loadPushContext(
       {
-        client: deps.createClient(credentials),
+        client,
         credentials,
         block,
         forget: options.forget === true,
@@ -355,7 +356,7 @@ function createPushFlow(
 
   const packageBlock = async (
     options: PushCommandOptions,
-    credentials: Credentials,
+    resolved: ResolvedCredentials,
     name: string | undefined,
   ): Promise<void> => {
     setPhase({ type: 'packaging' });
@@ -364,7 +365,7 @@ function createPushFlow(
 
     if (!step.ok) {
       if (step.choice === 'block' && step.choices) {
-        setPhase({ type: 'block-select', options, credentials, choices: step.choices });
+        setPhase({ type: 'block-select', options, resolved, choices: step.choices });
 
         return;
       }
@@ -375,7 +376,7 @@ function createPushFlow(
     }
 
     setSession((session) => ({ ...session, warnings: step.value.warnings }));
-    await prepare(options, credentials, step.value);
+    await prepare(options, resolved, step.value);
   };
 
   const loadCredentials = async (options: PushCommandOptions): Promise<void> => {
@@ -395,10 +396,8 @@ function createPushFlow(
       return;
     }
 
-    const { credentials } = step.value;
-
-    setSession((session) => ({ ...session, credentials }));
-    await packageBlock(options, credentials, apiName);
+    setSession((session) => ({ ...session, credentials: step.value.credentials }));
+    await packageBlock(options, step.value, apiName);
   };
 
   const listDashboards = async (
@@ -446,7 +445,7 @@ function createPushFlow(
       guard(() => loadCredentials({ ...phase.options, profile: choice.value }));
     },
     pickBlock: (phase, choice) => {
-      guard(() => packageBlock(phase.options, phase.credentials, choice.value));
+      guard(() => packageBlock(phase.options, phase.resolved, choice.value));
     },
     pickSurface: (phase, surface) => {
       guard(async () => {

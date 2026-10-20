@@ -13,7 +13,9 @@ import type {
 } from './credentials.js';
 import type { ViewsByPlugin } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
+import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
 import { KizenApiError } from './kizenClient.js';
+import { createOAuthStore, type OAuthSession } from './oauthStore.js';
 import type {
   KizenClient,
   PushMapEntry,
@@ -27,6 +29,7 @@ import {
   apiFailure,
   buildBrowserRefresh,
   createDefaultPushDeps,
+  createOAuthPushDeps,
   buildPlan,
   buildTargetChoices,
   headlessWriteGate,
@@ -48,6 +51,7 @@ import {
 } from './pushHeadless.js';
 import { isClaudeSkillStale } from './setupClaude.js';
 import { makePlugin, routablePage } from '../test/fixtures.js';
+import { jsonResponse, oauthSession } from '../test/oauth.js';
 
 const PLUGIN = 'acme';
 const BLOCK = 'chart';
@@ -334,6 +338,10 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
     setExitCode: (code) => {
       exitCodes.push(code);
     },
+    oauth: {
+      listSessions: vi.fn(() => Promise.resolve([])),
+      connect: vi.fn(() => Promise.reject(new Error('no OAuth session in this test'))),
+    },
     ...options.deps,
   };
 
@@ -440,13 +448,17 @@ describe('resolveCredentials', () => {
   ];
 
   it('prefers -c over --profile and config', async () => {
-    const { deps } = makeHarness({
+    const { deps, fake } = makeHarness({
       profiles,
       config: { activeCredentialProfile: 'staging' },
     });
     const step = await resolveCredentials({ credentials: '/tmp/c.json', profile: 'staging' }, deps);
 
-    expect(step).toStrictEqual({ ok: true, value: { credentials: makeCredentials() } });
+    expect(step).toStrictEqual({
+      ok: true,
+      value: { credentials: makeCredentials(), client: fake.client },
+    });
+    expect(deps.createClient).toHaveBeenCalledWith(makeCredentials());
     expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith('/tmp/c.json');
     expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
   });
@@ -2208,34 +2220,69 @@ describe('--oauth', () => {
     email: 'ada@example.com',
   };
 
-  const oauthDeps = (sessions: Environment[]): OAuthPushDeps & { getIdentity: Mock } => ({
+  const oauthDeps = (
+    sessions: Environment[],
+    fake: FakeClient = makeClient(),
+  ): OAuthPushDeps & { listSessions: Mock; connect: Mock } => ({
     listSessions: vi.fn(() => Promise.resolve(sessions)),
-    getIdentity: vi.fn(() => Promise.resolve(IDENTITY)),
+    connect: vi.fn(() => Promise.resolve({ identity: IDENTITY, client: fake.client })),
   });
 
-  it('without the flag, default deps have no OAuth session support', () => {
-    expect('oauth' in createDefaultPushDeps(CWD)).toBe(false);
-    expect('oauth' in createDefaultPushDeps(CWD, { oauth: true })).toBe(true);
+  /** A temp OAuth store holding one staging session, removed after `run`. */
+  const withStore = async (
+    run: (store: ReturnType<typeof createOAuthStore>, session: OAuthSession) => Promise<void>,
+  ): Promise<void> => {
+    const dir = await mkdtemp(join(tmpdir(), 'appbuilder-push-oauth-'));
+
+    try {
+      const store = createOAuthStore(dir);
+      const session = oauthSession({
+        tokenEndpoint: 'https://staging.kizen.com/oauth2/token',
+        accessToken: 'access-a',
+        refreshToken: 'refresh-a',
+        expiresAt: Date.now() + 3600 * 1000,
+        scope: undefined,
+      });
+
+      await store.writeSession(session);
+      await run(store, session);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('api-key push never reads OAuth sessions', async () => {
+    expect(createDefaultPushDeps(CWD).oauth).toBeDefined();
+
+    const fake = makeClient({ dashboards: [makeDashboard()] });
+    const harness = await runPush(makeHarness({ fake }), {
+      dashboard: 'D1',
+      create: true,
+      yes: true,
+    });
+
+    expect(harness.json()).toMatchObject({ ok: true, applied: true });
+    expect(harness.deps.createClient).toHaveBeenCalledWith(makeCredentials());
+    expect(harness.deps.oauth.listSessions).not.toHaveBeenCalled();
+    expect(harness.deps.oauth.connect).not.toHaveBeenCalled();
   });
 
-  it('builds credentials from the session identity for --env, without reading API-key profiles', async () => {
-    const oauth = oauthDeps(['go', 'staging']);
+  it('resolves the session identity and client for --env, without reading API-key profiles', async () => {
+    const fake = makeClient();
+    const oauth = oauthDeps(['go', 'staging'], fake);
     const { deps } = makeHarness({ deps: { oauth } });
     const step = await resolveCredentials({ oauth: true, env: 'staging' }, deps);
 
     expect(step).toStrictEqual({
       ok: true,
       value: {
-        credentials: {
-          apiKey: '',
-          userId: 'oauth-user',
-          businessId: 'oauth-biz',
-          environment: 'staging',
-        },
+        credentials: { environment: 'staging', businessId: 'oauth-biz' },
+        client: fake.client,
       },
     });
-    expect(oauth.getIdentity).toHaveBeenCalledWith('staging');
+    expect(oauth.connect).toHaveBeenCalledWith('staging');
     expect(oauth.listSessions).not.toHaveBeenCalled();
+    expect(deps.createClient).not.toHaveBeenCalled();
     expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
     expect(deps.loadCredentialsDetailed).not.toHaveBeenCalled();
   });
@@ -2267,13 +2314,13 @@ describe('--oauth', () => {
 
     expect(step).toMatchObject({ ok: false, code: 'usage_error' });
     expect(!step.ok && step.message).toContain(message);
-    expect(oauth.getIdentity).not.toHaveBeenCalled();
+    expect(oauth.connect).not.toHaveBeenCalled();
   });
 
   it('reports a rejected session as auth_failed with its hint', async () => {
     const oauth = oauthDeps(['staging']);
 
-    oauth.getIdentity.mockRejectedValueOnce(
+    oauth.connect.mockRejectedValueOnce(
       new KizenApiError('auth_failed', 'GET /auth/bootstrap failed with 401', {
         status: 401,
         hint: 'Run `appbuilder login --env staging`',
@@ -2291,21 +2338,140 @@ describe('--oauth', () => {
 
   it('carries --oauth --env into the follow-up commands it prints', async () => {
     const fake = makeClient({ summaries: { generic_dashboard: [summary()] } });
-    const harness = await runPush(makeHarness({ fake, deps: { oauth: oauthDeps(['staging']) } }), {
+    const oauth = oauthDeps(['staging'], fake);
+    const harness = await runPush(makeHarness({ fake, deps: { oauth } }), {
       json: false,
       oauth: true,
       env: 'staging',
     });
 
-    expect(harness.deps.createClient).toHaveBeenCalledWith({
-      apiKey: '',
-      userId: 'oauth-user',
-      businessId: 'oauth-biz',
-      environment: 'staging',
-    });
+    expect(oauth.connect).toHaveBeenCalledWith('staging');
+    expect(harness.deps.createClient).not.toHaveBeenCalled();
     expect(harness.exitCodes).toStrictEqual([1]);
     expect(harness.stderr.join('')).toContain(
       `appbuilder block push ${BLOCK} --oauth --env staging --dashboard`,
     );
+  });
+
+  it('push aborts without writing the push map when the login changes after identity lookup', async () => {
+    await withStore(async (store, loginA) => {
+      const loginB = {
+        ...loginA,
+        loginId: 'login-b',
+        accessToken: 'access-b',
+        refreshToken: 'refresh-b',
+      };
+      const base = BASE_URLS.staging;
+      const businessFor: Record<string, string> = {
+        'Bearer access-a': 'oauth-biz-a',
+        'Bearer access-b': 'oauth-biz-b',
+      };
+      const requests: { method: string; url: string; auth: string }[] = [];
+      // A Kizen API that serves either login: only the provider's pin can stop
+      // business B's token from writing a dashlet the push records under business A.
+      const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+        const url = input as string;
+        const method = init?.method ?? 'GET';
+        const auth = new Headers(init?.headers).get('Authorization') ?? '';
+
+        requests.push({ method, url, auth });
+
+        if (url === `${base}/auth/bootstrap`) {
+          // Another terminal signs in to another business right after the lookup.
+          await store.writeSession(loginB);
+
+          return jsonResponse({
+            team: { user: 'oauth-user' },
+            business: { id: businessFor[auth], name: 'Acme' },
+          });
+        }
+
+        if (url === `${base}/dashboards/D1` && method === 'GET') {
+          return jsonResponse(makeDashboard());
+        }
+
+        if (url === `${base}/dashboards/D1/dashlet` && method === 'POST') {
+          return jsonResponse({
+            id: 'NEW',
+            name: pushKey(PLUGIN, BLOCK),
+            layout: null,
+            config: {},
+            dashboard: 'D1',
+          } satisfies WireDashlet);
+        }
+
+        return new Response('not found', { status: 404 });
+      });
+      // The real wiring: one provider behind the identity lookup and every write.
+      const harness = makeHarness({
+        deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
+      });
+
+      await runPush(harness, {
+        oauth: true,
+        env: 'staging',
+        dashboard: 'D1',
+        create: true,
+        yes: true,
+      });
+
+      expect(harness.json()).toMatchObject({
+        ok: false,
+        code: 'auth_failed',
+        message: 'The staging sign-in changed while this command was running. Run it again.',
+      });
+      expect(harness.exitCodes).not.toStrictEqual([]);
+      // The identity came from login A, and nothing after it went out at all.
+      expect(requests).toStrictEqual([
+        { method: 'GET', url: `${base}/auth/bootstrap`, auth: 'Bearer access-a' },
+      ]);
+      expect(harness.deps.createClient).not.toHaveBeenCalled();
+      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+      expect(harness.pushMap.entries).toStrictEqual([]);
+      expect(await store.readSession('staging')).toStrictEqual(loginB);
+    });
+  });
+
+  it('targets with --oauth fetches /auth/bootstrap once', async () => {
+    await withStore(async (store) => {
+      const base = BASE_URLS.staging;
+      const fetchMock = vi.fn<typeof fetch>((input) => {
+        const url = input as string;
+
+        if (url === `${base}/auth/bootstrap`) {
+          return Promise.resolve(
+            jsonResponse({
+              team: { user: 'oauth-user' },
+              business: { id: 'oauth-biz', name: 'Acme', client_object: { id: 'contacts-1' } },
+            }),
+          );
+        }
+
+        if (url.startsWith(`${base}/dashboards/mine?`)) {
+          return Promise.resolve(jsonResponse({ results: [] }));
+        }
+
+        if (url === `${base}/custom-objects?page_size=200`) {
+          return Promise.resolve(jsonResponse({ results: [], next: null }));
+        }
+
+        return Promise.resolve(new Response('not found', { status: 404 }));
+      });
+      const harness = makeHarness({
+        deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
+      });
+
+      await runTargetsHeadless({ json: true, oauth: true, env: 'staging' }, harness.deps);
+
+      expect(harness.json()).toMatchObject({
+        ok: true,
+        environment: 'staging',
+        businessId: 'oauth-biz',
+        customObjects: [{ id: 'contacts-1', objectName: 'Contacts', fetchUrl: 'client' }],
+      });
+      expect(
+        fetchMock.mock.calls.filter(([input]) => input === `${base}/auth/bootstrap`),
+      ).toHaveLength(1);
+    });
   });
 });

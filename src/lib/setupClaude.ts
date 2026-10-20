@@ -1,10 +1,10 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
-import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
+import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import type { ScaffoldedFile } from './createArtifacts.js';
-import { isEnvironment, unknownEnvironmentMessage, type Environment } from './credentials.js';
+import { parseEnvironment, type Environment } from './credentials.js';
 import { claudeFiles, kizenDataLibPath } from './createCopilotFiles.js';
-import { isErrnoCode, normalizeEntryDir } from './guards.js';
+import { errorMessage, isErrnoCode, normalizeEntryDir } from './guards.js';
 import {
   applyManagedFiles,
   formatManagedFileLine,
@@ -114,17 +114,8 @@ export async function isClaudeSkillStale(
 /** The published package name (package.json `name`; a test keeps them equal). */
 export const CLI_PACKAGE_NAME = '@kizenapps/cli';
 
-/**
- * The headersHelper Claude Code runs. It's pinned to the running CLI's version,
- * so npx never resolves an older published CLI without `auth-header`, or a newer
- * one the user didn't choose; `setup-claude --mcp --force` after an upgrade
- * re-pins it. No --env: auth-header resolves it from the server URL.
- */
-export const mcpHeadersHelper = (cliVersion: string): string =>
-  `npx -y ${CLI_PACKAGE_NAME}@${cliVersion} auth-header`;
-
-/** Bound on each `claude mcp …` call; a call still running after this is killed and reported as a failure. */
-export const CLAUDE_COMMAND_TIMEOUT_MS = 60_000;
+/** Per `claude mcp …` call; a call still running is killed and reported as a failure. */
+const CLAUDE_COMMAND_TIMEOUT_MS = 60_000;
 
 export interface CommandResult {
   /** Exit code, or null when the process was killed (e.g. on timeout). */
@@ -168,16 +159,15 @@ export interface SetupClaudeDeps {
   run: RunCommand;
   /** Throws (an OAuthError saying how to sign in again) when the session can't be read. */
   hasOAuthSession: (environment: Environment) => Promise<boolean>;
-  /** The running CLI's version (package.json `version`), which the MCP helper pins. */
-  cliVersion: string | undefined;
+  /** The running CLI's version, which the MCP helper pins. */
+  cliVersion: string;
 }
 
-export const defaultSetupClaudeDeps: SetupClaudeDeps = {
+export const createDefaultSetupClaudeDeps = (cliVersion: string): SetupClaudeDeps => ({
   run: runCommand,
   hasOAuthSession: async (environment) =>
     (await createOAuthStore().readSession(environment)) !== null,
-  // The command supplies it from the program's version (see commands/setupClaude.ts).
-  cliVersion: undefined,
+  cliVersion,
   fs: nodeClaudeFs,
   log: (line) => {
     console.log(line);
@@ -188,7 +178,7 @@ export const defaultSetupClaudeDeps: SetupClaudeDeps = {
   setExitCode: (code) => {
     process.exitCode = code;
   },
-};
+});
 
 const count = (plan: readonly ManagedFilePlan[], status: ManagedFileStatus): string =>
   `${String(plan.filter((entry) => entry.status === status).length)} ${status}`;
@@ -201,7 +191,7 @@ export interface SetupClaudeOptions {
   force?: boolean;
 }
 
-export interface McpServerPlan {
+interface McpServerPlan {
   environment: Environment;
   name: string;
   url: string;
@@ -216,11 +206,13 @@ const shellQuote = (arg: string): string =>
 
 export function mcpServerPlan(environment: Environment, cliVersion: string): McpServerPlan {
   const name = `kizen-${environment}`;
-  const url = `${new URL(BASE_URLS[environment]).origin}/api/mcp`;
+  const url = `${apiOriginFor(environment)}/api/mcp`;
   const config = JSON.stringify({
     type: 'http',
     url,
-    headersHelper: mcpHeadersHelper(cliVersion),
+    // Pinned, so npx never resolves a published CLI without `auth-header` or one the user didn't
+    // choose; `--force` after an upgrade re-pins it. No --env: auth-header reads the server URL.
+    headersHelper: `npx -y ${CLI_PACKAGE_NAME}@${cliVersion} auth-header`,
   });
   const addArgs = ['mcp', 'add-json', '--scope', 'user', name, config];
 
@@ -233,24 +225,17 @@ export function mcpServerPlan(environment: Environment, cliVersion: string): Mcp
   };
 }
 
-/** The flag combination problem, if any; checked before anything runs. */
 function usageProblem(options: SetupClaudeOptions): string | undefined {
   if (options.mcp !== true && (options.env !== undefined || options.force === true)) {
     return '--env and --force only apply with --mcp.';
   }
 
-  if (options.env !== undefined && !isEnvironment(options.env)) {
-    return unknownEnvironmentMessage(options.env);
-  }
-
-  return undefined;
+  return options.env === undefined ? undefined : parseEnvironment(options.env).message;
 }
 
 /**
- * Whether `claude mcp add-json` failed because the name is taken in the target
- * scope. Observed output (exit 1): `MCP server <name> already exists in user config`.
- * The wording isn't a documented contract, so this matches "already exists" loosely
- * and ignores case.
+ * The name is taken at user scope. Observed: `MCP server <name> already exists in user config`.
+ * Claude Code's wording isn't a documented contract, so the match is loose and ignores case.
  */
 const alreadyExists = (result: CommandResult): boolean =>
   /already\s+exists/i.test(`${result.stdout}\n${result.stderr}`);
@@ -263,28 +248,14 @@ const outputOf = (result: CommandResult): string => {
   return text === '' ? status : `${status}: ${text}`;
 };
 
-/**
- * Registers the Kizen MCP server for `environment` in Claude Code at user scope,
- * with `auth-header` as its headersHelper. Never throws; failures are reported
- * and set exit code 1. A missing `claude` prints the command to run instead.
- */
+/** Never throws; failures set exit code 1. A missing `claude` prints the command to run instead. */
 async function setupMcpServer(
   environment: Environment,
   options: { dryRun: boolean; force: boolean },
   deps: SetupClaudeDeps,
 ): Promise<void> {
-  if (deps.cliVersion === undefined || deps.cliVersion === '') {
-    deps.error(
-      `Error: couldn't register the MCP server kizen-${environment}: the CLI's version is unknown, so the auth-header helper can't be pinned.`,
-    );
-    deps.setExitCode(1);
-
-    return;
-  }
-
   const plan = mcpServerPlan(environment, deps.cliVersion);
   const { name } = plan;
-  /** Set once `--force` has removed the old registration. */
   let removedOld = false;
   const fail = (detail: string): void => {
     deps.error(`Error: couldn't register the MCP server ${name}: ${detail}`);
@@ -310,13 +281,7 @@ async function setupMcpServer(
     // sees every scope and health-checks the server by running the helper.
     let added = await deps.run('claude', plan.addArgs);
 
-    if (added.code !== 0) {
-      if (!alreadyExists(added)) {
-        fail(`claude mcp add-json ${outputOf(added)}`);
-
-        return;
-      }
-
+    if (added.code !== 0 && alreadyExists(added)) {
       if (!options.force) {
         deps.log(
           `MCP server ${plan.name} already exists in Claude Code; left unchanged. Pass --force to replace it.`,
@@ -338,12 +303,12 @@ async function setupMcpServer(
       // From here a failure leaves no kizen-<env> at user scope, so say so.
       removedOld = true;
       added = await deps.run('claude', plan.addArgs);
+    }
 
-      if (added.code !== 0) {
-        fail(`claude mcp add-json ${outputOf(added)}`);
+    if (added.code !== 0) {
+      fail(`claude mcp add-json ${outputOf(added)}`);
 
-        return;
-      }
+      return;
     }
   } catch (error) {
     // After --force removed the old registration, even ENOENT is a failure: the
@@ -357,7 +322,7 @@ async function setupMcpServer(
       return;
     }
 
-    fail(error instanceof Error ? error.message : String(error));
+    fail(errorMessage(error));
 
     return;
   }
@@ -373,14 +338,14 @@ async function setupMcpServer(
       );
     }
   } catch (error) {
-    deps.log(error instanceof Error ? error.message : String(error));
+    deps.log(errorMessage(error));
   }
 }
 
 export async function runSetupClaude(
   dir: string,
   options: SetupClaudeOptions,
-  deps: SetupClaudeDeps = defaultSetupClaudeDeps,
+  deps: SetupClaudeDeps,
 ): Promise<void> {
   const problem = usageProblem(options);
 
@@ -409,7 +374,7 @@ export async function runSetupClaude(
       deps.fs,
     );
   } catch (error) {
-    deps.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
+    deps.error(`Error: ${errorMessage(error)}`);
     deps.setExitCode(1);
 
     return;
@@ -430,7 +395,8 @@ export async function runSetupClaude(
 
   if (options.mcp === true) {
     await setupMcpServer(
-      (options.env as Environment | undefined) ?? DEFAULT_LOGIN_ENVIRONMENT,
+      (options.env === undefined ? undefined : parseEnvironment(options.env).environment) ??
+        DEFAULT_LOGIN_ENVIRONMENT,
       { dryRun, force: options.force === true },
       deps,
     );

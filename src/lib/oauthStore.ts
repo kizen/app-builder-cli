@@ -21,15 +21,22 @@ import {
   rm,
   stat,
   unlink,
+  utimes,
   writeFile,
 } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { ENVIRONMENTS, GLOBAL_CREDENTIALS_DIR, type Environment } from './credentials.js';
-import { isErrnoCode, isRecord } from './guards.js';
-import { loginCommandFor, OAuthError } from './oauth.js';
+import { ifExists, isErrnoCode, isRecord, nonEmptyString } from './guards.js';
+import { loginRequired } from './oauth.js';
 
 export interface OAuthSession {
   environment: Environment;
+  /**
+   * Random per login, kept across refreshes. A token provider pins it so a later
+   * login (another business, say) never feeds its tokens into a running command.
+   */
+  loginId: string;
   issuer: string;
   clientId: string;
   tokenEndpoint: string;
@@ -48,41 +55,34 @@ export interface LockOptions {
   waitMs?: number;
 }
 
+/**
+ * A held lock: call it to release. `confirm` renews the lease and reports whether this is
+ * still the holder (false once released or superseded). Call it right before each mutation.
+ */
+export type LockHandle = (() => Promise<void>) & { confirm: () => Promise<boolean> };
+
 export interface OAuthStore {
   dir: string;
   sessionPath: (environment: Environment) => string;
-  /**
-   * The stored session, or null when there is none. A session file that exists
-   * but can't be read or parsed throws an OAuthError naming the file.
-   */
+  /** Null when there is none. An unreadable session file throws an OAuthError naming it. */
   readSession: (environment: Environment) => Promise<OAuthSession | null>;
   writeSession: (session: OAuthSession) => Promise<void>;
   /** Returns whether a session file existed. Never reads the file. */
   deleteSession: (environment: Environment) => Promise<boolean>;
-  /**
-   * Environments with a session file, readable or not, so a corrupt file is
-   * reported when it's used rather than looking like "not signed in".
-   */
+  /** Readable or not, so a corrupt file is reported on use rather than as "not signed in". */
   listSessions: () => Promise<Environment[]>;
   readClientId: (issuer: string) => Promise<string | undefined>;
   writeClientId: (issuer: string, clientId: string) => Promise<void>;
   /** `options` bounds the wait for the clients.json lock. */
   forgetClientId: (issuer: string, options?: LockOptions) => Promise<void>;
-  /**
-   * Takes the per-environment session lock (held around a refresh, and around
-   * the session write at login and the delete at logout); resolves with its
-   * release function.
-   */
-  acquireLock: (environment: Environment, options?: LockOptions) => Promise<() => Promise<void>>;
+  /** The per-environment session lock, held around every session mutation. */
+  acquireLock: (environment: Environment, options?: LockOptions) => Promise<LockHandle>;
 }
 
-export interface OAuthStoreOptions {
-  /**
-   * Probes a process the way `process.kill(pid, 0)` does: returns if it exists,
-   * throws `ESRCH` if it doesn't. Tests inject it.
-   */
+interface OAuthStoreOptions {
+  /** Like `process.kill(pid, 0)`: returns if the process exists, throws `ESRCH` if not. */
   probeProcess?: (pid: number) => void;
-  /** The pid written into this store's lock files. Defaults to `process.pid`. */
+  /** Written into this store's lock files. Defaults to `process.pid`. */
   pid?: number;
 }
 
@@ -95,9 +95,15 @@ const DEFAULT_WAIT_MS = 35_000;
 const NONCE = /^([1-9]\d*) [0-9a-f]{32}$/;
 
 function parseSession(raw: unknown, environment: Environment): OAuthSession | null {
+  if (!isRecord(raw)) {
+    return null;
+  }
+
+  const loginId = nonEmptyString(raw.loginId);
+
   if (
-    !isRecord(raw) ||
     raw.environment !== environment ||
+    loginId === undefined ||
     typeof raw.issuer !== 'string' ||
     typeof raw.clientId !== 'string' ||
     typeof raw.tokenEndpoint !== 'string' ||
@@ -109,6 +115,7 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
 
   return {
     environment,
+    loginId,
     issuer: raw.issuer,
     clientId: raw.clientId,
     tokenEndpoint: raw.tokenEndpoint,
@@ -119,26 +126,11 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
   };
 }
 
-/** Never carries the file's contents (a JSON.parse message would quote them). */
-const unreadableSession = (environment: Environment, path: string): OAuthError =>
-  new OAuthError(
-    'login_required',
-    `The saved ${environment} session at ${path} can't be read. Run \`${loginCommandFor(environment)}\` to sign in again.`,
-  );
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 const defaultProbe = (pid: number): void => {
   process.kill(pid, 0);
 };
 
-/**
- * @param baseDir the credentials directory; `oauth/` is created inside it.
- * Defaults to `~/.kizenappbuilder`. Tests pass a temp dir.
- */
+/** @param baseDir the credentials directory; `oauth/` is created inside it. */
 export function createOAuthStore(
   baseDir: string = GLOBAL_CREDENTIALS_DIR,
   options: OAuthStoreOptions = {},
@@ -178,17 +170,14 @@ export function createOAuthStore(
     }
   };
 
-  /**
-   * clients.json is only a cache: a missing or corrupt file reads as empty and
-   * is replaced on the next write, which costs one client registration.
-   */
+  /** Only a cache: a missing or corrupt file reads as empty and costs one re-registration. */
   const readClients = async (): Promise<Record<string, unknown>> => {
     let raw: unknown;
 
     try {
-      raw = JSON.parse(await readFile(clientsPath, 'utf-8')) as unknown;
+      raw = JSON.parse((await ifExists(readFile(clientsPath, 'utf-8'))) ?? '{}') as unknown;
     } catch (err) {
-      if (isErrnoCode(err, 'ENOENT') || err instanceof SyntaxError) {
+      if (err instanceof SyntaxError) {
         return {};
       }
 
@@ -200,35 +189,24 @@ export function createOAuthStore(
 
   // --- Locks ---------------------------------------------------------------
   //
-  // POSIX has no atomic "delete this file if it still holds X", so a lock that
-  // is broken or released by deleting one fixed path always has a window where
-  // it deletes, or moves aside, a successor's lock. (Renaming it aside and
-  // restoring a lock that turns out to be live leaves the path empty for a
-  // moment, and a third taker can create a lock in that gap.) So nothing
-  // here ever deletes the current lock. Instead the lock has generations:
-  //
-  // - `<name>.lock.<n>` is created with O_EXCL by the process that takes
-  //   generation n. Only one creator of a given n can succeed.
-  // - The holder is the creator of the highest n. To take the lock you must
-  //   see the highest generation free (released, its pid dead on this
-  //   machine, or its file older than staleMs), and then create n + 1. Two
-  //   takers of the same stale generation race on that one create, so
-  //   exactly one wins; the loser sees n + 1 held and waits.
-  // - Release only creates `<name>.lock.<n>.released`. It never deletes, so a
-  //   holder that overran staleMs and was superseded only marks its own old
-  //   generation, which nobody looks at any more.
-  // - A new holder deletes generations below its own. The highest generation
-  //   ever created is therefore never deleted. A slow taker can still recreate
-  //   an old, deleted number; after creating, it checks for any higher
-  //   generation and, finding one (one always exists in that case), marks its
-  //   file released and starts over.
+  // POSIX can't atomically "delete this file if it still holds X", so nothing here ever
+  // deletes the current lock. Locks have generations; the highest n is the holder:
+  // - Take the lock by creating `<name>.lock.<n+1>` with O_EXCL; one creator of a given n wins.
+  // - Only once n is free: `.released`, its pid dead on this machine, or older than staleMs.
+  // - Release only writes `<name>.lock.<n>.released`; it never deletes.
+  // - A new holder deletes the generations below its own.
+  // - A slow taker that recreates an old number sees a higher one, marks it released, backs off.
+  // `confirm` (touch, then check nonce and top generation) runs right before each mutation, but
+  // the confirm-to-mutate gap is NOT closed: a taker that saw the old mtime as stale can still
+  // take n + 1 during it, and it spans the whole mutation through writeAtomic's fsync/rename.
+  // Rationale, vault entry:
+  // cli-oauth-via-kizen-dcr-what-webapp-supports-the-app-builder-poc-design-and-its-gotchas
 
   const lockFile = (name: string, generation: number): string =>
     join(dir, `${name}.lock.${String(generation)}`);
   const releasedFile = (name: string, generation: number): string =>
     `${lockFile(name, generation)}.released`;
 
-  /** Generations present on disk, from both lock and released files. */
   const lockEntries = async (
     name: string,
   ): Promise<{ entry: string; generation: number; released: boolean }[]> => {
@@ -248,18 +226,14 @@ export function createOAuthStore(
     });
   };
 
-  /** The highest generation with a lock file, or -1. */
+  /** -1 when there is none. */
   const topGeneration = async (name: string): Promise<number> =>
     Math.max(
       -1,
       ...(await lockEntries(name)).filter((lock) => !lock.released).map((lock) => lock.generation),
     );
 
-  /**
-   * Whether the pid in a lock nonce is gone from this machine. EPERM means alive.
-   * Only meaningful for a holder on this machine; a home directory shared across
-   * machines falls back to the staleMs rule only when the pid happens to exist here.
-   */
+  /** EPERM means alive. Only meaningful on this machine; elsewhere staleMs decides. */
   const holderIsDead = (nonce: string): boolean => {
     const holder = Number(NONCE.exec(nonce)?.[1]);
 
@@ -284,44 +258,33 @@ export function createOAuthStore(
   ): Promise<'free' | 'held' | 'gone'> => {
     const path = lockFile(name, generation);
 
-    try {
-      await stat(releasedFile(name, generation));
-
+    if ((await ifExists(stat(releasedFile(name, generation)))) !== undefined) {
       return 'free';
-    } catch (err) {
-      if (!isErrnoCode(err, 'ENOENT')) {
-        throw err;
-      }
     }
 
-    try {
-      const nonce = await readFile(path, 'utf-8');
+    const nonce = await ifExists(readFile(path, 'utf-8'));
 
-      if (holderIsDead(nonce)) {
-        return 'free';
-      }
-
-      return Date.now() - (await stat(path)).mtimeMs > staleMs ? 'free' : 'held';
-    } catch (err) {
-      if (isErrnoCode(err, 'ENOENT')) {
-        return 'gone';
-      }
-
-      throw err;
+    if (nonce === undefined) {
+      return 'gone';
     }
+
+    if (holderIsDead(nonce)) {
+      return 'free';
+    }
+
+    const lock = await ifExists(stat(path));
+
+    if (lock === undefined) {
+      return 'gone';
+    }
+
+    return Date.now() - lock.mtimeMs > staleMs ? 'free' : 'held';
   };
 
   const markReleased = async (name: string, generation: number): Promise<void> => {
-    try {
-      await writeFile(releasedFile(name, generation), '', { mode: 0o600 });
-    } catch (err) {
-      if (!isErrnoCode(err, 'ENOENT')) {
-        throw err;
-      }
-    }
+    await ifExists(writeFile(releasedFile(name, generation), '', { mode: 0o600 }));
   };
 
-  /** Creates generation n with O_EXCL; false if another taker created it first. */
   const claim = async (name: string, generation: number, nonce: string): Promise<boolean> => {
     let handle;
 
@@ -360,69 +323,90 @@ export function createOAuthStore(
     );
   };
 
+  const handleFor = (name: string, mine: number, nonce: string): LockHandle => {
+    const path = lockFile(name, mine);
+    let released = false;
+
+    const confirm = async (): Promise<boolean> => {
+      if (released) {
+        return false;
+      }
+
+      // Renew first; then the file may be gone (a newer holder) or recreated by a slow taker.
+      const now = new Date();
+      const current = await ifExists(utimes(path, now, now).then(() => readFile(path, 'utf-8')));
+
+      return current === nonce && (await topGeneration(name)) === mine;
+    };
+
+    return Object.assign(
+      async () => {
+        if (!released) {
+          released = true;
+          await markReleased(name, mine);
+        }
+      },
+      { confirm },
+    );
+  };
+
+  /** Null when another taker got n or a newer generation exists. */
+  const tryTake = async (name: string, n: number): Promise<LockHandle | null> => {
+    const nonce = `${String(pid)} ${randomBytes(16).toString('hex')}`;
+
+    if (!(await claim(name, n, nonce))) {
+      return null;
+    }
+
+    if ((await topGeneration(name)) > n) {
+      // A recreated old number; a newer generation is the real lock.
+      await markReleased(name, n);
+
+      return null;
+    }
+
+    await removeOlder(name, n);
+
+    return handleFor(name, n, nonce);
+  };
+
   const acquire = async (
     name: string,
     options: LockOptions,
-    timeoutMessage: () => string,
-  ): Promise<() => Promise<void>> => {
+    timeoutMessage: string,
+  ): Promise<LockHandle> => {
     const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
     const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
     const waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     const started = Date.now();
-    const checkTimeout = (): void => {
-      if (Date.now() - started > waitMs) {
-        throw new Error(timeoutMessage());
-      }
-    };
 
     await ensureDir();
 
     for (;;) {
       const top = await topGeneration(name);
       const state = top < 0 ? 'free' : await generationState(name, top, staleMs);
+      const lock = state === 'free' ? await tryTake(name, top + 1) : null;
 
-      if (state === 'free') {
-        const mine = top + 1;
-        const nonce = `${String(pid)} ${randomBytes(16).toString('hex')}`;
-
-        if (await claim(name, mine, nonce)) {
-          if ((await topGeneration(name)) > mine) {
-            // A recreated old number; a newer generation is the real lock.
-            await markReleased(name, mine);
-          } else {
-            await removeOlder(name, mine);
-
-            let released = false;
-
-            return async () => {
-              if (!released) {
-                released = true;
-                await markReleased(name, mine);
-              }
-            };
-          }
-        }
-
-        // Lost the race for `mine`, or backed off: the new state is already on
-        // disk, so retry without sleeping, but still within waitMs.
-        checkTimeout();
-        continue;
+      if (lock) {
+        return lock;
       }
 
-      checkTimeout();
-
-      if (state === 'gone') {
-        continue;
+      if (Date.now() - started > waitMs) {
+        throw new Error(timeoutMessage);
       }
 
-      await sleep(retryMs);
+      // After a lost race, a back-off or a deleted generation, the new state is
+      // already on disk: look again without sleeping.
+      if (state === 'held') {
+        await sleep(retryMs);
+      }
     }
   };
 
   const withLock = async <T>(
     name: string,
     options: LockOptions,
-    timeoutMessage: () => string,
+    timeoutMessage: string,
     run: () => Promise<T>,
   ): Promise<T> => {
     const release = await acquire(name, options, timeoutMessage);
@@ -434,8 +418,7 @@ export function createOAuthStore(
     }
   };
 
-  const clientsTimeout = (): string =>
-    `Timed out waiting for another appbuilder process to update the saved app registrations (${clientsPath})`;
+  const clientsTimeout = `Timed out waiting for another appbuilder process to update the saved app registrations (${clientsPath})`;
 
   return {
     dir,
@@ -443,33 +426,26 @@ export function createOAuthStore(
 
     async readSession(environment) {
       const path = sessionPath(environment);
-      let text: string;
 
       try {
-        text = await readFile(path, 'utf-8');
-      } catch (err) {
-        if (isErrnoCode(err, 'ENOENT')) {
+        const text = await ifExists(readFile(path, 'utf-8'));
+
+        if (text === undefined) {
           return null;
         }
 
-        throw unreadableSession(environment, path);
-      }
+        const session = parseSession(JSON.parse(text) as unknown, environment);
 
-      let raw: unknown;
-
-      try {
-        raw = JSON.parse(text) as unknown;
+        if (session !== null) {
+          return session;
+        }
       } catch {
-        throw unreadableSession(environment, path);
+        // Not passed on: a JSON.parse message would quote the file's contents.
       }
 
-      const session = parseSession(raw, environment);
+      const reason = `The saved ${environment} session at ${path} can't be read.`;
 
-      if (session === null) {
-        throw unreadableSession(environment, path);
-      }
-
-      return session;
+      throw loginRequired(environment, reason, { again: true });
     },
 
     async writeSession(session) {
@@ -477,45 +453,23 @@ export function createOAuthStore(
     },
 
     async deleteSession(environment) {
-      try {
-        await unlink(sessionPath(environment));
-
-        return true;
-      } catch (err) {
-        if (isErrnoCode(err, 'ENOENT')) {
-          return false;
-        }
-
-        throw err;
-      }
+      return (await ifExists(unlink(sessionPath(environment)).then(() => true))) ?? false;
     },
 
     async listSessions() {
       const found = await Promise.all(
-        ENVIRONMENTS.map(async (environment) => {
-          try {
-            await stat(sessionPath(environment));
-
-            return environment;
-          } catch (err) {
-            if (isErrnoCode(err, 'ENOENT')) {
-              return null;
-            }
-
-            throw err;
-          }
-        }),
+        ENVIRONMENTS.map((environment) =>
+          ifExists(stat(sessionPath(environment)).then(() => environment)),
+        ),
       );
 
-      return found.filter((environment): environment is Environment => environment !== null);
+      return found.filter((environment) => environment !== undefined);
     },
 
     async readClientId(issuer) {
       const entry = (await readClients())[issuer];
 
-      return isRecord(entry) && typeof entry.clientId === 'string' && entry.clientId !== ''
-        ? entry.clientId
-        : undefined;
+      return isRecord(entry) ? nonEmptyString(entry.clientId) : undefined;
     },
 
     async writeClientId(issuer, clientId) {
@@ -541,9 +495,69 @@ export function createOAuthStore(
       return acquire(
         environment,
         lockOptions,
-        () =>
-          `Timed out waiting for another appbuilder process using the ${environment} session (${join(dir, `${environment}.lock.*`)})`,
+        `Timed out waiting for another appbuilder process using the ${environment} session (${join(dir, `${environment}.lock.*`)})`,
       );
     },
   };
 }
+
+/** What a `withSessionLock` step returns when its `confirm` came back false. */
+export const LEASE_LOST: unique symbol = Symbol('lease lost');
+
+/** The first attempt included. */
+const MAX_LEASE_ATTEMPTS = 3;
+
+/** `mutate()` if `lock` is still held (see `withSessionLock`), else `LEASE_LOST`. */
+export const whenConfirmed = async <T>(
+  lock: LockHandle,
+  mutate: () => Promise<T>,
+): Promise<T | typeof LEASE_LOST> => ((await lock.confirm()) ? mutate() : LEASE_LOST);
+
+/**
+ * Every session mutation goes through here, so an in-flight refresh never writes its stale
+ * session back over a newer login or a logout.
+ *
+ * The lease can lapse at any await (laptop sleep, a slow token request), so `step` must end in
+ * `whenConfirmed`. On `LEASE_LOST` the lock is re-taken and `step` re-run from the start, so it
+ * re-reads what it checks. For a refresh, re-taking keeps the rotated tokens once the old refresh
+ * token is spent server-side.
+ *
+ * `held` is a lock the caller already holds, used for the first attempt and released here.
+ */
+export async function withSessionLock<T>(
+  store: OAuthStore,
+  environment: Environment,
+  step: (lock: LockHandle) => Promise<T | typeof LEASE_LOST>,
+  { lock: options, held }: { lock?: LockOptions | undefined; held?: LockHandle } = {},
+): Promise<T> {
+  let lock = held ?? (await store.acquireLock(environment, options));
+
+  for (let attempt = 1; ; attempt += 1) {
+    let result: T | typeof LEASE_LOST;
+
+    try {
+      result = await step(lock);
+    } finally {
+      await lock();
+    }
+
+    if (result !== LEASE_LOST) {
+      return result;
+    }
+
+    if (attempt >= MAX_LEASE_ATTEMPTS) {
+      throw new Error(
+        `Another appbuilder process kept taking over the ${environment} session lock. Run the command again.`,
+      );
+    }
+
+    lock = await store.acquireLock(environment, options);
+  }
+}
+
+/** Runs one session mutation under the session lock, confirmed (see `withSessionLock`). */
+export const mutateSession = <T>(
+  store: OAuthStore,
+  environment: Environment,
+  mutate: () => Promise<T>,
+): Promise<T> => withSessionLock(store, environment, (lock) => whenConfirmed(lock, mutate));

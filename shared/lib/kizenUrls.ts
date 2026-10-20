@@ -8,6 +8,9 @@ export const BASE_URLS: Record<Environment, string> = {
   test1: 'https://test1.kizen.dev/api',
 };
 
+/** The origin of an environment's API, without `/api`. It is also its OAuth issuer. */
+export const apiOriginFor = (env: Environment): string => new URL(BASE_URLS[env]).origin;
+
 export const APP_URLS: Record<Environment, string> = {
   go: 'https://go.kizen.com',
   fmo: 'https://fmo.kizen.com',

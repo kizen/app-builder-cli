@@ -1,20 +1,23 @@
 import { createHash } from 'node:crypto';
-import { request } from 'node:http';
-import { createConnection } from 'node:net';
-import { describe, expect, it, vi } from 'vitest';
+import { createConnection, Server } from 'node:net';
+import { describe, expect, it, onTestFinished, vi } from 'vitest';
+import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import {
   buildAuthorizeUrl,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   CALLBACK_WRONG_STATE_TEXT,
   createPkcePair,
   discover,
-  issuerFor,
+  loginRequired,
   OAuthError,
   pkceChallenge,
   registerClient,
   requestToken,
   startLoopbackServer,
   type AuthServerMetadata,
+  type LoopbackServer,
 } from './oauth.js';
+import { httpGet, jsonResponse, rejectionOf } from '../test/oauth.js';
 
 const ISSUER = 'https://staging.kizen.com';
 
@@ -24,27 +27,6 @@ const METADATA: AuthServerMetadata = {
   tokenEndpoint: `${ISSUER}/oauth2/token`,
   registrationEndpoint: `${ISSUER}/oauth2/register`,
 };
-
-const json = (body: unknown, status = 200): Response =>
-  new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-
-/** GETs a loopback URL with node:http (no proxy), resolving with the status and body. */
-const httpGet = (url: string): Promise<{ status: number; body: string }> =>
-  new Promise((resolve, reject) => {
-    request(url, { agent: false }, (res) => {
-      let body = '';
-
-      res.setEncoding('utf-8');
-      res.on('data', (chunk: string) => {
-        body += chunk;
-      });
-      res.on('end', () => {
-        resolve({ status: res.statusCode ?? 0, body });
-      });
-    })
-      .on('error', reject)
-      .end();
-  });
 
 const canConnect = (port: number): Promise<boolean> =>
   new Promise((resolve) => {
@@ -58,17 +40,6 @@ const canConnect = (port: number): Promise<boolean> =>
       resolve(false);
     });
   });
-
-const rejectionOf = async (promise: Promise<unknown>): Promise<OAuthError> => {
-  const error = await promise.then(
-    () => null,
-    (err: unknown) => err,
-  );
-
-  expect(error).toBeInstanceOf(OAuthError);
-
-  return error as OAuthError;
-};
 
 describe('pkce', () => {
   it('pkce challenge is base64url S256 of the verifier', () => {
@@ -92,17 +63,29 @@ describe('pkce', () => {
   });
 });
 
-describe('issuerFor', () => {
+describe('apiOriginFor', () => {
   it('strips the /api path to the origin', () => {
-    expect(issuerFor('https://staging.kizen.com/api')).toBe('https://staging.kizen.com');
-    expect(issuerFor('https://app.go.kizen.com/api')).toBe('https://app.go.kizen.com');
+    expect(apiOriginFor('staging')).toBe('https://staging.kizen.com');
+    expect(apiOriginFor('go')).toBe('https://app.go.kizen.com');
+  });
+});
+
+describe('loginRequired', () => {
+  it('appends the login command, with "again" only when asked', () => {
+    const first = loginRequired('staging', 'Not signed in.');
+    const again = loginRequired('fmo', 'Expired.', { again: true });
+
+    expect(first).toBeInstanceOf(OAuthError);
+    expect(first.code).toBe('login_required');
+    expect(first.message).toBe('Not signed in. Run `appbuilder login --env staging` to sign in.');
+    expect(again.message).toBe('Expired. Run `appbuilder login --env fmo` to sign in again.');
   });
 });
 
 describe('discover', () => {
   it('reads the RFC 8414 document at the issuer and uses the discovered endpoints', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
-      json({
+      jsonResponse({
         issuer: ISSUER,
         authorization_endpoint: `${ISSUER}/o/authz`,
         token_endpoint: `${ISSUER}/o/tok`,
@@ -120,78 +103,81 @@ describe('discover', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`${ISSUER}/.well-known/oauth-authorization-server`);
   });
 
-  it('refuses a server without S256 or with a non-https endpoint', async () => {
-    const plainOnly = vi.fn<typeof fetch>().mockResolvedValue(
-      json({
-        issuer: ISSUER,
-        authorization_endpoint: `${ISSUER}/a`,
-        token_endpoint: `${ISSUER}/t`,
-        code_challenge_methods_supported: ['plain'],
-      }),
-    );
-    const httpToken = vi.fn<typeof fetch>().mockResolvedValue(
-      json({
-        issuer: ISSUER,
-        authorization_endpoint: `${ISSUER}/a`,
-        token_endpoint: 'http://evil.test/t',
-      }),
-    );
+  const DISCOVERY = `${ISSUER}/.well-known/oauth-authorization-server`;
+  const valid = {
+    issuer: ISSUER,
+    authorization_endpoint: `${ISSUER}/a`,
+    token_endpoint: `${ISSUER}/t`,
+    code_challenge_methods_supported: ['S256'],
+  };
+  const notJson = `OAuth discovery at ${DISCOVERY} didn't return valid JSON`;
 
-    expect((await rejectionOf(discover(ISSUER, plainOnly))).message).toContain('S256');
-    expect((await rejectionOf(discover(ISSUER, httpToken))).message).toContain('https');
-  });
-
-  it('discovery with mismatched issuer is rejected', async () => {
-    const valid = {
-      authorization_endpoint: `${ISSUER}/a`,
-      token_endpoint: `${ISSUER}/t`,
-      code_challenge_methods_supported: ['S256'],
-    };
-    const cases: [Record<string, unknown>, string][] = [
-      [{ ...valid, issuer: 'https://evil.test' }, 'returned issuer "https://evil.test"'],
+  it.each([
+    [
+      'refuses a server without S256 (plain-only PKCE)',
+      () => jsonResponse({ ...valid, code_challenge_methods_supported: ['plain'] }),
+      `The server at ${ISSUER} doesn't support PKCE S256`,
+    ],
+    [
+      'refuses a non-https endpoint (an http token endpoint)',
+      () => jsonResponse({ ...valid, token_endpoint: 'http://evil.test/t' }),
+      `OAuth discovery at ${DISCOVERY} has no https authorization or token endpoint`,
+    ],
+    [
+      'discovery with mismatched issuer is rejected (another host)',
+      () => jsonResponse({ ...valid, issuer: 'https://evil.test' }),
+      `OAuth discovery at ${DISCOVERY} returned issuer "https://evil.test", expected ${ISSUER}`,
+    ],
+    [
       // RFC 8414 §3.3: identical, so not even a trailing slash.
-      [{ ...valid, issuer: `${ISSUER}/` }, `returned issuer "${ISSUER}/"`],
-      [valid, 'returned issuer none'],
-    ];
-
-    for (const [body, message] of cases) {
-      const error = await rejectionOf(
-        discover(ISSUER, vi.fn<typeof fetch>().mockResolvedValue(json(body))),
-      );
-
-      expect(error.code).toBe('server_error');
-      expect(error.message).toContain(message);
-      expect(error.message).toContain(`expected ${ISSUER}`);
-    }
-  });
-
-  it('discovery 200 with non-JSON body reports invalid JSON', async () => {
-    for (const body of ['<!doctype html><html>Sign in</html>', '', '"just a string"']) {
-      const error = await rejectionOf(
-        discover(ISSUER, vi.fn<typeof fetch>().mockResolvedValue(new Response(body))),
-      );
-
-      expect(error.message).toBe(
-        `OAuth discovery at ${ISSUER}/.well-known/oauth-authorization-server didn't return valid JSON`,
-      );
-      expect(error.message).not.toContain('HTTP 200');
-    }
-
-    // A non-2xx is still reported by status.
-    const notFound = await rejectionOf(
+      'discovery with mismatched issuer is rejected (a trailing slash)',
+      () => jsonResponse({ ...valid, issuer: `${ISSUER}/` }),
+      `OAuth discovery at ${DISCOVERY} returned issuer "${ISSUER}/", expected ${ISSUER}`,
+    ],
+    [
+      'discovery with mismatched issuer is rejected (no issuer)',
+      () => jsonResponse({ ...valid, issuer: undefined }),
+      `OAuth discovery at ${DISCOVERY} returned issuer none, expected ${ISSUER}`,
+    ],
+    [
+      'discovery 200 with non-JSON body reports invalid JSON (HTML)',
+      () => new Response('<!doctype html><html>Sign in</html>'),
+      notJson,
+    ],
+    [
+      'discovery 200 with non-JSON body reports invalid JSON (empty)',
+      () => new Response(''),
+      notJson,
+    ],
+    [
+      'discovery 200 with non-JSON body reports invalid JSON (a string)',
+      () => new Response('"just a string"'),
+      notJson,
+    ],
+    [
+      'a non-2xx discovery is still reported by status (404)',
+      () => new Response('nope', { status: 404 }),
+      `OAuth discovery at ${DISCOVERY} failed with HTTP 404`,
+    ],
+  ])('%s', async (_name, response, message) => {
+    const error = await rejectionOf(
       discover(
         ISSUER,
-        vi.fn<typeof fetch>().mockResolvedValue(new Response('nope', { status: 404 })),
+        vi.fn<typeof fetch>().mockImplementation(() => Promise.resolve(response())),
       ),
     );
 
-    expect(notFound.message).toContain('failed with HTTP 404');
+    expect(error.code).toBe('server_error');
+    // Exact, so it also proves a 200 isn't reported as an HTTP failure.
+    expect(error.message).toBe(message);
   });
 });
 
 describe('registerClient', () => {
   it('registers a public loopback client and returns its client_id', async () => {
-    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(json({ client_id: 'abc' }, 201));
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ client_id: 'abc' }, 201));
 
     await expect(registerClient(METADATA, fetchMock)).resolves.toBe('abc');
 
@@ -247,7 +233,9 @@ describe('requestToken', () => {
   it("carries the server's RFC 6749 error code", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(json({ error: 'invalid_grant', error_description: 'expired' }, 400));
+      .mockResolvedValue(
+        jsonResponse({ error: 'invalid_grant', error_description: 'expired' }, 400),
+      );
     const error = await rejectionOf(requestToken(METADATA.tokenEndpoint, {}, fetchMock));
 
     expect(error.code).toBe('invalid_grant');
@@ -255,11 +243,14 @@ describe('requestToken', () => {
   });
 
   it('sends a form body and parses a bearer response', async () => {
-    const fetchMock = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        json({ access_token: 'at', refresh_token: 'rt', token_type: 'Bearer', expires_in: 3600 }),
-      );
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        access_token: 'at',
+        refresh_token: 'rt',
+        token_type: 'Bearer',
+        expires_in: 3600,
+      }),
+    );
 
     await expect(
       requestToken(METADATA.tokenEndpoint, { grant_type: 'refresh_token' }, fetchMock),
@@ -276,6 +267,10 @@ describe('requestToken', () => {
       'application/x-www-form-urlencoded',
     );
     expect(init?.body).toBe('grant_type=refresh_token');
+  });
+
+  it('bounds token requests by default well under the 30s lock stale window', () => {
+    expect(DEFAULT_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(20_000);
   });
 });
 
@@ -297,69 +292,71 @@ const closesWithin = async (port: number, boundMs = 2000): Promise<boolean> => {
   return false;
 };
 
+/** Starts a loopback server and closes it after the test, for cleanup only. */
+const start = async (
+  options: Parameters<typeof startLoopbackServer>[0],
+): Promise<LoopbackServer> => {
+  const server = await startLoopbackServer(options);
+
+  onTestFinished(() => server.close());
+
+  return server;
+};
+
 describe('startLoopbackServer', () => {
-  // Every test calls close() only for cleanup, after asserting the server
-  // already closed itself.
+  // The close() registered by start() is only cleanup: the tests poll with
+  // closesWithin, which never closes anything, to prove the server closed itself.
   it('loopback server binds 127.0.0.1 and closes itself after the callback', async () => {
-    const server = await startLoopbackServer({ state: 'good' });
+    const listen = vi.spyOn(Server.prototype, 'listen');
 
-    try {
-      expect(server.host).toBe('127.0.0.1');
-      expect(server.port).toBeGreaterThan(0);
-      expect(server.redirectUri).toBe(`http://127.0.0.1:${String(server.port)}/callback`);
-      expect(await canConnect(server.port)).toBe(true);
+    onTestFinished(() => {
+      listen.mockRestore();
+    });
 
-      // A stray request elsewhere doesn't settle or close anything.
-      expect((await httpGet(`http://127.0.0.1:${String(server.port)}/favicon.ico`)).status).toBe(
-        404,
-      );
-      expect(await canConnect(server.port)).toBe(true);
+    const server = await start({ state: 'good' });
 
-      const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
+    expect(listen).toHaveBeenCalledWith(0, '127.0.0.1', expect.any(Function));
+    expect(server.port).toBeGreaterThan(0);
+    expect(server.redirectUri).toBe(`http://127.0.0.1:${String(server.port)}/callback`);
+    expect(await canConnect(server.port)).toBe(true);
 
-      expect(response.status).toBe(200);
-      expect(response.body).toContain('You can close this window.');
-      await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
-      expect(await closesWithin(server.port)).toBe(true);
-    } finally {
-      await server.close();
-    }
+    // A stray request elsewhere doesn't settle or close anything.
+    expect((await httpGet(`http://127.0.0.1:${String(server.port)}/favicon.ico`)).status).toBe(404);
+    expect(await canConnect(server.port)).toBe(true);
+
+    const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toContain('You can close this window.');
+    await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
+    expect(await closesWithin(server.port)).toBe(true);
   });
 
   it('loopback server closes itself on timeout', async () => {
-    const server = await startLoopbackServer({ state: 'good', timeoutMs: 50 });
+    const server = await start({ state: 'good', timeoutMs: 50 });
 
-    try {
-      expect(await canConnect(server.port)).toBe(true);
-      expect((await rejectionOf(server.result)).code).toBe('timeout');
-      expect(await closesWithin(server.port)).toBe(true);
-    } finally {
-      await server.close();
-    }
+    expect(await canConnect(server.port)).toBe(true);
+    expect((await rejectionOf(server.result)).code).toBe('timeout');
+    expect(await closesWithin(server.port)).toBe(true);
   });
 
   it("callback with error param rejects with the server's error", async () => {
-    const server = await startLoopbackServer({ state: 'good' });
+    const server = await start({ state: 'good' });
+    const response = await httpGet(
+      `${server.redirectUri}?error=access_denied&error_description=User+said+no&state=good`,
+    );
+    const error = await rejectionOf(server.result);
 
-    try {
-      const response = await httpGet(
-        `${server.redirectUri}?error=access_denied&error_description=User+said+no&state=good`,
-      );
-      const error = await rejectionOf(server.result);
-
-      expect(response.status).toBe(400);
-      expect(error.code).toBe('access_denied');
-      expect(error.message).toContain('User said no');
-      // The server's text isn't echoed into the page.
-      expect(response.body).not.toContain('User said no');
-      expect(await closesWithin(server.port)).toBe(true);
-    } finally {
-      await server.close();
-    }
+    expect(response.status).toBe(400);
+    expect(error.code).toBe('access_denied');
+    expect(error.message).toContain('User said no');
+    // The server's text isn't echoed into the page.
+    expect(response.body).not.toContain('User said no');
+    expect(await closesWithin(server.port)).toBe(true);
   });
 
   it('callback with wrong state gets 400 and login still completes with the real callback', async () => {
-    const server = await startLoopbackServer({ state: 'good' });
+    const server = await start({ state: 'good' });
     let settled = false;
 
     void server.result.then(
@@ -367,54 +364,38 @@ describe('startLoopbackServer', () => {
       () => (settled = true),
     );
 
-    try {
-      // A wrong state, a missing one, and a wrong state carrying an error: none
-      // of them may end the login.
-      for (const query of [
-        'code=forged&state=bad',
-        'code=forged',
-        'error=access_denied&state=bad',
-      ]) {
-        const response = await httpGet(`${server.redirectUri}?${query}`);
+    // A wrong state, a missing one, and a wrong state carrying an error: none
+    // of them may end the login.
+    for (const query of ['code=forged&state=bad', 'code=forged', 'error=access_denied&state=bad']) {
+      const response = await httpGet(`${server.redirectUri}?${query}`);
 
-        expect(response.status).toBe(400);
-        expect(response.body).toContain(CALLBACK_WRONG_STATE_TEXT);
-        expect(await canConnect(server.port)).toBe(true);
-      }
-
-      expect(settled).toBe(false);
-
-      const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
-
-      expect(response.status).toBe(200);
-      await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
-      expect(await closesWithin(server.port)).toBe(true);
-    } finally {
-      await server.close();
+      expect(response.status).toBe(400);
+      expect(response.body).toContain(CALLBACK_WRONG_STATE_TEXT);
+      expect(await canConnect(server.port)).toBe(true);
     }
+
+    expect(settled).toBe(false);
+
+    const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
+
+    expect(response.status).toBe(200);
+    await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
+    expect(await closesWithin(server.port)).toBe(true);
   });
 
   it('a wrong-state callback does not stop the timeout', async () => {
-    const server = await startLoopbackServer({ state: 'good', timeoutMs: 100 });
+    const server = await start({ state: 'good', timeoutMs: 100 });
 
-    try {
-      expect((await httpGet(`${server.redirectUri}?code=c&state=bad`)).status).toBe(400);
-      expect((await rejectionOf(server.result)).code).toBe('timeout');
-      expect(await closesWithin(server.port)).toBe(true);
-    } finally {
-      await server.close();
-    }
+    expect((await httpGet(`${server.redirectUri}?code=c&state=bad`)).status).toBe(400);
+    expect((await rejectionOf(server.result)).code).toBe('timeout');
+    expect(await closesWithin(server.port)).toBe(true);
   });
 
   it('rejects a callback without a code', async () => {
-    const server = await startLoopbackServer({ state: 'good' });
+    const server = await start({ state: 'good' });
 
-    try {
-      await httpGet(`${server.redirectUri}?state=good`);
+    await httpGet(`${server.redirectUri}?state=good`);
 
-      expect((await rejectionOf(server.result)).code).toBe('invalid_callback');
-    } finally {
-      await server.close();
-    }
+    expect((await rejectionOf(server.result)).code).toBe('invalid_callback');
   });
 });

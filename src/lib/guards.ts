@@ -11,6 +11,25 @@ export const isErrnoCode = (error: unknown, code: string): boolean =>
 export const isMissingFileError = (error: unknown): boolean =>
   error instanceof Error && isErrnoCode(error, 'ENOENT');
 
+/** `p`'s value, or undefined when it rejects with ENOENT; any other rejection propagates. */
+export const ifExists = async <T>(p: Promise<T>): Promise<T | undefined> => {
+  try {
+    return await p;
+  } catch (error) {
+    if (isErrnoCode(error, 'ENOENT')) {
+      return undefined;
+    }
+
+    throw error;
+  }
+};
+
+export const nonEmptyString = (value: unknown): string | undefined =>
+  typeof value === 'string' && value !== '' ? value : undefined;
+
+export const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 /**
  * The most specific reason a request failed: fetch's underlying `cause` code
  * (ECONNREFUSED, ENOTFOUND, …), else the error's own code or message.

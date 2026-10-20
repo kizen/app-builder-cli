@@ -28,8 +28,16 @@ export const isEnvironment = (value: unknown): value is Environment =>
   ENVIRONMENTS.includes(value as Environment);
 
 /** The error for an `--env` value that names no environment. */
-export const unknownEnvironmentMessage = (value: string): string =>
+const unknownEnvironmentMessage = (value: string): string =>
   `Unknown --env "${value}". Use one of: ${ENVIRONMENTS.join(', ')}.`;
+
+/** An `--env` value checked against the environments: the environment, or why it isn't one. */
+export type ParsedEnvironment =
+  | { environment: Environment; message?: undefined }
+  | { environment?: undefined; message: string };
+
+export const parseEnvironment = (value: string): ParsedEnvironment =>
+  isEnvironment(value) ? { environment: value } : { message: unknownEnvironmentMessage(value) };
 
 function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;

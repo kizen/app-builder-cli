@@ -94,7 +94,7 @@ const forbiddenRun: RunCommand = () => Promise.reject(new Error('claude must not
 
 const makeDeps = (
   fs: ClaudeFs = nodeClaudeFs,
-  extra: Partial<Pick<SetupClaudeDeps, 'run' | 'hasOAuthSession' | 'cliVersion'>> = {},
+  extra: Partial<Pick<SetupClaudeDeps, 'run' | 'hasOAuthSession'>> = {},
 ): DepsHarness => {
   const logs: string[] = [];
   const errors: string[] = [];
@@ -102,7 +102,7 @@ const makeDeps = (
   const deps: SetupClaudeDeps = {
     fs,
     run: extra.run ?? forbiddenRun,
-    cliVersion: 'cliVersion' in extra ? extra.cliVersion : TEST_CLI_VERSION,
+    cliVersion: TEST_CLI_VERSION,
     hasOAuthSession: extra.hasOAuthSession ?? (() => Promise.resolve(true)),
     log: (line) => {
       logs.push(line);
@@ -585,23 +585,6 @@ describe('setup-claude --mcp', () => {
     ) as { name: string };
 
     expect(CLI_PACKAGE_NAME).toBe(pkg.name);
-  });
-
-  it('refuses to register an unpinned helper when the CLI version is unknown', async () => {
-    await inPlugin();
-
-    const claude = fakeClaude();
-    const { deps, errors, exitCodes } = makeDeps(nodeClaudeFs, {
-      run: claude.run,
-      cliVersion: undefined,
-    });
-
-    await runSetupClaude(dir, { mcp: true, env: 'staging' }, deps);
-
-    expect(claude.run).not.toHaveBeenCalled();
-    expect(exitCodes).toStrictEqual([1]);
-    expect(errors[0]).toContain('version is unknown');
-    expect(await readSkill()).toBe(BUNDLED);
   });
 
   it('setup-claude --mcp leaves an existing server alone without --force', async () => {

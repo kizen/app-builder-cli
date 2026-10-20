@@ -7,8 +7,14 @@ import type * as OsModule from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { GLOBAL_CREDENTIALS_DIR, listCredentialProfiles } from './credentials.js';
-import { OAuthError } from './oauth.js';
-import { createOAuthStore, type OAuthSession, type OAuthStore } from './oauthStore.js';
+import {
+  createOAuthStore,
+  LEASE_LOST,
+  withSessionLock,
+  type OAuthSession,
+  type OAuthStore,
+} from './oauthStore.js';
+import { deferred, lockIsFree, oauthSession, rejectionOf } from '../test/oauth.js';
 
 // Point the home directory at a fresh temp dir before credentials.ts computes
 // GLOBAL_CREDENTIALS_DIR, so the real ~/.kizenappbuilder is never touched and
@@ -45,18 +51,6 @@ afterAll(async () => {
   await rm(homedir(), { recursive: true, force: true });
 });
 
-const session = (overrides: Partial<OAuthSession> = {}): OAuthSession => ({
-  environment: 'staging',
-  issuer: 'https://staging.kizen.com',
-  clientId: 'client-1',
-  tokenEndpoint: 'https://staging.kizen.com/oauth2/token',
-  accessToken: 'access-1',
-  refreshToken: 'refresh-1',
-  expiresAt: 1_000_000,
-  scope: 'read write offline_access',
-  ...overrides,
-});
-
 /** The current (highest-generation, unreleased) lock file for staging. */
 async function heldLock(store: OAuthStore): Promise<{ path: string; nonce: string }> {
   const entries = await readdir(store.dir);
@@ -71,19 +65,6 @@ async function heldLock(store: OAuthStore): Promise<{ path: string; nonce: strin
   const path = join(store.dir, `staging.lock.${String(top)}`);
 
   return { path, nonce: await readFile(path, 'utf-8') };
-}
-
-/** Whether the staging lock can be taken right now (released again if so). */
-async function isFree(store: OAuthStore): Promise<boolean> {
-  try {
-    await (
-      await store.acquireLock('staging', { retryMs: 1, waitMs: 0 })
-    )();
-
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 const ageFile = async (path: string): Promise<void> => {
@@ -105,8 +86,10 @@ describe('oauth store', () => {
     await mkdir(GLOBAL_CREDENTIALS_DIR, { recursive: true });
     await writeFile(join(GLOBAL_CREDENTIALS_DIR, 'work.json'), '{}');
 
-    await store.writeSession(session());
-    await store.writeSession(session({ environment: 'go', issuer: 'https://app.go.kizen.com' }));
+    await store.writeSession(oauthSession());
+    await store.writeSession(
+      oauthSession({ environment: 'go', issuer: 'https://app.go.kizen.com' }),
+    );
     await store.writeClientId('https://staging.kizen.com', 'client-1');
 
     const path = join(GLOBAL_CREDENTIALS_DIR, 'oauth', 'staging.json');
@@ -140,9 +123,9 @@ describe('oauth store', () => {
     const store = createOAuthStore(join(homedir(), 'other'));
 
     expect(await store.readSession('integration')).toBeNull();
-    await store.writeSession(session({ environment: 'integration', expiresAt: 42 }));
+    await store.writeSession(oauthSession({ environment: 'integration', expiresAt: 42 }));
     expect(await store.readSession('integration')).toStrictEqual(
-      session({ environment: 'integration', expiresAt: 42 }),
+      oauthSession({ environment: 'integration', expiresAt: 42 }),
     );
     expect(await store.listSessions()).toStrictEqual(['integration']);
     expect(await store.deleteSession('integration')).toBe(true);
@@ -179,7 +162,7 @@ describe('oauth store', () => {
 
     expect(second).toBe(true);
     await releaseSecond();
-    expect(await isFree(store)).toBe(true);
+    expect(await lockIsFree(store, 'staging')).toBe(true);
   });
 
   it("release after staleMs overrun does not delete the successor's lock", async () => {
@@ -207,7 +190,131 @@ describe('oauth store', () => {
     );
 
     await releaseSecond();
-    expect(await isFree(store)).toBe(true);
+    expect(await lockIsFree(store, 'staging')).toBe(true);
+  });
+
+  it('confirm fails after another process takes over a stale lock', async () => {
+    const base = join(homedir(), 'confirm-takeover');
+    const first = await createOAuthStore(base).acquireLock('staging');
+
+    await expect(first.confirm()).resolves.toBe(true);
+    // The holder pauses past the taker's staleMs, and the taker takes over.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const second = await createOAuthStore(base).acquireLock('staging', {
+      staleMs: 20,
+      retryMs: 5,
+      waitMs: 1000,
+    });
+
+    await expect(first.confirm()).resolves.toBe(false);
+    await expect(second.confirm()).resolves.toBe(true);
+    // The superseded holder's confirm didn't renew anything that matters: still second's.
+    await expect(
+      createOAuthStore(base).acquireLock('staging', { retryMs: 5, waitMs: 50 }),
+    ).rejects.toThrow('Timed out waiting');
+
+    await first();
+    await second();
+
+    // A taker that has just created the next generation, before it deletes the
+    // older ones: the holder's file is intact, but it's no longer the highest.
+    const third = await createOAuthStore(base).acquireLock('staging');
+    const { path } = await heldLock(createOAuthStore(base));
+    const next = Number(/\.(\d+)$/.exec(path)?.[1]) + 1;
+
+    await writeFile(
+      join(base, 'oauth', `staging.lock.${String(next)}`),
+      `${String(process.pid)} ${'b'.repeat(32)}`,
+    );
+    await expect(stat(path)).resolves.toBeDefined();
+    await expect(third.confirm()).resolves.toBe(false);
+    await third();
+  });
+
+  it('confirm fails after release', async () => {
+    const store = createOAuthStore(join(homedir(), 'confirm-release'));
+    const lock = await store.acquireLock('staging');
+
+    await lock();
+    await expect(lock.confirm()).resolves.toBe(false);
+
+    // Still false once a new holder has taken the next generation.
+    const next = await store.acquireLock('staging');
+
+    await expect(lock.confirm()).resolves.toBe(false);
+    await expect(next.confirm()).resolves.toBe(true);
+    await next();
+  });
+
+  it('confirm succeeds for the current holder and renews its lease', async () => {
+    const base = join(homedir(), 'confirm-renew');
+    const STALE = { staleMs: 200, retryMs: 5 };
+    const holder = await createOAuthStore(base).acquireLock('staging');
+    const { path } = await heldLock(createOAuthStore(base));
+
+    // Past the waiter's staleMs: without a renewal a waiter would take over now.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const before = (await stat(path)).mtimeMs;
+
+    await expect(holder.confirm()).resolves.toBe(true);
+    expect((await stat(path)).mtimeMs).toBeGreaterThan(before);
+    // So a waiter with the same staleMs doesn't take over within the renewed window...
+    await expect(
+      createOAuthStore(base).acquireLock('staging', { ...STALE, waitMs: 50 }),
+    ).rejects.toThrow('Timed out waiting');
+    await expect(holder.confirm()).resolves.toBe(true);
+
+    // ...and staleMs still applies to an alive holder that stops renewing.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const taker = await createOAuthStore(base).acquireLock('staging', { ...STALE, waitMs: 1000 });
+
+    await expect(holder.confirm()).resolves.toBe(false);
+    await holder();
+    await taker();
+  });
+
+  it('withSessionLock gives up after three lost leases and leaves the lock free', async () => {
+    const real = createOAuthStore(join(homedir(), 'lease-attempts'));
+    let acquired = 0;
+    // Real locks whose lease always reads as lost; releasing them is left to withSessionLock.
+    const store: OAuthStore = {
+      ...real,
+      acquireLock: async (environment, options) => {
+        acquired += 1;
+
+        return Object.assign(await real.acquireLock(environment, options), {
+          confirm: () => Promise.resolve(false),
+        });
+      },
+    };
+    let steps = 0;
+    let mutated = false;
+
+    await expect(
+      withSessionLock(
+        store,
+        'staging',
+        async (lock) => {
+          steps += 1;
+
+          if (!(await lock.confirm())) {
+            return LEASE_LOST;
+          }
+
+          mutated = true;
+
+          return 'mutated';
+        },
+        { lock: { retryMs: 5, waitMs: 1000 } },
+      ),
+    ).rejects.toThrow(
+      'Another appbuilder process kept taking over the staging session lock. Run the command again.',
+    );
+    expect({ steps, acquired, mutated }).toStrictEqual({ steps: 3, acquired: 3, mutated: false });
+    expect(await lockIsFree(real, 'staging')).toBe(true);
   });
 
   it('stale lock taken by concurrent takers yields exactly one holder', async () => {
@@ -306,27 +413,21 @@ describe('oauth store', () => {
     ): Promise<{ z: Promise<() => Promise<void>>; releaseB: () => Promise<void> }> => {
       const target = join(base, 'oauth', 'staging.lock.0');
       let paused = false;
-      let reached!: () => void;
-      let resume!: () => void;
-      const atOpen = new Promise<void>((resolve) => {
-        reached = resolve;
-      });
-      const resumed = new Promise<void>((resolve) => {
-        resume = resolve;
-      });
+      const atOpen = deferred();
+      const resumed = deferred();
 
       fsHooks.beforeExclusiveOpen = async (path) => {
         if (path === target && !paused) {
           paused = true;
-          reached();
-          await resumed;
+          atOpen.resolve();
+          await resumed.promise;
         }
       };
 
       const z = createOAuthStore(base).acquireLock('staging', { retryMs: 5, waitMs: zWaitMs });
 
       z.catch(() => undefined);
-      await atOpen;
+      await atOpen.promise;
 
       await (
         await createOAuthStore(base).acquireLock('staging')
@@ -335,7 +436,7 @@ describe('oauth store', () => {
       const releaseB = await createOAuthStore(base).acquireLock('staging');
 
       expect(await readdir(join(base, 'oauth'))).not.toContain('staging.lock.0');
-      resume();
+      resumed.resolve();
 
       return { z, releaseB };
     };
@@ -438,7 +539,7 @@ describe('oauth store', () => {
       // Valid JSON, wrong shape.
       JSON.stringify({ accessToken: 'secret-in-file-1' }),
       // A session for another environment under this one's name.
-      JSON.stringify(session({ environment: 'go', accessToken: 'secret-in-file-1' })),
+      JSON.stringify(oauthSession({ environment: 'go', accessToken: 'secret-in-file-1' })),
     ];
 
     await mkdir(store.dir, { recursive: true });
@@ -446,16 +547,12 @@ describe('oauth store', () => {
     for (const contents of fixtures) {
       await writeFile(path, contents);
 
-      const error = await store.readSession('staging').then(
-        () => null,
-        (err: unknown) => err,
-      );
+      const error = await rejectionOf(store.readSession('staging'));
 
-      expect(error).toBeInstanceOf(OAuthError);
-      expect((error as OAuthError).message).toBe(
+      expect(error.message).toBe(
         `The saved staging session at ${path} can't be read. Run \`appbuilder login --env staging\` to sign in again.`,
       );
-      expect((error as OAuthError).message).not.toContain('secret-in-file-1');
+      expect(error.message).not.toContain('secret-in-file-1');
       // Listed as present, so selecting "the only signed-in environment" surfaces the error.
       expect(await store.listSessions()).toStrictEqual(['staging']);
     }
@@ -466,31 +563,59 @@ describe('oauth store', () => {
     expect(await store.listSessions()).toStrictEqual([]);
   });
 
+  it('session without loginId reads as unreadable', async () => {
+    const store = createOAuthStore(join(homedir(), 'no-login-id'));
+    const path = store.sessionPath('staging');
+    const withoutLoginId: Partial<OAuthSession> = oauthSession();
+
+    delete withoutLoginId.loginId;
+
+    await mkdir(store.dir, { recursive: true });
+
+    // Missing, empty, and not a string: none may come back with loginId undefined.
+    for (const contents of [
+      withoutLoginId,
+      { ...withoutLoginId, loginId: '' },
+      { ...withoutLoginId, loginId: 42 },
+    ]) {
+      await writeFile(path, JSON.stringify(contents));
+
+      const error = await rejectionOf(store.readSession('staging'));
+
+      expect(error.code).toBe('login_required');
+      expect(error.message).toContain("can't be read");
+    }
+
+    // The same file with a loginId reads back, so the field is what made it unreadable.
+    await writeFile(path, JSON.stringify(oauthSession()));
+    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
+  });
+
   it('pre-existing 0755 oauth dir and 0644 session file end up 0700/0600 after a write', async () => {
     const store = createOAuthStore(join(homedir(), 'loose'));
     const path = store.sessionPath('staging');
 
     await mkdir(store.dir, { recursive: true });
     await chmod(store.dir, 0o755);
-    await writeFile(path, JSON.stringify(session({ accessToken: 'old' })));
+    await writeFile(path, JSON.stringify(oauthSession({ accessToken: 'old' })));
     await chmod(path, 0o644);
     expect((await stat(store.dir)).mode & 0o777).toBe(0o755);
     expect((await stat(path)).mode & 0o777).toBe(0o644);
 
-    await store.writeSession(session());
+    await store.writeSession(oauthSession());
 
     expect((await stat(store.dir)).mode & 0o777).toBe(0o700);
     expect((await stat(path)).mode & 0o777).toBe(0o600);
-    expect(await store.readSession('staging')).toStrictEqual(session());
+    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
   });
 
   it('a write that fails mid-way leaves the previous session readable and no tmp file', async () => {
     const store = createOAuthStore(join(homedir(), 'failed-write'));
 
-    await store.writeSession(session());
+    await store.writeSession(oauthSession());
 
     // Serializing throws after the temp file is open, before anything is renamed.
-    const poisoned = session({
+    const poisoned = oauthSession({
       accessToken: {
         toJSON: () => {
           throw new Error('disk on fire');
@@ -499,7 +624,7 @@ describe('oauth store', () => {
     });
 
     await expect(store.writeSession(poisoned)).rejects.toThrow('disk on fire');
-    expect(await store.readSession('staging')).toStrictEqual(session());
+    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
     expect(await readdir(store.dir)).toStrictEqual(['staging.json']);
   });
 

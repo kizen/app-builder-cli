@@ -1,42 +1,42 @@
 /**
- * The OAuth login flow and the access-token provider the Kizen client uses for
- * Bearer auth. Tokens are only ever handed to the client; nothing here prints
- * or logs a token or the PKCE verifier.
+ * The OAuth login flow and the Bearer access-token provider. Nothing here prints or logs a
+ * token or the PKCE verifier; tokens only go to the Kizen client.
  */
-import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
-import { isEnvironment, unknownEnvironmentMessage, type Environment } from './credentials.js';
+import { randomUUID } from 'node:crypto';
+import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
+import { parseEnvironment, type Environment } from './credentials.js';
 import {
   buildAuthorizeUrl,
   createPkcePair,
   DEFAULT_LOGIN_ENVIRONMENT,
   discover,
-  issuerFor,
   loginCommandFor,
+  loginRequired,
   OAuthError,
   openBrowser,
-  randomState,
+  random256,
   registerClient,
   requestToken,
   startLoopbackServer,
   type AuthServerMetadata,
-  type LoopbackServer,
   type TokenResponse,
 } from './oauth.js';
-import type { LockOptions, OAuthSession, OAuthStore } from './oauthStore.js';
+import {
+  mutateSession,
+  whenConfirmed,
+  withSessionLock,
+  type LockOptions,
+  type OAuthSession,
+  type OAuthStore,
+} from './oauthStore.js';
 
-/** Refresh proactively when the access token has less than this left. */
-export const REFRESH_LEEWAY_MS = 60_000;
+const REFRESH_LEEWAY_MS = 60_000;
 
 /**
- * How long a refresh that hit `invalid_client` waits for the clients.json lock
- * to forget the client. That lock is only held for a file rewrite, and the wait
- * sits inside auth-header's 10s budget, so it is short and best-effort: a
- * missed forget only costs the next login one failed attempt.
+ * After `invalid_client`, the best-effort wait for the clients.json lock to forget the client.
+ * Short because it sits inside auth-header's 10s budget; a miss costs the next login one attempt.
  */
 export const FORGET_CLIENT_WAIT_MS = 500;
-
-const loginRequired = (environment: Environment, reason: string): OAuthError =>
-  new OAuthError('login_required', `${reason} Run \`${loginCommandFor(environment)}\` to sign in.`);
 
 export interface LoginDeps {
   store: OAuthStore;
@@ -44,45 +44,37 @@ export interface LoginDeps {
   now: () => number;
   /** Prints a progress line for the user. Never receives a token. */
   print: (line: string) => void;
-  openBrowser: (url: string) => void;
-  startLoopbackServer: (options: { state: string; timeoutMs?: number }) => Promise<LoopbackServer>;
-  /** How long to wait for the browser callback. */
+  openBrowser: typeof openBrowser;
+  startLoopbackServer: typeof startLoopbackServer;
   timeoutMs?: number;
-  /** Bound on each request to the authorization server. */
-  requestTimeoutMs?: number;
 }
 
 const defaultFetch: typeof fetch = (input, init) => fetch(input, init);
 const defaultNow = (): number => Date.now();
 
-export function createDefaultLoginDeps(store: OAuthStore): LoginDeps {
-  return {
-    store,
-    fetch: defaultFetch,
-    now: defaultNow,
-    print: (line) => {
-      process.stderr.write(`${line}\n`);
-    },
-    openBrowser,
-    startLoopbackServer,
-  };
-}
+export const createDefaultLoginDeps = (
+  store: OAuthStore,
+  print: LoginDeps['print'],
+): LoginDeps => ({
+  store,
+  fetch: defaultFetch,
+  now: defaultNow,
+  print,
+  openBrowser,
+  startLoopbackServer,
+});
 
-const toSession = (
-  environment: Environment,
-  metadata: AuthServerMetadata,
-  clientId: string,
+/** `base` with newly issued `tokens`; a token or scope the response leaves out keeps `base`'s. */
+const withTokens = (
+  base: Omit<OAuthSession, 'accessToken' | 'expiresAt'>,
   tokens: TokenResponse,
   now: number,
 ): OAuthSession => ({
-  environment,
-  issuer: metadata.issuer,
-  clientId,
-  tokenEndpoint: metadata.tokenEndpoint,
+  ...base,
   accessToken: tokens.accessToken,
-  refreshToken: tokens.refreshToken,
+  refreshToken: tokens.refreshToken ?? base.refreshToken,
   expiresAt: now + tokens.expiresIn * 1000,
-  scope: tokens.scope,
+  scope: tokens.scope ?? base.scope,
 });
 
 async function authorizeOnce(
@@ -91,7 +83,7 @@ async function authorizeOnce(
   deps: LoginDeps,
 ): Promise<TokenResponse> {
   const { verifier, challenge } = createPkcePair();
-  const state = randomState();
+  const state = random256();
   const server = await deps.startLoopbackServer({
     state,
     ...(deps.timeoutMs !== undefined && { timeoutMs: deps.timeoutMs }),
@@ -121,7 +113,6 @@ async function authorizeOnce(
         code_verifier: verifier,
       },
       deps.fetch,
-      deps.requestTimeoutMs,
     );
   } finally {
     await server.close();
@@ -129,27 +120,15 @@ async function authorizeOnce(
 }
 
 /**
- * Discovers the environment's authorization server, registers (or reuses the
- * cached) public client, runs the browser login and stores the session.
- *
- * A stale cached client_id never blocks more than one attempt:
- * - Kizen (django-oauth-toolkit) must not redirect for an unknown client_id
- *   (RFC 6749 §4.1.2.1), so the browser shows an error page and the CLI only
- *   sees a timeout. A timeout with a cached client therefore drops the cache,
- *   and the next login registers afresh. A timeout can't be told apart from a
- *   user who walked away, so this doesn't retry on its own; the cost of a
- *   wrong guess is one extra registration.
- * - An `invalid_client` that does reach the CLI (token endpoint, or a callback
- *   error) re-registers exactly once and runs the browser flow again.
+ * A stale cached client_id never blocks more than one attempt. The server must not redirect for
+ * an unknown client_id (RFC 6749 §4.1.2.1), so the CLI only sees a timeout: a timeout with a
+ * cached client drops the cache without retrying (it may be a user who walked away). An
+ * `invalid_client` that reaches the CLI re-registers once and runs the browser flow again.
  */
 export async function login(environment: Environment, deps: LoginDeps): Promise<OAuthSession> {
-  const metadata = await discover(
-    issuerFor(BASE_URLS[environment]),
-    deps.fetch,
-    deps.requestTimeoutMs,
-  );
+  const metadata = await discover(apiOriginFor(environment), deps.fetch);
   const register = async (): Promise<string> => {
-    const clientId = await registerClient(metadata, deps.fetch, deps.requestTimeoutMs);
+    const clientId = await registerClient(metadata, deps.fetch);
 
     await deps.store.writeClientId(metadata.issuer, clientId);
 
@@ -163,40 +142,50 @@ export async function login(environment: Environment, deps: LoginDeps): Promise<
   try {
     tokens = await authorizeOnce(metadata, clientId, deps);
   } catch (err) {
-    if (err instanceof OAuthError && err.code === 'timeout' && cached !== undefined) {
-      await deps.store.forgetClientId(metadata.issuer);
+    if (
+      !(
+        err instanceof OAuthError &&
+        (err.code === 'timeout' || err.code === 'invalid_client') &&
+        cached !== undefined
+      )
+    ) {
+      throw err;
+    }
+
+    await deps.store.forgetClientId(metadata.issuer);
+
+    if (err.code === 'timeout') {
       throw new OAuthError(
         'timeout',
         `${err.message}. If the browser showed an error instead of a consent page, the saved app registration was stale; it has been cleared. Run \`${loginCommandFor(environment)}\` again.`,
       );
     }
 
-    if (!(err instanceof OAuthError && err.code === 'invalid_client' && cached !== undefined)) {
-      throw err;
-    }
-
-    await deps.store.forgetClientId(metadata.issuer);
     deps.print('The saved app registration was rejected; registering again.');
     clientId = await register();
     tokens = await authorizeOnce(metadata, clientId, deps);
   }
 
-  const session = toSession(environment, metadata, clientId, tokens, deps.now());
-  // Only around the write, never the browser wait. Under the lock, an in-flight
-  // refresh either finishes first (and this overwrites it) or re-reads this
-  // session afterwards, so it never writes the old login back over it.
-  const release = await deps.store.acquireLock(environment);
+  const session = withTokens(
+    {
+      environment,
+      loginId: randomUUID(),
+      issuer: metadata.issuer,
+      clientId,
+      tokenEndpoint: metadata.tokenEndpoint,
+      refreshToken: undefined,
+      scope: undefined,
+    },
+    tokens,
+    deps.now(),
+  );
 
-  try {
-    await deps.store.writeSession(session);
-  } finally {
-    await release();
-  }
+  // Locked only around the write, never the browser wait.
+  await mutateSession(deps.store, environment, () => deps.store.writeSession(session));
 
   return session;
 }
 
-/** What the Kizen client needs for Bearer auth. */
 export interface BearerTokenProvider {
   environment: Environment;
   getAccessToken: () => Promise<string>;
@@ -206,8 +195,9 @@ export interface BearerTokenProvider {
 
 export interface TokenProviderOptions {
   lock?: LockOptions;
-  /** Bound on each token request; keep it under the lock's stale window. */
+  /** Keep it under the lock's stale window. */
   requestTimeoutMs?: number;
+  fetch?: typeof fetch;
 }
 
 export interface TokenProviderDeps extends TokenProviderOptions {
@@ -217,20 +207,19 @@ export interface TokenProviderDeps extends TokenProviderOptions {
 }
 
 /**
- * Hands out the environment's access token, refreshing it when it has under a
- * minute left or after a 401. Concurrent refreshes in this process share one
- * promise; across processes the store's lock file serializes them, and the
- * session is re-read under the lock so a token another process already rotated
- * is used rather than spending the (rotating) refresh token again. Login and
- * logout take the same lock to write or delete the session, so the re-read
- * also sees a newer login or a logout, and a refresh never writes the session
- * it started from back over either.
+ * Refreshes with under a minute left or after a 401. In-process refreshes share one promise;
+ * across processes the lock serializes them and the session is re-read under it, so a token
+ * another process already rotated is used rather than spending the refresh token again.
+ *
+ * Pinned to the first session's `loginId`: a command resolves who it acts as once, so after
+ * another login (maybe another business) every read throws rather than hand out its tokens.
  */
 export function createTokenProvider(
   environment: Environment,
   deps: TokenProviderDeps,
 ): BearerTokenProvider {
   let inflight: Promise<string> | undefined;
+  let pinnedLoginId: string | undefined;
 
   const fresh = (session: OAuthSession): boolean =>
     session.expiresAt - deps.now() > REFRESH_LEEWAY_MS;
@@ -242,11 +231,20 @@ export function createTokenProvider(
       throw loginRequired(environment, `You're not signed in to ${environment}.`);
     }
 
+    pinnedLoginId ??= session.loginId;
+
+    if (session.loginId !== pinnedLoginId) {
+      throw new OAuthError(
+        'login_required',
+        `The ${environment} sign-in changed while this command was running. Run it again.`,
+      );
+    }
+
     return session;
   };
 
   const doRefresh = async (rejected: string): Promise<string> => {
-    const release = await deps.store.acquireLock(environment, deps.lock);
+    const lease = await deps.store.acquireLock(environment, deps.lock);
 
     try {
       const current = await readOrThrow();
@@ -255,8 +253,20 @@ export function createTokenProvider(
         return current.accessToken;
       }
 
+      // Each attempt re-reads through the pin and mutates only if the session still holds the
+      // refresh token this refresh spent; resolves false if someone else rotated it.
+      const commit = (mutate: () => Promise<unknown>): Promise<boolean> =>
+        withSessionLock(
+          deps.store,
+          environment,
+          async (lock) =>
+            (await readOrThrow()).refreshToken === current.refreshToken &&
+            whenConfirmed(lock, () => mutate().then(() => true)),
+          { lock: deps.lock, held: lease },
+        );
+
       if (current.refreshToken === undefined) {
-        await deps.store.deleteSession(environment);
+        await commit(() => deps.store.deleteSession(environment));
         throw loginRequired(environment, `The ${environment} session has expired.`);
       }
 
@@ -278,9 +288,10 @@ export function createTokenProvider(
           err instanceof OAuthError &&
           (err.code === 'invalid_grant' || err.code === 'invalid_client')
         ) {
-          await deps.store.deleteSession(environment);
+          // Only the session this refresh was refused for; a newer login stays.
+          const deleted = await commit(() => deps.store.deleteSession(environment));
 
-          if (err.code === 'invalid_client') {
+          if (deleted && err.code === 'invalid_client') {
             await deps.store
               .forgetClientId(current.issuer, { waitMs: FORGET_CLIENT_WAIT_MS, retryMs: 50 })
               .catch(() => undefined);
@@ -292,21 +303,14 @@ export function createTokenProvider(
         throw err;
       }
 
-      const next: OAuthSession = {
-        ...current,
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken ?? current.refreshToken,
-        expiresAt: deps.now() + tokens.expiresIn * 1000,
-        scope: tokens.scope ?? current.scope,
-      };
+      const next = withTokens(current, tokens, deps.now());
 
-      // Under the lock, so nothing else changed the session since the re-read. A
-      // holder paused past staleMs could still write late; that's the lease trade-off.
-      await deps.store.writeSession(next);
+      // Newer tokens another refresh stored stay; this command uses the one it was just issued.
+      await commit(() => deps.store.writeSession(next));
 
       return next.accessToken;
     } finally {
-      await release();
+      await lease();
     }
   };
 
@@ -333,13 +337,17 @@ export function createTokenProvider(
   };
 }
 
-/** `createTokenProvider` with the real `fetch` and clock. */
 export const createDefaultTokenProvider = (
   environment: Environment,
   store: OAuthStore,
   options: TokenProviderOptions = {},
 ): BearerTokenProvider =>
-  createTokenProvider(environment, { store, fetch: defaultFetch, now: defaultNow, ...options });
+  createTokenProvider(environment, {
+    store,
+    now: defaultNow,
+    ...options,
+    fetch: options.fetch ?? defaultFetch,
+  });
 
 const NOT_SIGNED_IN_MESSAGE = `You're not signed in. Run \`${loginCommandFor(DEFAULT_LOGIN_ENVIRONMENT)}\` (or another --env).`;
 
@@ -357,9 +365,11 @@ export async function resolveSessionEnvironment(
   listSessions: () => Promise<Environment[]>,
 ): Promise<SessionEnvironment> {
   if (env !== undefined) {
-    return isEnvironment(env)
-      ? { ok: true, environment: env }
-      : { ok: false, problem: 'unknown_environment', message: unknownEnvironmentMessage(env) };
+    const { environment, message } = parseEnvironment(env);
+
+    return environment === undefined
+      ? { ok: false, problem: 'unknown_environment', message }
+      : { ok: true, environment };
   }
 
   const sessions = await listSessions();

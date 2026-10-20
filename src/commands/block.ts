@@ -82,7 +82,7 @@ export function blockCommand(program: Command): void {
     .option('--env <env>', 'environment of the session to use (with --oauth)')
     .action(async (apiName: string | undefined, options: PushCommandOptions) => {
       try {
-        const deps = createDefaultPushDeps(process.cwd(), { oauth: options.oauth === true });
+        const deps = createDefaultPushDeps(process.cwd());
 
         if (!process.stdin.isTTY || !process.stdout.isTTY || options.json === true) {
           await runPushHeadless(apiName, options, deps);
@@ -116,10 +116,7 @@ export function blockCommand(program: Command): void {
     .option('--env <env>', 'environment of the session to use (with --oauth)')
     .action(async (options: TargetsCommandOptions) => {
       try {
-        await runTargetsHeadless(
-          options,
-          createDefaultPushDeps(process.cwd(), { oauth: options.oauth === true }),
-        );
+        await runTargetsHeadless(options, createDefaultPushDeps(process.cwd()));
       } catch (error) {
         fail(error);
       }

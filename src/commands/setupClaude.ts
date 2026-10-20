@@ -1,21 +1,12 @@
 import type { Command } from 'commander';
 import {
-  defaultSetupClaudeDeps,
+  createDefaultSetupClaudeDeps,
   runSetupClaude,
-  type SetupClaudeDeps,
   type SetupClaudeOptions,
 } from '../lib/setupClaude.js';
 
-/**
- * The default deps plus the CLI's version, taken from the program (`createProgram`
- * sets it from package.json), so the MCP helper is pinned to the running CLI.
- */
-export const setupClaudeDepsFor = (program: Command): SetupClaudeDeps => ({
-  ...defaultSetupClaudeDeps,
-  cliVersion: program.version(),
-});
-
-export function setupClaudeCommand(program: Command): void {
+/** `version` is the program's (`createProgram` reads it from package.json); the MCP helper pins it. */
+export function setupClaudeCommand(program: Command, version: string): void {
   program
     .command('setup-claude')
     .description('Install or refresh the Claude Code skill for building custom blocks')
@@ -28,6 +19,6 @@ export function setupClaudeCommand(program: Command): void {
     .option('--env <env>', 'environment of the MCP server to register (with --mcp; default: go)')
     .option('--force', 'replace an existing Kizen MCP server registration (with --mcp)')
     .action(async (options: SetupClaudeOptions) => {
-      await runSetupClaude(process.cwd(), options, setupClaudeDepsFor(program));
+      await runSetupClaude(process.cwd(), options, createDefaultSetupClaudeDeps(version));
     });
 }

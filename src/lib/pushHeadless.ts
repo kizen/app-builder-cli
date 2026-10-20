@@ -57,12 +57,8 @@ import {
   type PushMapKey,
   type TargetMatch,
 } from './pushBlock.js';
-import {
-  createDefaultTokenProvider,
-  resolveSessionEnvironment,
-  type BearerTokenProvider,
-} from './oauthSession.js';
-import { createOAuthStore } from './oauthStore.js';
+import { createDefaultTokenProvider, resolveSessionEnvironment } from './oauthSession.js';
+import { createOAuthStore, type OAuthStore } from './oauthStore.js';
 import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
 
 export type PushErrorCode =
@@ -134,7 +130,8 @@ export interface TargetsCommandOptions {
 /** The stored `appbuilder login` sessions, for `--oauth`. */
 export interface OAuthPushDeps {
   listSessions: () => Promise<Environment[]>;
-  getIdentity: (environment: Environment) => Promise<KizenIdentity>;
+  /** The identity and the client that resolved it, so later requests are pinned to that login. */
+  connect: (environment: Environment) => Promise<{ identity: KizenIdentity; client: KizenClient }>;
 }
 
 export interface PushDeps {
@@ -143,6 +140,7 @@ export interface PushDeps {
   listLoadableCredentialProfiles: () => Promise<CredentialProfile[]>;
   loadConfig: (outputDir: string) => Promise<AppBuilderConfig>;
   packageBlocks: (dir: string) => Promise<PackagedBlocks>;
+  /** The API-key client; `--oauth` gets its client from `oauth.connect`. */
   createClient: (credentials: Credentials) => KizenClient;
   readPushMap: (dir: string) => Promise<PushMapEntry[]>;
   writePushMap: (dir: string, entries: readonly PushMapEntry[]) => Promise<void>;
@@ -153,27 +151,36 @@ export interface PushDeps {
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
   setExitCode: (code: number) => void;
-  /** Present when the command runs with `--oauth`; `createClient` then uses Bearer auth. */
-  oauth?: OAuthPushDeps;
+  oauth: OAuthPushDeps;
 }
 
-/**
- * `oauth: true` swaps in Bearer auth from the stored login session: `createClient`
- * ignores the credentials' (empty) API key and authenticates as the session for
- * `credentials.environment`, sharing one token provider per environment.
- */
-export function createDefaultPushDeps(cwd: string, options: { oauth?: boolean } = {}): PushDeps {
-  const oauth = options.oauth === true ? createOAuthPushParts() : undefined;
+export function createOAuthPushDeps(
+  store: OAuthStore,
+  options: { fetch?: typeof fetch } = {},
+): OAuthPushDeps {
+  const { fetch: fetchImpl } = options;
 
+  return {
+    listSessions: () => store.listSessions(),
+    connect: async (environment) => {
+      const bearer = createDefaultTokenProvider(environment, store, {
+        ...(fetchImpl && { fetch: fetchImpl }),
+      });
+      const client = createKizenClient({ bearer, ...(fetchImpl && { fetch: fetchImpl }) });
+
+      return { identity: await client.getIdentity(), client };
+    },
+  };
+}
+
+export function createDefaultPushDeps(cwd: string): PushDeps {
   return {
     cwd,
     loadCredentialsDetailed,
     listLoadableCredentialProfiles,
     loadConfig,
     packageBlocks,
-    createClient: oauth
-      ? (credentials) => createKizenClient({ bearer: oauth.providerFor(credentials.environment) })
-      : (credentials) => createKizenClient({ credentials }),
+    createClient: (credentials) => createKizenClient({ credentials }),
     readPushMap,
     writePushMap,
     ensureGitignore,
@@ -189,34 +196,8 @@ export function createDefaultPushDeps(cwd: string, options: { oauth?: boolean } 
     setExitCode: (code) => {
       process.exitCode = code;
     },
-    ...(oauth && { oauth: oauth.deps }),
-  };
-}
-
-function createOAuthPushParts(): {
-  deps: OAuthPushDeps;
-  providerFor: (environment: Environment) => BearerTokenProvider;
-} {
-  const store = createOAuthStore();
-  const providers = new Map<Environment, BearerTokenProvider>();
-  const providerFor = (environment: Environment): BearerTokenProvider => {
-    let provider = providers.get(environment);
-
-    if (!provider) {
-      provider = createDefaultTokenProvider(environment, store);
-      providers.set(environment, provider);
-    }
-
-    return provider;
-  };
-
-  return {
-    providerFor,
-    deps: {
-      listSessions: () => store.listSessions(),
-      getIdentity: (environment) =>
-        createKizenClient({ bearer: providerFor(environment) }).getIdentity(),
-    },
+    // Constructing the store does no IO; an API-key push never touches it.
+    oauth: createOAuthPushDeps(createOAuthStore()),
   };
 }
 
@@ -252,8 +233,13 @@ export function apiFailure(error: unknown): PushFailure {
   return failure('local_error', errorMessage(error));
 }
 
+/** What a push reads from the credentials: where it pushes, and the push map key. */
+export type PushAccount = Pick<Credentials, 'environment' | 'businessId'>;
+
 export interface ResolvedCredentials {
-  credentials: Credentials;
+  credentials: PushAccount;
+  /** The client every request of the command goes through. */
+  client: KizenClient;
 }
 
 async function loadCredentialFile(
@@ -295,7 +281,7 @@ async function loadCredentialFile(
     );
   }
 
-  return success({ credentials });
+  return success({ credentials, client: deps.createClient(credentials) });
 }
 
 async function resolveOAuthCredentials(
@@ -304,10 +290,6 @@ async function resolveOAuthCredentials(
 ): Promise<Step<ResolvedCredentials>> {
   if (options.credentials !== undefined || options.profile !== undefined) {
     return failure('usage_error', "--oauth can't be combined with -c or --profile.");
-  }
-
-  if (!deps.oauth) {
-    return failure('local_error', 'Sessions are not available here.');
   }
 
   const resolved = await resolveSessionEnvironment(options.env, deps.oauth.listSessions);
@@ -321,23 +303,18 @@ async function resolveOAuthCredentials(
 
   const { environment } = resolved;
 
-  let identity: KizenIdentity;
+  let connected: Awaited<ReturnType<OAuthPushDeps['connect']>>;
 
   try {
-    identity = await deps.oauth.getIdentity(environment);
+    connected = await deps.oauth.connect(environment);
   } catch (error) {
     return apiFailure(error);
   }
 
-  // The session's token carries the user and business server-side; the IDs fill
-  // in the push map key and display. There is no API key in this mode.
+  // The token carries the user and business server-side; businessId is for the push map key.
   return success({
-    credentials: {
-      apiKey: '',
-      userId: identity.userId,
-      businessId: identity.businessId,
-      environment,
-    },
+    credentials: { environment, businessId: connected.identity.businessId },
+    client: connected.client,
   });
 }
 
@@ -561,7 +538,7 @@ export async function listPushableObjects(client: KizenClient): Promise<TargetCu
 
 export async function listTargets(
   client: KizenClient,
-  credentials: Credentials,
+  credentials: PushAccount,
   options: { object?: string },
 ): Promise<Step<TargetsResult>> {
   const { environment, businessId } = credentials;
@@ -606,7 +583,7 @@ export async function listTargets(
 
 export interface PushContext {
   client: KizenClient;
-  credentials: Credentials;
+  credentials: PushAccount;
   block: ResolvedBlock;
   pushMap: PushMapEntry[];
   entry: PushMapEntry | undefined;
@@ -1094,7 +1071,7 @@ export async function forgetRemembered(
 
 /** Reads the push map, applies --forget, and finds this block's remembered target. */
 export async function loadPushContext(
-  args: { client: KizenClient; credentials: Credentials; block: ResolvedBlock; forget?: boolean },
+  args: { client: KizenClient; credentials: PushAccount; block: ResolvedBlock; forget?: boolean },
   deps: Pick<PushDeps, 'cwd' | 'readPushMap' | 'writePushMap'>,
 ): Promise<{ context: PushContext; forgotten: boolean }> {
   const { client, credentials, block } = args;
@@ -1280,8 +1257,7 @@ export async function runPushHeadless(
       return;
     }
 
-    const { credentials } = credentialStep.value;
-    const client = deps.createClient(credentials);
+    const { credentials, client } = credentialStep.value;
     const blockStep = await resolveBlock(apiName, deps);
 
     if (!blockStep.ok) {
@@ -1507,9 +1483,9 @@ export async function runTargetsHeadless(
       return;
     }
 
-    const { credentials } = credentialStep.value;
+    const { credentials, client } = credentialStep.value;
     const targetsStep = await listTargets(
-      deps.createClient(credentials),
+      client,
       credentials,
       options.object === undefined ? {} : { object: options.object },
     );

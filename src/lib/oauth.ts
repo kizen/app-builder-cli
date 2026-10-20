@@ -10,29 +10,22 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { platform } from 'node:process';
 import type { Environment } from './credentials.js';
-import { errorCause, isRecord } from './guards.js';
+import { errorCause, isRecord, nonEmptyString } from './guards.js';
 
-/** The registered redirect URI. The server ignores the port for loopback hosts. */
-export const REGISTERED_REDIRECT_URI = 'http://127.0.0.1/callback';
-export const LOOPBACK_HOST = '127.0.0.1';
-export const CALLBACK_PATH = '/callback';
-export const OAUTH_SCOPE = 'read write offline_access';
-export const CLIENT_NAME = 'Kizen App Builder CLI';
-/** `appbuilder login` (and `setup-claude --mcp`) use this environment when no --env is given. */
+const LOOPBACK_HOST = '127.0.0.1';
+const CALLBACK_PATH = '/callback';
+/** The server ignores the port for loopback hosts, so this one URI covers every port. */
+const REGISTERED_REDIRECT_URI = `http://${LOOPBACK_HOST}${CALLBACK_PATH}`;
+const OAUTH_SCOPE = 'read write offline_access';
+const CLIENT_NAME = 'Kizen App Builder CLI';
+const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Used by `login` and `setup-claude --mcp` when no --env is given. */
 export const DEFAULT_LOGIN_ENVIRONMENT: Environment = 'go';
-export const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
-/**
- * Bound on each request to the authorization server, body included. It must stay
- * well under the refresh lock's 30s stale window so a refresh never outlives
- * the lock it holds.
- */
+/** Per request, body included. Must stay well under the refresh lock's 30s stale window. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
-/**
- * An OAuth failure. `code` is the RFC 6749 error code when the server sent one
- * (`invalid_grant`, `invalid_client`, `access_denied`, …), or one of the local
- * codes below.
- */
+/** `code` is the server's RFC 6749 error code when it sent one, else a local code. */
 export type OAuthLocalErrorCode =
   | 'network_error'
   | 'server_error'
@@ -41,14 +34,13 @@ export type OAuthLocalErrorCode =
   | 'login_required';
 
 export class OAuthError extends Error {
-  readonly code: string;
-
-  /** `code` is an OAuthLocalErrorCode or the server's RFC 6749 error code. */
   // `string & {}` keeps any server code while still suggesting the local ones.
-  constructor(code: OAuthLocalErrorCode | (string & {}), message: string) {
+  constructor(
+    readonly code: OAuthLocalErrorCode | (string & {}),
+    message: string,
+  ) {
     super(message);
     this.name = 'OAuthError';
-    this.code = code;
   }
 }
 
@@ -66,16 +58,19 @@ export interface TokenResponse {
   scope: string | undefined;
 }
 
-export interface PkcePair {
-  verifier: string;
-  challenge: string;
-}
-
-/** The OAuth issuer for a Kizen API base URL: its origin, without `/api`. */
-export const issuerFor = (apiBaseUrl: string): string => new URL(apiBaseUrl).origin;
-
 export const loginCommandFor = (environment: Environment): string =>
   `appbuilder login --env ${environment}`;
+
+/** A `login_required` error: `reason`, then how to sign in (again). */
+export const loginRequired = (
+  environment: Environment,
+  reason: string,
+  options: { again?: boolean } = {},
+): OAuthError =>
+  new OAuthError(
+    'login_required',
+    `${reason} Run \`${loginCommandFor(environment)}\` to sign in${options.again === true ? ' again' : ''}.`,
+  );
 
 const parseJson = (text: string): unknown => {
   try {
@@ -85,20 +80,21 @@ const parseJson = (text: string): unknown => {
   }
 };
 
-/**
- * Sends one request and reads its body, both under one `timeoutMs` deadline. A
- * failure or the deadline becomes `network_error`.
- */
+/** One JSON request, body read included, under one deadline. Any failure is `network_error`. */
 async function send(
   fetchImpl: typeof fetch,
   url: string,
-  init: RequestInit,
+  init: { method?: string; headers?: Record<string, string>; body?: string },
   timeoutMs: number,
 ): Promise<{ res: Response; body: unknown }> {
   const signal = AbortSignal.timeout(timeoutMs);
 
   try {
-    const res = await fetchImpl(url, { ...init, signal });
+    const res = await fetchImpl(url, {
+      ...init,
+      headers: { Accept: 'application/json', ...init.headers },
+      signal,
+    });
 
     return { res, body: parseJson(await res.text()) };
   } catch (err) {
@@ -110,15 +106,17 @@ async function send(
   }
 }
 
-/** Turns a non-2xx OAuth endpoint response into an OAuthError carrying the server's code. */
 function endpointError(what: string, status: number, body: unknown): OAuthError {
-  if (isRecord(body) && typeof body.error === 'string' && body.error !== '') {
-    const description =
-      typeof body.error_description === 'string' && body.error_description !== ''
-        ? `: ${body.error_description}`
-        : '';
+  const fields: Record<string, unknown> = isRecord(body) ? body : {};
+  const code = nonEmptyString(fields.error);
 
-    return new OAuthError(body.error, `${what} failed (${body.error}${description})`);
+  if (code !== undefined) {
+    const description = nonEmptyString(fields.error_description);
+
+    return new OAuthError(
+      code,
+      `${what} failed (${code}${description === undefined ? '' : `: ${description}`})`,
+    );
   }
 
   return new OAuthError('server_error', `${what} failed with HTTP ${String(status)}`);
@@ -136,38 +134,28 @@ const httpsUrl = (value: unknown): string | undefined => {
   }
 };
 
-/**
- * RFC 8414 discovery. Requires the metadata's `issuer` to be exactly the one
- * asked for (§3.3), https endpoints and S256 PKCE support.
- */
+/** RFC 8414 discovery. Requires an exact `issuer` match (§3.3), https endpoints and S256. */
 export async function discover(
   issuer: string,
   fetchImpl: typeof fetch,
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<AuthServerMetadata> {
   const url = `${issuer}/.well-known/oauth-authorization-server`;
-  const { res, body } = await send(
-    fetchImpl,
-    url,
-    { headers: { Accept: 'application/json' } },
-    timeoutMs,
-  );
+  const fail = (detail: string): OAuthError =>
+    new OAuthError('server_error', `OAuth discovery at ${url} ${detail}`);
+  const { res, body } = await send(fetchImpl, url, {}, timeoutMs);
 
   if (!res.ok) {
-    throw new OAuthError(
-      'server_error',
-      `OAuth discovery at ${url} failed with HTTP ${String(res.status)}`,
-    );
+    throw fail(`failed with HTTP ${String(res.status)}`);
   }
 
   if (!isRecord(body)) {
-    throw new OAuthError('server_error', `OAuth discovery at ${url} didn't return valid JSON`);
+    throw fail("didn't return valid JSON");
   }
 
   if (body.issuer !== issuer) {
-    throw new OAuthError(
-      'server_error',
-      `OAuth discovery at ${url} returned issuer ${typeof body.issuer === 'string' ? JSON.stringify(body.issuer) : 'none'}, expected ${issuer}`,
+    throw fail(
+      `returned issuer ${typeof body.issuer === 'string' ? JSON.stringify(body.issuer) : 'none'}, expected ${issuer}`,
     );
   }
 
@@ -175,10 +163,7 @@ export async function discover(
   const tokenEndpoint = httpsUrl(body.token_endpoint);
 
   if (authorizationEndpoint === undefined || tokenEndpoint === undefined) {
-    throw new OAuthError(
-      'server_error',
-      `OAuth discovery at ${url} has no https authorization or token endpoint`,
-    );
+    throw fail('has no https authorization or token endpoint');
   }
 
   const methods = body.code_challenge_methods_supported;
@@ -213,7 +198,7 @@ export async function registerClient(
     metadata.registrationEndpoint,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_name: CLIENT_NAME,
         redirect_uris: [REGISTERED_REDIRECT_URI],
@@ -229,25 +214,27 @@ export async function registerClient(
     throw endpointError('App registration', res.status, body);
   }
 
-  if (!isRecord(body) || typeof body.client_id !== 'string' || body.client_id === '') {
+  const clientId = isRecord(body) ? nonEmptyString(body.client_id) : undefined;
+
+  if (clientId === undefined) {
     throw new OAuthError('server_error', 'App registration returned no client_id');
   }
 
-  return body.client_id;
+  return clientId;
 }
 
 /** The S256 code challenge of a verifier (RFC 7636 §4.2). */
 export const pkceChallenge = (verifier: string): string =>
   createHash('sha256').update(verifier, 'ascii').digest('base64url');
 
-/** A fresh PKCE pair. 32 random bytes give a 43-character base64url verifier. */
-export function createPkcePair(): PkcePair {
-  const verifier = randomBytes(32).toString('base64url');
+/** 32 random bytes as base64url (43 characters): a login's `state`, or a PKCE verifier. */
+export const random256 = (): string => randomBytes(32).toString('base64url');
+
+export function createPkcePair(): { verifier: string; challenge: string } {
+  const verifier = random256();
 
   return { verifier, challenge: pkceChallenge(verifier) };
 }
-
-export const randomState = (): string => randomBytes(32).toString('base64url');
 
 export function buildAuthorizeUrl(
   metadata: AuthServerMetadata,
@@ -266,7 +253,6 @@ export function buildAuthorizeUrl(
   return url.toString();
 }
 
-/** POSTs a form to the token endpoint and validates the token response. */
 export async function requestToken(
   tokenEndpoint: string,
   params: Record<string, string>,
@@ -278,7 +264,7 @@ export async function requestToken(
     tokenEndpoint,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams(params).toString(),
     },
     timeoutMs,
@@ -288,10 +274,11 @@ export async function requestToken(
     throw endpointError('The token request', res.status, body);
   }
 
+  const accessToken = isRecord(body) ? nonEmptyString(body.access_token) : undefined;
+
   if (
     !isRecord(body) ||
-    typeof body.access_token !== 'string' ||
-    body.access_token === '' ||
+    accessToken === undefined ||
     typeof body.token_type !== 'string' ||
     body.token_type.toLowerCase() !== 'bearer'
   ) {
@@ -299,46 +286,44 @@ export async function requestToken(
   }
 
   return {
-    accessToken: body.access_token,
-    refreshToken:
-      typeof body.refresh_token === 'string' && body.refresh_token !== ''
-        ? body.refresh_token
-        : undefined,
+    accessToken,
+    refreshToken: nonEmptyString(body.refresh_token),
     expiresIn: typeof body.expires_in === 'number' && body.expires_in > 0 ? body.expires_in : 3600,
     scope: typeof body.scope === 'string' ? body.scope : undefined,
   };
 }
 
 export interface LoopbackServer {
-  /** The address the server is bound to (always 127.0.0.1). */
-  host: string;
   port: number;
   /** `http://127.0.0.1:<port>/callback`, used verbatim in the authorize and token requests. */
   redirectUri: string;
-  /**
-   * Settles on the first callback carrying the right `state` (or the timeout).
-   * The server closes either way.
-   */
+  /** Settles on the first callback with the right `state`, or the timeout; then the server closes. */
   result: Promise<{ code: string }>;
   close: () => Promise<void>;
 }
 
-const page = (text: string): string =>
-  `<!doctype html><html><head><meta charset="utf-8"><title>Kizen App Builder</title></head><body><p>${text}</p></body></html>`;
+const respond = (res: ServerResponse, status: number, text: string): void => {
+  res
+    .writeHead(status, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      Connection: 'close',
+    })
+    .end(
+      `<!doctype html><html><head><meta charset="utf-8"><title>Kizen App Builder</title></head><body><p>${text}</p></body></html>`,
+    );
+};
 
-export const CALLBACK_SUCCESS_TEXT = 'Login complete. You can close this window.';
-export const CALLBACK_FAILURE_TEXT =
+const CALLBACK_SUCCESS_TEXT = 'Login complete. You can close this window.';
+const CALLBACK_FAILURE_TEXT =
   'Login failed. Return to the terminal for details. You can close this window.';
+
 export const CALLBACK_WRONG_STATE_TEXT =
   'This login link is not for the current login. Use the latest link from the terminal.';
 
 /**
- * Starts the RFC 8252 loopback receiver on 127.0.0.1, port 0. A /callback with
- * a wrong or missing `state` gets a 400 and is otherwise ignored, so another
- * local process can't end a pending login with one request. The first callback
- * with the right `state` settles it: an `error` or a missing `code` rejects,
- * otherwise it resolves with the code. Then, or on timeout, the server closes.
- * Other paths get a 404 and are otherwise ignored.
+ * The RFC 8252 loopback receiver on 127.0.0.1, port 0. A wrong or missing `state` gets a 400
+ * and is otherwise ignored, so another local process can't end a pending login with one request.
  */
 export async function startLoopbackServer(options: {
   state: string;
@@ -350,8 +335,7 @@ export async function startLoopbackServer(options: {
     settle = { resolve, reject };
   });
 
-  // The caller awaits `result`; this only stops an early timeout from being reported
-  // as an unhandled rejection before it does.
+  // Keeps an early timeout from surfacing as an unhandled rejection before the caller awaits.
   result.catch(() => undefined);
 
   let settled = false;
@@ -369,47 +353,27 @@ export async function startLoopbackServer(options: {
     const params = url.searchParams;
 
     if (params.get('state') !== options.state) {
-      res
-        .writeHead(400, {
-          'Content-Type': 'text/html; charset=utf-8',
-          'Cache-Control': 'no-store',
-          Connection: 'close',
-        })
-        .end(page(CALLBACK_WRONG_STATE_TEXT));
+      respond(res, 400, CALLBACK_WRONG_STATE_TEXT);
 
       return;
     }
 
-    let outcome: { code: string } | OAuthError;
+    const error = params.get('error');
+    const description = params.get('error_description');
+    // Read once as a string: TypeScript can't narrow it through `failure` below.
+    const code = params.get('code') ?? '';
+    const failure =
+      error !== null
+        ? new OAuthError(
+            error,
+            `Kizen denied the sign-in (${error}${description ? `: ${description}` : ''})`,
+          )
+        : !code
+          ? new OAuthError('invalid_callback', 'The sign-in callback had no authorization code')
+          : undefined;
 
-    if (params.get('error') !== null) {
-      const error = params.get('error') ?? '';
-      const description = params.get('error_description');
-
-      outcome = new OAuthError(
-        error,
-        `Kizen denied the sign-in (${error}${description ? `: ${description}` : ''})`,
-      );
-    } else if (!params.get('code')) {
-      outcome = new OAuthError(
-        'invalid_callback',
-        'The sign-in callback had no authorization code',
-      );
-    } else {
-      outcome = { code: params.get('code') ?? '' };
-    }
-
-    const ok = !(outcome instanceof OAuthError);
-
-    res
-      .writeHead(ok ? 200 : 400, {
-        'Content-Type': 'text/html; charset=utf-8',
-        'Cache-Control': 'no-store',
-        Connection: 'close',
-      })
-      .end(page(ok ? CALLBACK_SUCCESS_TEXT : CALLBACK_FAILURE_TEXT));
-
-    finish(outcome);
+    respond(res, failure ? 400 : 200, failure ? CALLBACK_FAILURE_TEXT : CALLBACK_SUCCESS_TEXT);
+    finish(failure, code);
   });
 
   const close = (): Promise<void> => {
@@ -424,21 +388,29 @@ export async function startLoopbackServer(options: {
     return closing;
   };
 
-  function finish(outcome: { code: string } | OAuthError): void {
+  function finish(failure: OAuthError | undefined, code = ''): void {
     if (settled) {
       return;
     }
 
     settled = true;
 
-    if (outcome instanceof OAuthError) {
-      settle.reject(outcome);
+    if (failure) {
+      settle.reject(failure);
     } else {
-      settle.resolve(outcome);
+      settle.resolve({ code });
     }
 
     void close();
   }
+
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, LOOPBACK_HOST, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
 
   const timer = setTimeout(() => {
     finish(
@@ -449,23 +421,9 @@ export async function startLoopbackServer(options: {
     );
   }, timeoutMs);
 
-  try {
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(0, LOOPBACK_HOST, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
-  } catch (err) {
-    clearTimeout(timer);
-    throw err;
-  }
-
   const address = server.address() as AddressInfo;
 
   return {
-    host: address.address,
     port: address.port,
     redirectUri: `http://${LOOPBACK_HOST}:${String(address.port)}${CALLBACK_PATH}`,
     result,
@@ -473,10 +431,7 @@ export async function startLoopbackServer(options: {
   };
 }
 
-/**
- * Best-effort: asks the OS to open `url` in the default browser. Never throws;
- * the caller always prints the URL too, for when this does nothing.
- */
+/** Best-effort and never throws; the caller always prints the URL too. */
 export function openBrowser(url: string): void {
   const [cmd, args] =
     platform === 'darwin'

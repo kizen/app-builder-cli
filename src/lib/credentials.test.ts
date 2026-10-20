@@ -65,6 +65,15 @@ describe('credential paths', () => {
   });
 });
 
+describe('parseEnvironment', () => {
+  it('returns a known environment, or the unknown --env message', () => {
+    expect(mod.parseEnvironment('fmo')).toStrictEqual({ environment: 'fmo' });
+    expect(mod.parseEnvironment('prod')).toStrictEqual({
+      message: 'Unknown --env "prod". Use one of: go, fmo, staging, integration, test1.',
+    });
+  });
+});
+
 describe('cleanCredentialId', () => {
   it('trims strings and maps non-strings to an empty string', () => {
     expect(cleanCredentialId('\r\nbiz-123\r\r ')).toBe('biz-123');

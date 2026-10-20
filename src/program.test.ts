@@ -4,9 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Command, Option } from 'commander';
 import { ALL_VALID_ICONS_LIST, CUSTOM_ICON_NAMES } from '../shared/lib/validIcons.js';
-import { setupClaudeDepsFor } from './commands/setupClaude.js';
-import { mcpServerPlan } from './lib/setupClaude.js';
+import type * as SetupClaudeModule from './lib/setupClaude.js';
+import { mcpServerPlan, runSetupClaude } from './lib/setupClaude.js';
 import { createProgram } from './program.js';
+
+// Only the setup-claude action's runner is replaced, so a test can see the deps it gets.
+vi.mock('./lib/setupClaude.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof SetupClaudeModule>()),
+  runSetupClaude: vi.fn(() => Promise.resolve()),
+}));
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -412,17 +418,20 @@ describe('icons command', () => {
 });
 
 describe('setup-claude --mcp helper', () => {
-  it("the helper pins the CLI's own version", () => {
+  it("the helper pins the CLI's own version", async () => {
     const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')) as {
       name: string;
       version: string;
     };
-    // The deps the registered setup-claude action uses carry the program's version.
-    const deps = setupClaudeDepsFor(createProgram());
 
-    expect(deps.cliVersion).toBe(pkg.version);
+    // The deps the registered setup-claude action passes carry the program's version.
+    await createProgram().parseAsync(['setup-claude', '--mcp'], { from: 'user' });
 
-    const plan = mcpServerPlan('staging', deps.cliVersion ?? '');
+    const deps = vi.mocked(runSetupClaude).mock.calls[0]?.[2];
+
+    expect(deps?.cliVersion).toBe(pkg.version);
+
+    const plan = mcpServerPlan('staging', deps?.cliVersion ?? '');
     const config = JSON.parse(plan.addArgs[5] ?? '') as { headersHelper: string };
 
     expect(config.headersHelper).toBe(`npx -y ${pkg.name}@${pkg.version} auth-header`);
