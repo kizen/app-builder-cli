@@ -16,15 +16,14 @@ import {
   type LoginDeps,
   type TokenProviderOptions,
 } from './oauthSession.js';
-import { createOAuthStore, mutateSession, type OAuthStore } from './oauthStore.js';
+import { createOAuthStore, type OAuthStore } from './oauthStore.js';
 
 /**
- * Claude Code kills a `headersHelper` after 10s. auth-header's worst case (lock wait, then
- * refresh request, then `FORGET_CLIENT_WAIT_MS`) runs serially and must stay under it with room
- * for start-up. A lost lease (only after a pause that already overran) adds up to two lock waits.
+ * Claude Code kills a `headersHelper` after 10s. auth-header's worst case is one
+ * `requestTimeoutMs` of token requests in total (a retry after a peer's rotation gets only what's
+ * left of it) plus local file I/O, and must stay under the limit with room for start-up.
  */
 export const CLAUDE_CODE_HELPER_LIMIT_MS = 10_000;
-export const AUTH_HEADER_LOCK_WAIT_MS = 3_000;
 export const AUTH_HEADER_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface AuthCommandDeps {
@@ -32,7 +31,7 @@ export interface AuthCommandDeps {
   loginDeps: LoginDeps;
   getIdentity: (environment: Environment) => Promise<KizenIdentity>;
   tokenProvider: (environment: Environment, options?: TokenProviderOptions) => BearerTokenProvider;
-  authHeaderTimeouts: { requestTimeoutMs: number; lockWaitMs: number };
+  authHeaderTimeouts: { requestTimeoutMs: number };
   processEnv: Readonly<Record<string, string | undefined>>;
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
@@ -58,10 +57,7 @@ export function createDefaultAuthCommandDeps(
     getIdentity: (environment) =>
       createKizenClient({ bearer: tokenProvider(environment) }).getIdentity(),
     tokenProvider,
-    authHeaderTimeouts: {
-      requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
-      lockWaitMs: AUTH_HEADER_LOCK_WAIT_MS,
-    },
+    authHeaderTimeouts: { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
     processEnv: process.env,
     writeStdout: (text) => {
       process.stdout.write(text);
@@ -167,9 +163,7 @@ export const runLogout = guarded(async (options, deps) => {
 
   const { environment } = resolved;
   // Never reads the file, so an unreadable session is removed too.
-  const deleted = await mutateSession(deps.store, environment, () =>
-    deps.store.deleteSession(environment),
-  );
+  const deleted = await deps.store.deleteSession(environment);
 
   deps.writeStdout(
     deleted
@@ -239,10 +233,8 @@ export const runAuthHeader: AuthCommand = async (options, deps) => {
 
   try {
     const environment = await headerEnvironment(options.env, deps);
-    const { requestTimeoutMs, lockWaitMs } = deps.authHeaderTimeouts;
-    const token = await deps
-      .tokenProvider(environment, { requestTimeoutMs, lock: { waitMs: lockWaitMs } })
-      .getAccessToken();
+    const { requestTimeoutMs } = deps.authHeaderTimeouts;
+    const token = await deps.tokenProvider(environment, { requestTimeoutMs }).getAccessToken();
 
     line = `${JSON.stringify({ Authorization: `Bearer ${token}` })}\n`;
   } catch (error) {

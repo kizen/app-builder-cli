@@ -21,13 +21,10 @@ import {
   httpGet,
   ISSUER,
   jsonResponse,
-  lockIsFree,
   NOW,
   oauthSession,
-  pausingStore,
   rejectionOf,
   TOKEN_ENDPOINT as TOKEN,
-  type Deferred,
 } from '../test/oauth.js';
 
 // Deliberately not the conventional /oauth2/* paths, so passing tests prove the
@@ -167,17 +164,7 @@ const loginDeps = (
   timeoutMs: 5000,
 });
 
-/** `store`, but signals the first time something asks for the session lock. */
-const signallingStore = (atLock: Deferred<void>): OAuthStore => ({
-  ...store,
-  acquireLock: (environment, options) => {
-    atLock.resolve();
-
-    return store.acquireLock(environment, options);
-  },
-});
-
-/** A staging token provider on `store` and `server`'s fetch with a short lock; override what a test needs. */
+/** A staging token provider on `store` and `server`'s fetch; override what a test needs. */
 const provider = (
   server: FakeAuthServer,
   overrides: Partial<TokenProviderDeps> = {},
@@ -186,7 +173,6 @@ const provider = (
     store,
     fetch: server.fetch,
     now: () => NOW,
-    lock: { retryMs: 5, waitMs: 2000 },
     ...overrides,
   });
 
@@ -404,40 +390,6 @@ describe('login', () => {
     expect(server.tokenRequests()).toHaveLength(1);
     expect(session.clientId).toBe('registered-1');
   });
-
-  it('a login paused past staleMs before writing waits for the process that took the lock over', async () => {
-    const oldLogin = oauthSession({ loginId: 'login-a', refreshToken: 'refresh-old' });
-
-    await store.writeSession(oldLogin);
-
-    // Paused between taking the lock and writing.
-    const paused = pausingStore(store, 'writeSession');
-    const loggingIn = login('staging', {
-      ...loginDeps(fakeAuthServer(), fakeBrowser(approve)),
-      store: paused.store,
-    });
-
-    await paused.holding;
-
-    // Another process refreshing login-a takes the stale lock over, reads it,
-    // and writes its rotated tokens once login has acted.
-    const other = createOAuthStore(dir);
-    const lock = await other.acquireLock('staging', { staleMs: 20, retryMs: 5, waitMs: 2000 });
-
-    expect(await other.readSession('staging')).toStrictEqual(oldLogin);
-    paused.resume();
-    await paused.acted;
-    expect(await lock.confirm()).toBe(true);
-    await other.writeSession({ ...oldLogin, refreshToken: 'refresh-old-rotated' });
-    await lock();
-
-    const session = await loggingIn;
-
-    // The new login, not the other process's write of login-a, is what's stored.
-    expect(session.loginId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(await store.readSession('staging')).toStrictEqual(session);
-    expect(paused.lockCalls()).toBe(2);
-  });
 });
 
 const EXPIRING = NOW + 30_000; // inside the 60s leeway
@@ -474,9 +426,8 @@ describe('createTokenProvider', () => {
           };
         }),
     );
-    // The lock + re-read would also stop a second network refresh, so count lock
-    // acquisitions: only the in-process shared promise keeps this at one.
-    const acquireLock = vi.spyOn(store, 'acquireLock');
+    // Nothing across processes stops a second network refresh: only the in-process shared
+    // promise keeps this at one.
     const tokens = provider(server);
     const all = Promise.all([
       tokens.getAccessToken(),
@@ -491,7 +442,6 @@ describe('createTokenProvider', () => {
 
     expect(await all).toStrictEqual(['access-1', 'access-1', 'access-1']);
     expect(server.tokenRequests()).toHaveLength(1);
-    expect(acquireLock).toHaveBeenCalledTimes(1);
     expect(server.tokenRequests()[0]?.get('grant_type')).toBe('refresh_token');
     expect(server.tokenRequests()[0]?.get('refresh_token')).toBe('refresh-0');
     expect(await store.readSession('staging')).toMatchObject({
@@ -527,24 +477,6 @@ describe('createTokenProvider', () => {
     expect(server.tokenRequests()).toHaveLength(1);
   });
 
-  it('refresh after lock uses session already rotated by another process', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
-
-    // "Another process": a second store on the same directory holding the lock.
-    const other = createOAuthStore(dir);
-    const release = await other.acquireLock('staging');
-    const server = fakeAuthServer();
-    const pending = provider(server).getAccessToken();
-
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    await other.writeSession(ROTATED);
-    await release();
-
-    await expect(pending).resolves.toBe('access-rotated');
-    expect(server.tokenRequests()).toHaveLength(0);
-    expect(await store.readSession('staging')).toMatchObject({ refreshToken: 'refresh-rotated' });
-  });
-
   it('a 401 refresh after another process rotated past the rejected token uses the new one', async () => {
     // Fresh by expiry but rejected by the server: refresh even though it isn't expiring.
     await store.writeSession(oauthSession());
@@ -576,29 +508,91 @@ describe('createTokenProvider', () => {
     // No loop: the next call fails fast without another token request.
     expect((await rejectionOf(tokens.getAccessToken())).code).toBe('login_required');
     expect(server.tokenRequests()).toHaveLength(1);
-    // The lock was released.
-    expect(await lockIsFree(store, 'staging')).toBe(true);
   });
 
-  it('invalid_client on refresh with the clients lock held fails fast and still asks to log in', async () => {
+  it('invalid_client on refresh deletes the session, forgets the client id and asks to sign in', async () => {
+    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await store.writeClientId(ISSUER, 'client-1');
+    await store.writeClientId('https://other.test', 'client-other');
+
+    const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_client' }, 401));
+    const error = await rejectionOf(provider(server).getAccessToken());
+
+    expect(error.code).toBe('login_required');
+    expect(error.message).toBe(
+      'The staging session is no longer valid. Run `appbuilder login --env staging` to sign in.',
+    );
+    expect(await store.readSession('staging')).toBeNull();
+    expect(await store.readClientId(ISSUER)).toBeUndefined();
+    expect(await store.readClientId('https://other.test')).toBe('client-other');
+  });
+
+  it('invalid_client keeps a client id another login registered meanwhile', async () => {
     await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
     await store.writeClientId(ISSUER, 'client-1');
 
-    // Another live process holds the clients.json lock and never lets go.
-    await writeFile(join(store.dir, 'clients.lock.9'), `${String(process.pid)} ${'a'.repeat(32)}`);
+    const respond = deferred();
+    const server = fakeAuthServer(async () => {
+      await respond.promise;
+
+      return jsonResponse({ error: 'invalid_client' }, 401);
+    });
+    const pending = provider(server).getAccessToken();
+
+    pending.catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(server.tokenRequests()).toHaveLength(1);
+    });
+    // A login in another process registers a new client, and is still waiting on the browser.
+    await createOAuthStore(dir).writeClientId(ISSUER, 'client-new');
+    respond.resolve();
+
+    expect((await rejectionOf(pending)).code).toBe('login_required');
+    expect(await store.readSession('staging')).toBeNull();
+    expect(await store.readClientId(ISSUER)).toBe('client-new');
+  });
+
+  it('an unreadable clients.json after invalid_client still asks to sign in', async () => {
+    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_client' }, 401));
-    // The short lock budget auth-header uses.
-    const tokens = provider(server, { lock: { retryMs: 5, waitMs: 3000 } });
-    const started = Date.now();
+    const tokens = provider(server, {
+      store: {
+        ...store,
+        readClientId: () =>
+          Promise.reject(
+            Object.assign(new Error('EACCES: permission denied, open clients.json'), {
+              code: 'EACCES',
+            }),
+          ),
+      },
+    });
     const error = await rejectionOf(tokens.getAccessToken());
 
     expect(error.code).toBe('login_required');
-    expect(error.message).toContain('appbuilder login --env staging');
-    // Bounded by the short forget wait, nowhere near the clients lock's 35s default.
-    expect(Date.now() - started).toBeLessThan(2000);
+    expect(error.message).toContain('is no longer valid');
     expect(await store.readSession('staging')).toBeNull();
-    // The forget was skipped, not half-done: the cache is intact for the next login to handle.
+  });
+
+  it('invalid_client keeps the client id when this refresh did not delete the session', async () => {
+    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await store.writeClientId(ISSUER, 'client-1');
+
+    const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_client' }, 401));
+    // A logout lands between the re-read and this refresh's delete, so the delete finds nothing.
+    const tokens = provider(server, {
+      store: {
+        ...store,
+        deleteSession: async (environment) => {
+          await store.deleteSession(environment);
+
+          return store.deleteSession(environment);
+        },
+      },
+    });
+
+    expect((await rejectionOf(tokens.getAccessToken())).code).toBe('login_required');
+    expect(await store.readSession('staging')).toBeNull();
     expect(await store.readClientId(ISSUER)).toBe('client-1');
   });
 
@@ -632,12 +626,14 @@ describe('createTokenProvider', () => {
       'timed out',
     ],
   ] satisfies [string, string, Parameters<typeof fakeAuthServer>[0], string?][])(
-    'transient refresh failure keeps the session and releases the lock: %s',
+    'transient refresh failure never writes or deletes: %s',
     async (_name, code, respond, messagePart?: string) => {
       const before = oauthSession({ expiresAt: EXPIRING });
 
       await store.writeSession(before);
 
+      const writeSession = vi.spyOn(store, 'writeSession');
+      const deleteSession = vi.spyOn(store, 'deleteSession');
       const error = await rejectionOf(
         provider(fakeAuthServer(respond), { requestTimeoutMs: 50 }).getAccessToken(),
       );
@@ -648,8 +644,9 @@ describe('createTokenProvider', () => {
         expect(error.message).toContain(messagePart);
       }
 
+      expect(writeSession).not.toHaveBeenCalled();
+      expect(deleteSession).not.toHaveBeenCalled();
       expect(await store.readSession('staging')).toStrictEqual(before);
-      expect(await lockIsFree(store, 'staging')).toBe(true);
     },
   );
 
@@ -672,85 +669,27 @@ describe('createTokenProvider', () => {
     expect(await store.listSessions()).toStrictEqual(['go']);
   });
 
-  it("login during an in-flight refresh keeps the new login's tokens", async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
-
-    const loginAtLock = deferred();
-    let loginDone = new Promise<unknown>(() => undefined);
-    const server = fakeAuthServer(async (params) => {
-      if (params.get('grant_type') === 'refresh_token') {
-        // The refresh holds the lock until login is ready to write (or, if login
-        // didn't take the lock, has already written).
-        await Promise.race([loginAtLock.promise, loginDone]);
-
-        return jsonResponse({ ...tokenBody(1), access_token: 'refreshed-old-login' });
-      }
-
-      return jsonResponse({
-        ...tokenBody(2),
-        access_token: 'new-login-access',
-        refresh_token: 'new-login-refresh',
-      });
-    });
-    const tokens = provider(server);
-    const refreshing = tokens.getAccessToken();
-
-    await vi.waitFor(() => {
-      expect(server.tokenRequests()).toHaveLength(1);
-    });
-
-    const loggingIn = login('staging', {
-      ...loginDeps(server, fakeBrowser(approve)),
-      store: signallingStore(loginAtLock),
-    });
-
-    loginDone = loggingIn.catch(() => undefined);
-
-    const [refreshed, session] = await Promise.all([refreshing, loggingIn]);
-
-    expect(refreshed).toBe('refreshed-old-login');
-    expect(session).toMatchObject({ accessToken: 'new-login-access', clientId: 'registered-1' });
-    expect(await store.readSession('staging')).toStrictEqual(session);
-    // The provider still serves the old login, so the new login's token never comes out of it.
-    expect((await rejectionOf(tokens.getAccessToken())).code).toBe('login_required');
-  });
-
-  describe('a refresh paused past staleMs after the token response', () => {
-    /** A taker's staleMs, far below the token request's (unbounded) pause. */
-    const TAKER = { staleMs: 20, retryMs: 5, waitMs: 2000 };
+  describe('a refresh whose token response is held', () => {
     const INVALID_GRANT = (): Response => jsonResponse({ error: 'invalid_grant' }, 400);
+    const INVALID_CLIENT = (): Response => jsonResponse({ error: 'invalid_client' }, 401);
 
     /**
-     * Starts a refresh of an expiring login-a session whose token response is
-     * held until `resume()`; resolves once the response is held (the lock is
-     * then held by the paused refresh). `respond` is the held response.
+     * Starts a refresh of an expiring login-a session whose token response is held until
+     * `release()`; resolves once the request is in flight. `respond` is the held response.
      */
-    const pausedRefresh = async (
-      respond: () => Response = () => jsonResponse(tokenBody(1)),
-    ): Promise<{
-      pending: Promise<string>;
-      resume: () => void;
-      server: FakeAuthServer;
-      lockCalls: () => number;
-    }> => {
+    const heldRefresh = async (
+      respond: (params: URLSearchParams) => Response | Promise<Response> = () =>
+        jsonResponse(tokenBody(1)),
+    ): Promise<{ pending: Promise<string>; release: () => void; server: FakeAuthServer }> => {
       await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
 
       const gate = deferred();
-      const server = fakeAuthServer(async () => {
+      const server = fakeAuthServer(async (params) => {
         await gate.promise;
 
-        return respond();
+        return respond(params);
       });
-      let lockCalls = 0;
-      const counting: OAuthStore = {
-        ...store,
-        acquireLock: (environment, options) => {
-          lockCalls += 1;
-
-          return store.acquireLock(environment, options);
-        },
-      };
-      const pending = provider(server, { store: counting }).getAccessToken();
+      const pending = provider(server).getAccessToken();
 
       // Observe the outcome even if a test asserts on it late.
       pending.catch(() => undefined);
@@ -760,52 +699,34 @@ describe('createTokenProvider', () => {
 
       return {
         pending,
-        resume: () => {
+        release: () => {
           gate.resolve();
         },
         server,
-        lockCalls: () => lockCalls,
       };
     };
 
-    /** "Another process" takes the (now stale) lock over, runs `during`, releases. */
-    const takeOver = async (during: (other: OAuthStore) => Promise<void>): Promise<void> => {
-      const other = createOAuthStore(dir);
-      const lock = await other.acquireLock('staging', TAKER);
+    it("a refresh that completes after logout doesn't restore the session", async () => {
+      const { pending, release } = await heldRefresh();
 
-      try {
-        await during(other);
-      } finally {
-        await lock();
-      }
-    };
-
-    it('a refresh paused past staleMs does not restore a logged-out session', async () => {
-      const { pending, resume } = await pausedRefresh();
-
-      await takeOver(async (other) => {
-        expect(await other.deleteSession('staging')).toBe(true);
-      });
-      resume();
+      expect(await createOAuthStore(dir).deleteSession('staging')).toBe(true);
+      release();
 
       const error = await rejectionOf(pending);
 
       expect(error.code).toBe('login_required');
       expect(error.message).toBe(NOT_SIGNED_IN);
       await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
-      expect(await lockIsFree(store, 'staging')).toBe(true);
     });
 
     it.each([
-      ['does not overwrite a newer login', () => jsonResponse(tokenBody(1))],
-      ['that gets invalid_grant does not delete a newer login', INVALID_GRANT],
-    ])('a refresh paused past staleMs %s', async (_name, respond) => {
-      const { pending, resume, server } = await pausedRefresh(respond);
+      ["a refresh that completes after another login doesn't overwrite it", undefined],
+      ['a refresh that gets invalid_grant after another login does not delete it', INVALID_GRANT],
+    ])('%s', async (_name, respond) => {
+      const { pending, release, server } = await heldRefresh(respond);
 
-      await takeOver(async (other) => {
-        await other.writeSession(LOGIN_B);
-      });
-      resume();
+      await createOAuthStore(dir).writeSession(LOGIN_B);
+      release();
 
       const error = await rejectionOf(pending);
 
@@ -813,10 +734,110 @@ describe('createTokenProvider', () => {
       expect(error.message).toBe(SIGN_IN_CHANGED);
       expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
       expect(server.tokenRequests()).toHaveLength(1);
-      expect(await lockIsFree(store, 'staging')).toBe(true);
     });
 
-    it('a refresh paused past staleMs with no refresh token does not delete a newer login', async () => {
+    it("a refresh that completes after a peer rotated keeps the peer's tokens", async () => {
+      const { pending, release } = await heldRefresh();
+
+      await createOAuthStore(dir).writeSession(ROTATED);
+      release();
+
+      // This command still gets the access token it was issued, but doesn't store it.
+      await expect(pending).resolves.toBe('access-1');
+      expect(await store.readSession('staging')).toStrictEqual(ROTATED);
+    });
+
+    it.each([
+      ['invalid_grant', INVALID_GRANT],
+      ['invalid_client', INVALID_CLIENT],
+    ])(
+      "%s after a peer rotated returns the peer's token and keeps the session",
+      async (_name, respond) => {
+        await store.writeClientId(ISSUER, 'client-1');
+
+        const { pending, release, server } = await heldRefresh(respond);
+
+        await createOAuthStore(dir).writeSession(ROTATED);
+        release();
+
+        await expect(pending).resolves.toBe('access-rotated');
+        expect(await store.readSession('staging')).toStrictEqual(ROTATED);
+        // The client wasn't forgotten: the session that uses it is still there.
+        expect(await store.readClientId(ISSUER)).toBe('client-1');
+        expect(server.tokenRequests()).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      ['accepted, stores its rotation', true],
+      ['refused too, deletes the session after one more request', false],
+    ])(
+      "invalid_grant after a peer rotated to tokens that aren't fresh refreshes them once: %s",
+      async (_name, peerAccepted) => {
+        const peer = oauthSession({
+          accessToken: 'access-peer',
+          refreshToken: 'refresh-peer',
+          expiresAt: EXPIRING,
+        });
+        const { pending, release, server } = await heldRefresh((params) =>
+          peerAccepted && params.get('refresh_token') === 'refresh-peer'
+            ? jsonResponse(tokenBody(7))
+            : INVALID_GRANT(),
+        );
+
+        await createOAuthStore(dir).writeSession(peer);
+        release();
+
+        if (peerAccepted) {
+          await expect(pending).resolves.toBe('access-7');
+          expect(await store.readSession('staging')).toStrictEqual(
+            oauthSession({
+              accessToken: 'access-7',
+              refreshToken: 'refresh-7',
+              expiresAt: NOW + 3600 * 1000,
+            }),
+          );
+        } else {
+          expect((await rejectionOf(pending)).message).toContain('is no longer valid');
+          expect(await store.readSession('staging')).toBeNull();
+        }
+
+        expect(server.tokenRequests().map((params) => params.get('refresh_token'))).toStrictEqual([
+          'refresh-0',
+          'refresh-peer',
+        ]);
+      },
+    );
+
+    it('the refresh after a peer rotated runs at most once', async () => {
+      const stale = (n: string): OAuthSession =>
+        oauthSession({
+          accessToken: `access-${n}`,
+          refreshToken: `refresh-${n}`,
+          expiresAt: EXPIRING,
+        });
+      const { pending, release, server } = await heldRefresh(async (params) => {
+        // While the retry is in flight, yet another peer rotates to tokens that aren't fresh.
+        if (params.get('refresh_token') === 'refresh-peer') {
+          await createOAuthStore(dir).writeSession(stale('peer2'));
+        }
+
+        return INVALID_GRANT();
+      });
+
+      await createOAuthStore(dir).writeSession(stale('peer'));
+      release();
+
+      // The newest peer's token comes back as it is, without a third request or a delete.
+      await expect(pending).resolves.toBe('access-peer2');
+      expect(server.tokenRequests().map((params) => params.get('refresh_token'))).toStrictEqual([
+        'refresh-0',
+        'refresh-peer',
+      ]);
+      expect(await store.readSession('staging')).toStrictEqual(stale('peer2'));
+    });
+
+    it('a refresh with no refresh token does not delete a newer login', async () => {
       await store.writeSession(oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
 
       const paused = deferred();
@@ -831,7 +852,7 @@ describe('createTokenProvider', () => {
 
             const read = await store.readSession(environment);
 
-            // The second read is the one under the lock: pause right after it.
+            // The second read is the refresh's own: pause right after it.
             if (reads === 2) {
               paused.resolve();
               await resume.promise;
@@ -844,9 +865,7 @@ describe('createTokenProvider', () => {
 
       pending.catch(() => undefined);
       await paused.promise;
-      await takeOver(async (other) => {
-        await other.writeSession(LOGIN_B);
-      });
+      await createOAuthStore(dir).writeSession(LOGIN_B);
       resume.resolve();
 
       const error = await rejectionOf(pending);
@@ -855,86 +874,136 @@ describe('createTokenProvider', () => {
       expect(error.message).toBe(SIGN_IN_CHANGED);
       expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
       expect(server.fetch).not.toHaveBeenCalled();
-      expect(await lockIsFree(store, 'staging')).toBe(true);
     });
 
-    it.each([
-      ['keeps tokens another refresh of the same login stored', () => jsonResponse(tokenBody(1))],
-      [
-        'that gets invalid_client keeps the same login rotated by another refresh and its app registration',
-        () => jsonResponse({ error: 'invalid_client' }, 401),
-        'login_required',
-      ],
-      [
-        'that gets invalid_grant keeps the same login rotated by another refresh',
-        INVALID_GRANT,
-        'login_required',
-      ],
-    ] satisfies [string, () => Response, string?][])(
-      'a refresh paused past staleMs %s',
-      async (_name, respond, code?: string) => {
-        await store.writeClientId(ISSUER, 'client-1');
+    it('a refresh with no refresh token deletes the unchanged session', async () => {
+      await store.writeSession(oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
 
-        const { pending, resume } = await pausedRefresh(respond);
+      const server = fakeAuthServer();
+      const error = await rejectionOf(provider(server).getAccessToken());
 
-        await takeOver(async (other) => {
-          await other.writeSession(ROTATED);
-        });
-        resume();
-
-        if (code === undefined) {
-          // This command still gets the access token it was issued, but doesn't store it.
-          await expect(pending).resolves.toBe('access-1');
-        } else {
-          expect((await rejectionOf(pending)).code).toBe(code);
-        }
-
-        expect(await store.readSession('staging')).toStrictEqual(ROTATED);
-        // The client wasn't forgotten: the session that uses it is still there.
-        expect(await store.readClientId(ISSUER)).toBe('client-1');
-        expect(await lockIsFree(store, 'staging')).toBe(true);
-      },
-    );
-
-    it('a refresh that lost its lease with the session unchanged waits for the lock and then writes the rotated tokens', async () => {
-      const { pending, resume, server, lockCalls } = await pausedRefresh();
-      const taken = deferred();
-      const finish = deferred();
-      const other = takeOver(async () => {
-        taken.resolve();
-        await finish.promise;
-      });
-
-      await taken.promise;
-      resume();
-
-      // The refresh found its lease gone and is waiting to take the lock again,
-      // without having written while the other process holds it.
-      await vi.waitFor(() => {
-        expect(lockCalls()).toBe(2);
-      });
-      expect(await store.readSession('staging')).toStrictEqual(
-        oauthSession({ expiresAt: EXPIRING }),
+      expect(error.message).toBe(
+        'The staging session has expired. Run `appbuilder login --env staging` to sign in.',
       );
-
-      finish.resolve();
-      await other;
-
-      await expect(pending).resolves.toBe('access-1');
-      expect(await store.readSession('staging')).toStrictEqual(
-        oauthSession({
-          accessToken: 'access-1',
-          refreshToken: 'refresh-1',
-          expiresAt: NOW + 3600 * 1000,
-        }),
-      );
-      // The refresh token was spent once.
-      expect(server.tokenRequests()).toHaveLength(1);
-      expect(await lockIsFree(store, 'staging')).toBe(true);
+      expect(await store.readSession('staging')).toBeNull();
+      expect(server.fetch).not.toHaveBeenCalled();
     });
   });
 
-  it('a refresh that keeps its lease writes the rotated tokens', async () => {
+  describe('two processes refreshing at once', () => {
+    const GRACE_MS = 300_000;
+
+    /**
+     * A token endpoint with Kizen's refresh semantics (django-oauth-toolkit with rotation and a
+     * 300s grace period, no reuse protection): a refresh token presented again within the grace
+     * window of its rotation gets the same pair, as long as that pair's refresh token hasn't been
+     * rotated itself; otherwise invalid_grant, and nothing is revoked. Rotation deletes the
+     * previous access token.
+     */
+    const graceServer = (initial: {
+      access: string;
+      refresh: string;
+    }): {
+      respond: (refresh: string | null) => Response;
+      accepts: (refresh: string | undefined) => boolean;
+      validAccess: (access: string) => boolean;
+      advance: (ms: number) => void;
+    } => {
+      let serverNow = 0;
+      let issued = 0;
+      const validAccess = new Set([initial.access]);
+      const live = new Set([initial.refresh]);
+      const rotations = new Map<string, { at: number; access: string; refresh: string }>();
+
+      const respond = (refresh: string | null): Response => {
+        if (refresh !== null && live.has(refresh)) {
+          issued += 1;
+
+          const pair = { access: `access-${String(issued)}`, refresh: `refresh-${String(issued)}` };
+          const previous = [...rotations.values()].find((r) => r.refresh === refresh)?.access;
+
+          validAccess.delete(previous ?? initial.access);
+          validAccess.add(pair.access);
+          live.delete(refresh);
+          live.add(pair.refresh);
+          rotations.set(refresh, { at: serverNow, ...pair });
+
+          return jsonResponse({ ...tokenBody(issued), access_token: pair.access });
+        }
+
+        const rotation = refresh === null ? undefined : rotations.get(refresh);
+
+        if (rotation && serverNow - rotation.at <= GRACE_MS && live.has(rotation.refresh)) {
+          return jsonResponse({
+            access_token: rotation.access,
+            refresh_token: rotation.refresh,
+            token_type: 'Bearer',
+            expires_in: 3600,
+          });
+        }
+
+        return jsonResponse({ error: 'invalid_grant' }, 400);
+      };
+
+      return {
+        respond,
+        accepts: (refresh: string | undefined) => refresh !== undefined && live.has(refresh),
+        validAccess: (access: string) => validAccess.has(access),
+        advance: (ms: number) => {
+          serverNow += ms;
+        },
+      };
+    };
+
+    it.each([
+      ['both inside the grace window', 0],
+      ['the second after the grace window', GRACE_MS + 1],
+    ])(
+      'two processes refreshing at once both keep a working session: %s',
+      async (_name, secondDelayMs) => {
+        for (const first of [0, 1]) {
+          await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+
+          const kizen = graceServer({ access: 'access-0', refresh: 'refresh-0' });
+          const gates = [deferred(), deferred()];
+          // One fake server, two processes: separate providers on separate stores over one dir.
+          const servers = gates.map((gate) =>
+            fakeAuthServer(async (params) => {
+              await gate.promise;
+
+              return kizen.respond(params.get('refresh_token'));
+            }),
+          );
+          const pending = servers.map((server) =>
+            provider(server, { store: createOAuthStore(dir) }).getAccessToken(),
+          );
+
+          // Both have sent refresh-0 before either is answered.
+          await vi.waitFor(() => {
+            expect(servers.map((server) => server.tokenRequests().length)).toStrictEqual([1, 1]);
+          });
+
+          const second = 1 - first;
+
+          gates[first]?.resolve();
+          await pending[first];
+          kizen.advance(secondDelayMs);
+          gates[second]?.resolve();
+
+          const tokens = await Promise.all(pending);
+          const stored = await store.readSession('staging');
+
+          // Each process got a token the server still accepts, and the file holds a pair the
+          // server accepts for the next refresh.
+          expect(tokens.every((token) => kizen.validAccess(token))).toBe(true);
+          expect(kizen.validAccess(stored?.accessToken ?? '')).toBe(true);
+          expect(kizen.accepts(stored?.refreshToken)).toBe(true);
+        }
+      },
+    );
+  });
+
+  it('a refresh with the session unchanged writes the rotated tokens', async () => {
     await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer();
@@ -947,7 +1016,6 @@ describe('createTokenProvider', () => {
         expiresAt: NOW + 3600 * 1000,
       }),
     );
-    expect(await lockIsFree(store, 'staging')).toBe(true);
   });
 
   it.each([
@@ -962,19 +1030,25 @@ describe('createTokenProvider', () => {
     async (_, replacement) => {
       await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
 
-      // "Login" in another process holds the lock and writes another login's session.
-      const release = await createOAuthStore(dir).acquireLock('staging');
-      const server = fakeAuthServer();
-      const refreshAtLock = deferred();
-      const pending = provider(server, { store: signallingStore(refreshAtLock) }).getAccessToken();
-
-      // The provider has read (and pinned) login-a and is waiting to refresh it.
-      await refreshAtLock.promise;
-
       const newLogin = { ...LOGIN_B, ...replacement };
+      const server = fakeAuthServer();
+      let reads = 0;
+      // "Login" in another process lands after the provider read (and pinned) login-a, before
+      // the refresh reads the session again.
+      const pending = provider(server, {
+        store: {
+          ...store,
+          readSession: async (environment) => {
+            reads += 1;
 
-      await store.writeSession(newLogin);
-      await release();
+            if (reads === 2) {
+              await createOAuthStore(dir).writeSession(newLogin);
+            }
+
+            return store.readSession(environment);
+          },
+        },
+      }).getAccessToken();
 
       const error = await rejectionOf(pending);
 
@@ -983,7 +1057,6 @@ describe('createTokenProvider', () => {
       // Neither refresh token was spent, and the new login's session is untouched.
       expect(server.fetch).not.toHaveBeenCalled();
       expect(await store.readSession('staging')).toStrictEqual(newLogin);
-      expect(await lockIsFree(store, 'staging')).toBe(true);
     },
   );
 
@@ -1071,7 +1144,7 @@ describe('createTokenProvider', () => {
       return read ? read.promise : store.readSession('staging');
     });
     const server = fakeAuthServer();
-    // Fresh sessions only, so the lock is never taken.
+    // Fresh sessions only, so nothing refreshes.
     const tokens = provider(server, { store: { ...store, readSession } });
     const first = tokens.getAccessToken();
     const second = tokens.getAccessToken();

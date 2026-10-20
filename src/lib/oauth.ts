@@ -22,7 +22,7 @@ const DEFAULT_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Used by `login` and `setup-claude --mcp` when no --env is given. */
 export const DEFAULT_LOGIN_ENVIRONMENT: Environment = 'go';
-/** Per request, body included. Must stay well under the refresh lock's 30s stale window. */
+/** Per request, body included, so a hung server fails the command instead of stalling it. */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 
 /** `code` is the server's RFC 6749 error code when it sent one, else a local code. */
@@ -321,6 +321,15 @@ const CALLBACK_FAILURE_TEXT =
 export const CALLBACK_WRONG_STATE_TEXT =
   'This login link is not for the current login. Use the latest link from the terminal.';
 
+/** The request target as a URL, or undefined when it doesn't parse. */
+const parseRequestTarget = (target: string | undefined): URL | undefined => {
+  try {
+    return new URL(target ?? '/', `http://${LOOPBACK_HOST}`);
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * The RFC 8252 loopback receiver on 127.0.0.1, port 0. A wrong or missing `state` gets a 400
  * and is otherwise ignored, so another local process can't end a pending login with one request.
@@ -342,9 +351,10 @@ export async function startLoopbackServer(options: {
   let closing: Promise<void> | undefined;
 
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? '/', `http://${LOOPBACK_HOST}`);
+    // A target like `//[` doesn't parse; it can't be the callback, so it gets the same 404.
+    const url = parseRequestTarget(req.url);
 
-    if (settled || req.method !== 'GET' || url.pathname !== CALLBACK_PATH) {
+    if (settled || req.method !== 'GET' || url?.pathname !== CALLBACK_PATH) {
       res.writeHead(404, { 'Content-Type': 'text/plain', Connection: 'close' }).end('Not found');
 
       return;

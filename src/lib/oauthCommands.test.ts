@@ -5,7 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Environment } from './credentials.js';
 import { createKizenClient } from './kizenClient.js';
 import {
-  AUTH_HEADER_LOCK_WAIT_MS,
   AUTH_HEADER_REQUEST_TIMEOUT_MS,
   CLAUDE_CODE_HELPER_LIMIT_MS,
   createDefaultAuthCommandDeps,
@@ -15,12 +14,7 @@ import {
   runWhoami,
   type AuthCommandDeps,
 } from './oauthCommands.js';
-import {
-  createTokenProvider,
-  FORGET_CLIENT_WAIT_MS,
-  type LoginDeps,
-  type TokenProviderOptions,
-} from './oauthSession.js';
+import { createTokenProvider, type LoginDeps, type TokenProviderOptions } from './oauthSession.js';
 import { createOAuthStore, type OAuthSession, type OAuthStore } from './oauthStore.js';
 import {
   deferred,
@@ -29,7 +23,6 @@ import {
   jsonResponse,
   NOW,
   oauthSession,
-  pausingStore,
   rejectionOf,
 } from '../test/oauth.js';
 
@@ -123,10 +116,7 @@ function harness(
     getIdentity: (environment) =>
       createKizenClient({ bearer: tokenProvider(environment), fetch: fetchMock }).getIdentity(),
     tokenProvider,
-    authHeaderTimeouts: options.timeouts ?? {
-      requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
-      lockWaitMs: AUTH_HEADER_LOCK_WAIT_MS,
-    },
+    authHeaderTimeouts: options.timeouts ?? { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
     processEnv: options.processEnv ?? {},
     writeStdout: (text) => {
       stdout.push(text);
@@ -267,81 +257,33 @@ describe('logout', () => {
   });
 });
 
-describe('logout under the session lock', () => {
+describe('logout and a refresh', () => {
   it('logout during an in-flight refresh leaves no session on disk', async () => {
     await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
 
-    const atLock = deferred();
-    let logoutDone = new Promise<unknown>(() => undefined);
     const started = deferred();
+    const respond = deferred();
     const h = harness(() => jsonResponse(BOOTSTRAP), {
-      // The refresh holds the lock until logout is waiting for it (or, if logout
-      // didn't take the lock, has already deleted the session).
+      // The token response is held until logout has finished.
       tokenEndpoint: async () => {
         started.resolve();
-        await Promise.race([atLock.promise, logoutDone]);
+        await respond.promise;
 
         return rotatedTokens();
       },
     });
     const refreshing = h.deps.tokenProvider('staging').getAccessToken();
 
+    refreshing.catch(() => undefined);
     await started.promise;
+    await runLogout({ env: 'staging' }, h.deps);
+    respond.resolve();
 
-    const logout = runLogout(
-      { env: 'staging' },
-      {
-        ...h.deps,
-        store: {
-          ...store,
-          acquireLock: (environment, options) => {
-            atLock.resolve();
+    const error = await rejectionOf(refreshing);
 
-            return store.acquireLock(environment, options);
-          },
-        },
-      },
-    );
-
-    logoutDone = logout;
-    await Promise.all([refreshing, logout]);
-
+    expect(error.code).toBe('login_required');
     expect(await store.readSession('staging')).toBeNull();
     await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(h.stdout.join('')).toContain('Signed out of staging');
-    expect(h.exitCodes).toStrictEqual([]);
-  });
-
-  it('a logout paused past staleMs before deleting waits for the process that took the lock over', async () => {
-    await store.writeSession(session('staging'));
-
-    // Paused between taking the lock and deleting.
-    const paused = pausingStore(store, 'deleteSession');
-    const h = harness(() => jsonResponse(BOOTSTRAP));
-    const logout = runLogout({ env: 'staging' }, { ...h.deps, store: paused.store });
-
-    await paused.holding;
-
-    // Another process (a refresh, say) takes the stale lock over, reads the
-    // session, and writes rotated tokens once logout has acted.
-    const other = createOAuthStore(dir);
-    const lock = await other.acquireLock('staging', { staleMs: 20, retryMs: 5, waitMs: 2000 });
-    const current = await other.readSession('staging');
-
-    expect(current).not.toBeNull();
-    paused.resume();
-    await paused.acted;
-
-    expect(await lock.confirm()).toBe(true);
-    await other.writeSession(
-      session('staging', { accessToken: ROTATED_ACCESS, refreshToken: ROTATED_REFRESH }),
-    );
-    await lock();
-    await logout;
-
-    // Logout deleted after the other process finished, not underneath it.
-    await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(paused.lockCalls()).toBe(2);
     expect(h.stdout.join('')).toContain('Signed out of staging');
     expect(h.exitCodes).toStrictEqual([]);
   });
@@ -661,9 +603,7 @@ describe('auth-header', () => {
       const deps = createDefaultAuthCommandDeps(store);
       const started = Date.now();
       const error = await rejectionOf(
-        deps
-          .tokenProvider('staging', { requestTimeoutMs: 150, lock: { waitMs: 150 } })
-          .getAccessToken(),
+        deps.tokenProvider('staging', { requestTimeoutMs: 150 }).getAccessToken(),
       );
       const elapsed = Date.now() - started;
 
@@ -682,7 +622,7 @@ describe('auth-header', () => {
         {},
         {
           ...deps,
-          authHeaderTimeouts: { requestTimeoutMs: 150, lockWaitMs: 150 },
+          authHeaderTimeouts: { requestTimeoutMs: 150 },
           processEnv: { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP },
           writeStdout: (text) => out.stdout.push(text),
           writeStderr: (text) => out.stderr.push(text),
@@ -715,44 +655,60 @@ describe('auth-header', () => {
   });
 
   it("auth-header uses timeouts under Claude Code's 10s helper limit", async () => {
-    // The production wiring carries the short timeouts, and the worst case (a full
-    // lock wait, a full request, then the invalid_client forget wait) fits inside
-    // the helper limit.
+    // The production wiring carries the short request timeout, and one full request fits inside
+    // the helper limit with room for start-up.
     expect(createDefaultAuthCommandDeps(store).authHeaderTimeouts).toStrictEqual({
       requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
-      lockWaitMs: AUTH_HEADER_LOCK_WAIT_MS,
     });
-    expect(
-      AUTH_HEADER_LOCK_WAIT_MS + AUTH_HEADER_REQUEST_TIMEOUT_MS + FORGET_CLIENT_WAIT_MS,
-    ).toBeLessThan(CLAUDE_CODE_HELPER_LIMIT_MS - 1_000);
+    expect(AUTH_HEADER_REQUEST_TIMEOUT_MS).toBeLessThan(CLAUDE_CODE_HELPER_LIMIT_MS - 1_000);
 
-    // Those values are what reaches the token provider and its lock.
+    // That value is what reaches the token provider.
     await store.writeSession(session('staging'));
 
     const wired = harness(noKizen);
 
     await runAuthHeader({}, wired.deps);
     expect(wired.providerOptions).toStrictEqual([
-      {
-        requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
-        lock: { waitMs: AUTH_HEADER_LOCK_WAIT_MS },
-      },
+      { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
     ]);
+  });
 
-    // A lock held by another process fails on the lock wait (small injected
-    // value): an expiring session, so a refresh is needed.
+  it('a peer-rotated retry stays within one request timeout', async () => {
+    const TIMEOUT_MS = 400;
+    const FIRST_ANSWER_MS = 300;
+
     await store.writeSession(session('staging', { expiresAt: NOW + 30_000 }));
 
-    const release = await createOAuthStore(dir).acquireLock('staging');
-    const locked = harness(noKizen, { timeouts: { requestTimeoutMs: 50, lockWaitMs: 50 } });
-    const lockedStart = Date.now();
+    const h = harness(noKizen, {
+      timeouts: { requestTimeoutMs: TIMEOUT_MS },
+      tokenEndpoint: async (init) => {
+        if (new URLSearchParams(init?.body as string).get('refresh_token') === REFRESH) {
+          // Late, a peer rotates to tokens that aren't fresh, and this request is refused.
+          await new Promise((resolve) => setTimeout(resolve, FIRST_ANSWER_MS));
+          await store.writeSession(
+            session('staging', {
+              accessToken: ROTATED_ACCESS,
+              refreshToken: ROTATED_REFRESH,
+              expiresAt: NOW + 30_000,
+            }),
+          );
 
-    await runAuthHeader({}, locked.deps);
-    await release();
+          return jsonResponse({ error: 'invalid_grant' }, 400);
+        }
 
-    expect(Date.now() - lockedStart).toBeLessThan(2_000);
-    expectHeaderFailure(locked, 'Timed out waiting for another appbuilder process');
-    expect(locked.fetchMock).not.toHaveBeenCalled();
+        // The retry with the peer's refresh token never answers.
+        return hangUntilAbort(init);
+      },
+    });
+    const started = Date.now();
+
+    await runAuthHeader({ env: 'staging' }, h.deps);
+
+    // One timeout in total, not one per request (that would be FIRST_ANSWER_MS + TIMEOUT_MS).
+    expect(Date.now() - started).toBeLessThan(TIMEOUT_MS + 150);
+    expect(h.fetchMock).toHaveBeenCalledTimes(2);
+    expectHeaderFailure(h, 'timed out');
+    expect(await store.readSession('staging')).toMatchObject({ refreshToken: ROTATED_REFRESH });
   });
 
   it('auth-header prints nothing on stdout when the session is unreadable', async () => {

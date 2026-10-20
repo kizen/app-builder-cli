@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Credentials } from '../../shared/lib/credentials.js';
 import {
+  assertBearerOrigin,
   createKizenClient,
   dashletPath,
   formatDrfError,
@@ -181,11 +182,58 @@ describe('createKizenClient requests', () => {
     const error = await rejection(client.listCustomObjects());
 
     expect(error.kind).toBe('api_error');
-    expect(error.message).toContain('pagination pointed at an unexpected host evil.example.com');
+    expect(error.message).toBe(
+      'GET /custom-objects pagination pointed at an unexpected location https://evil.example.com/steal',
+    );
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls.some(([url]) => (url as string).includes('evil.example.com'))).toBe(
       false,
     );
+  });
+
+  it('pagination next with a protocol-relative path never leaves the API origin', async () => {
+    const { client, fetchMock } = setup(
+      {
+        bearer: {
+          environment: 'staging',
+          getAccessToken: () => Promise.resolve('tok-1'),
+          refreshAccessToken: () => Promise.reject(new Error('unused')),
+        },
+      },
+      jsonResponse({
+        next: 'https://staging.kizen.com//attacker.example/collect',
+        results: [{ id: 'o1' }],
+      }),
+      jsonResponse({ next: null, results: [] }),
+    );
+    const error = await rejection(client.listCustomObjects());
+
+    expect(error.kind).toBe('api_error');
+    expect(error.message).toBe(
+      'GET /custom-objects pagination pointed at an unexpected location https://staging.kizen.com//attacker.example/collect',
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.every(
+        ([url]) => new URL(url as string).origin === 'https://staging.kizen.com',
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['a next outside the base path', 'https://integration.kizen.dev/other/custom-objects?page=2'],
+    ['a next with a protocol-relative path', 'https://integration.kizen.dev//evil.example/x'],
+    ['a next that climbs out of the base path', '/api/../steal?page=2'],
+  ])('refuses %s', async (_name, next) => {
+    const { client, fetchMock } = setup(
+      API_KEY,
+      jsonResponse({ next, results: [{ id: 'o1' }] }),
+      jsonResponse({ next: null, results: [] }),
+    );
+    const error = await rejection(client.listCustomObjects());
+
+    expect(error.message).toContain('GET /custom-objects pagination pointed at an unexpected');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('stops paginating when next repeats', async () => {
@@ -557,6 +605,23 @@ describe('bearer auth', () => {
       }),
     ).toThrow(/is not on the staging API origin/);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // request() calls this guard on every Bearer request, after resolveNext. No public method can
+  // produce an off-origin URL while resolveNext and the baseUrl check hold, so it is exercised
+  // directly; the fetch-count assertion in the pagination test covers the wiring.
+  it('a bearer request to another origin is refused before fetch', () => {
+    expect(() => {
+      assertBearerOrigin('https://attacker.example/collect', 'staging');
+    }).toThrow(
+      'createKizenClient: refusing to send a staging token to https://attacker.example; it is only sent to https://staging.kizen.com.',
+    );
+    expect(() => {
+      assertBearerOrigin('http://staging.kizen.com/api/x', 'staging');
+    }).toThrow(/refusing to send a staging token to http:\/\/staging\.kizen\.com;/);
+    expect(() => {
+      assertBearerOrigin('https://staging.kizen.com/api/x', 'staging');
+    }).not.toThrow();
   });
 
   it('bearer mode accepts a baseUrl on its own origin', async () => {

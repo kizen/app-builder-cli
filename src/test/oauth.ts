@@ -1,8 +1,7 @@
 import { request } from 'node:http';
 import { expect } from 'vitest';
-import type { Environment } from '../lib/credentials.js';
 import { OAuthError } from '../lib/oauth.js';
-import type { OAuthSession, OAuthStore } from '../lib/oauthStore.js';
+import type { OAuthSession } from '../lib/oauthStore.js';
 
 /** The fake clock the OAuth tests run at. */
 export const NOW = 1_700_000_000_000;
@@ -75,19 +74,6 @@ export const hangUntilAbort = (init?: RequestInit): Promise<Response> =>
     });
   });
 
-/** Whether `environment`'s session lock can be taken right now (released again if so). */
-export const lockIsFree = async (store: OAuthStore, environment: Environment): Promise<boolean> => {
-  try {
-    await (
-      await store.acquireLock(environment, { retryMs: 1, waitMs: 0 })
-    )();
-
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 /** GETs a loopback URL with node:http (no proxy), resolving with the status and body. */
 export const httpGet = (url: string): Promise<{ status: number; body: string }> =>
   new Promise((resolve, reject) => {
@@ -105,73 +91,3 @@ export const httpGet = (url: string): Promise<{ status: number; body: string }> 
       .on('error', reject)
       .end();
   });
-
-export interface PausingStore {
-  store: OAuthStore;
-  /** Resolves once the first lock is taken; the caller is then paused, holding it. */
-  holding: Promise<void>;
-  /** Lets the paused caller go on. */
-  resume: () => void;
-  /** Resolves once the caller mutates (`action`) or goes back for the lock: either way it has acted. */
-  acted: Promise<void>;
-  lockCalls: () => number;
-}
-
-/**
- * `store`, but the first `acquireLock` pauses between taking the lock and
- * returning it until `resume()`, and `acted` signals the paused caller's next
- * step: its `action` or another `acquireLock`.
- */
-export const pausingStore = (
-  store: OAuthStore,
-  action: 'writeSession' | 'deleteSession',
-): PausingStore => {
-  const holding = deferred();
-  const resume = deferred();
-  const acted = deferred();
-  let lockCalls = 0;
-  const paused: OAuthStore = {
-    ...store,
-    acquireLock: async (environment, options) => {
-      // Read before awaiting, so an overlapping second caller can't move the pause off call 1.
-      const call = ++lockCalls;
-
-      if (call > 1) {
-        acted.resolve();
-      }
-
-      const lock = await store.acquireLock(environment, options);
-
-      if (call === 1) {
-        holding.resolve();
-        await resume.promise;
-      }
-
-      return lock;
-    },
-  };
-
-  if (action === 'writeSession') {
-    paused.writeSession = (session) => {
-      acted.resolve();
-
-      return store.writeSession(session);
-    };
-  } else {
-    paused.deleteSession = (environment) => {
-      acted.resolve();
-
-      return store.deleteSession(environment);
-    };
-  }
-
-  return {
-    store: paused,
-    holding: holding.promise,
-    resume: () => {
-      resume.resolve();
-    },
-    acted: acted.promise,
-    lockCalls: () => lockCalls,
-  };
-};

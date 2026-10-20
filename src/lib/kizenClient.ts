@@ -232,6 +232,18 @@ function tokenError(err: unknown, environment: Environment): KizenApiError {
     : new KizenApiError(kind, message);
 }
 
+/** Throws unless `url` is on `environment`'s API origin, the only origin its Bearer token goes to. */
+export function assertBearerOrigin(url: string, environment: Environment): void {
+  const apiOrigin = apiOriginFor(environment);
+  const { origin } = new URL(url);
+
+  if (origin !== apiOrigin) {
+    throw new Error(
+      `createKizenClient: refusing to send a ${environment} token to ${origin}; it is only sent to ${apiOrigin}.`,
+    );
+  }
+}
+
 export function createKizenClient(options: KizenClientOptions): KizenSessionClient {
   const fetchImpl = options.fetch ?? fetch;
   const environment = options.bearer ? options.bearer.environment : options.credentials.environment;
@@ -280,6 +292,11 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
   const request = async (method: string, target: string, body?: unknown): Promise<unknown> => {
     const url = /^https?:\/\//.test(target) ? target : `${baseUrl}${target}`;
     const path = url.startsWith(baseUrl) ? url.slice(baseUrl.length) : url;
+
+    // A fallback for resolveNext: checks the URL actually fetched, before any token is read.
+    if (options.bearer) {
+      assertBearerOrigin(url, environment);
+    }
 
     const send = async (authHeaders: Record<string, string>): Promise<Response> => {
       const headers: Record<string, string> = { ...authHeaders, Accept: 'application/json' };
@@ -337,6 +354,8 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     return json;
   };
 
+  // The returned URL itself is checked: a pathname like `//evil.example/x` must
+  // never be re-resolved against the origin, which would move it to that host.
   const resolveNext = (next: string): string => {
     const base = new URL(baseUrl);
     const resolved = new URL(next, base.origin);
@@ -344,11 +363,30 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     if (resolved.hostname !== base.hostname) {
       throw new KizenApiError(
         'api_error',
-        `GET /custom-objects pagination pointed at an unexpected host ${resolved.hostname}`,
+        `GET /custom-objects pagination pointed at an unexpected location ${resolved.origin}${resolved.pathname}`,
       );
     }
 
-    return new URL(`${resolved.pathname}${resolved.search}`, base.origin).toString();
+    // Same host: keep Kizen's path and query, on the base scheme and port (a proxy may emit http).
+    resolved.protocol = base.protocol;
+    resolved.port = base.port;
+    resolved.username = '';
+    resolved.password = '';
+    resolved.hash = '';
+
+    const basePath = base.pathname.replace(/\/+$/, '');
+
+    if (
+      resolved.origin !== base.origin ||
+      (resolved.pathname !== basePath && !resolved.pathname.startsWith(`${basePath}/`))
+    ) {
+      throw new KizenApiError(
+        'api_error',
+        `GET /custom-objects pagination pointed at an unexpected location ${resolved.origin}${resolved.pathname}`,
+      );
+    }
+
+    return resolved.toString();
   };
 
   // Set by getIdentity, so getClientObjectId doesn't fetch /auth/bootstrap again.

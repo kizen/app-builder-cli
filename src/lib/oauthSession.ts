@@ -9,6 +9,7 @@ import {
   buildAuthorizeUrl,
   createPkcePair,
   DEFAULT_LOGIN_ENVIRONMENT,
+  DEFAULT_REQUEST_TIMEOUT_MS,
   discover,
   loginCommandFor,
   loginRequired,
@@ -21,22 +22,9 @@ import {
   type AuthServerMetadata,
   type TokenResponse,
 } from './oauth.js';
-import {
-  mutateSession,
-  whenConfirmed,
-  withSessionLock,
-  type LockOptions,
-  type OAuthSession,
-  type OAuthStore,
-} from './oauthStore.js';
+import type { OAuthSession, OAuthStore } from './oauthStore.js';
 
 const REFRESH_LEEWAY_MS = 60_000;
-
-/**
- * After `invalid_client`, the best-effort wait for the clients.json lock to forget the client.
- * Short because it sits inside auth-header's 10s budget; a miss costs the next login one attempt.
- */
-export const FORGET_CLIENT_WAIT_MS = 500;
 
 export interface LoginDeps {
   store: OAuthStore;
@@ -180,8 +168,7 @@ export async function login(environment: Environment, deps: LoginDeps): Promise<
     deps.now(),
   );
 
-  // Locked only around the write, never the browser wait.
-  await mutateSession(deps.store, environment, () => deps.store.writeSession(session));
+  await deps.store.writeSession(session);
 
   return session;
 }
@@ -194,8 +181,6 @@ export interface BearerTokenProvider {
 }
 
 export interface TokenProviderOptions {
-  lock?: LockOptions;
-  /** Keep it under the lock's stale window. */
   requestTimeoutMs?: number;
   fetch?: typeof fetch;
 }
@@ -207,9 +192,11 @@ export interface TokenProviderDeps extends TokenProviderOptions {
 }
 
 /**
- * Refreshes with under a minute left or after a 401. In-process refreshes share one promise;
- * across processes the lock serializes them and the session is re-read under it, so a token
- * another process already rotated is used rather than spending the refresh token again.
+ * Refreshes with under a minute left or after a 401. In-process refreshes share one promise.
+ * Across processes nothing is locked: Kizen hands a refresh token presented again within its
+ * grace window the same pair, and refuses it with invalid_grant after that without revoking
+ * anything. So each refresh re-reads the session before acting on a failure or writing, and keeps
+ * a peer's rotation rather than overwriting it or signing out.
  *
  * Pinned to the first session's `loginId`: a command resolves who it acts as once, so after
  * another login (maybe another business) every read throws rather than hand out its tokens.
@@ -243,75 +230,101 @@ export function createTokenProvider(
     return session;
   };
 
-  const doRefresh = async (rejected: string): Promise<string> => {
-    const lease = await deps.store.acquireLock(environment, deps.lock);
+  /**
+   * `deadline` (wall clock) is set only on the retry after a peer's rotation, which runs at most
+   * once and shares the first request's timeout, so a refresh never waits longer than one timeout.
+   */
+  const doRefresh = async (rejected: string, deadline?: number): Promise<string> => {
+    const current = await readOrThrow();
+
+    if (current.accessToken !== rejected && fresh(current)) {
+      return current.accessToken;
+    }
+
+    const until = deadline ?? Date.now() + (deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+
+    /** Re-reads through the pin: the stored session, and whether a peer rotated it since. */
+    const reread = async (): Promise<{ stored: OAuthSession; rotated: boolean }> => {
+      const stored = await readOrThrow();
+
+      return { stored, rotated: stored.refreshToken !== current.refreshToken };
+    };
+
+    if (current.refreshToken === undefined) {
+      if (!(await reread()).rotated) {
+        await deps.store.deleteSession(environment);
+      }
+
+      throw loginRequired(environment, `The ${environment} session has expired.`);
+    }
+
+    const remainingMs = until - Date.now();
+
+    // Out of time for the retry: the peer's token as it is.
+    if (remainingMs <= 0) {
+      return current.accessToken;
+    }
+
+    let tokens: TokenResponse;
 
     try {
-      const current = await readOrThrow();
+      tokens = await requestToken(
+        current.tokenEndpoint,
+        {
+          grant_type: 'refresh_token',
+          refresh_token: current.refreshToken,
+          client_id: current.clientId,
+        },
+        deps.fetch,
+        remainingMs,
+      );
+    } catch (err) {
+      if (
+        err instanceof OAuthError &&
+        (err.code === 'invalid_grant' || err.code === 'invalid_client')
+      ) {
+        const { stored, rotated } = await reread();
 
-      if (current.accessToken !== rejected && fresh(current)) {
-        return current.accessToken;
-      }
-
-      // Each attempt re-reads through the pin and mutates only if the session still holds the
-      // refresh token this refresh spent; resolves false if someone else rotated it.
-      const commit = (mutate: () => Promise<unknown>): Promise<boolean> =>
-        withSessionLock(
-          deps.store,
-          environment,
-          async (lock) =>
-            (await readOrThrow()).refreshToken === current.refreshToken &&
-            whenConfirmed(lock, () => mutate().then(() => true)),
-          { lock: deps.lock, held: lease },
-        );
-
-      if (current.refreshToken === undefined) {
-        await commit(() => deps.store.deleteSession(environment));
-        throw loginRequired(environment, `The ${environment} session has expired.`);
-      }
-
-      let tokens: TokenResponse;
-
-      try {
-        tokens = await requestToken(
-          current.tokenEndpoint,
-          {
-            grant_type: 'refresh_token',
-            refresh_token: current.refreshToken,
-            client_id: current.clientId,
-          },
-          deps.fetch,
-          deps.requestTimeoutMs,
-        );
-      } catch (err) {
-        if (
-          err instanceof OAuthError &&
-          (err.code === 'invalid_grant' || err.code === 'invalid_client')
-        ) {
-          // Only the session this refresh was refused for; a newer login stays.
-          const deleted = await commit(() => deps.store.deleteSession(environment));
-
-          if (deleted && err.code === 'invalid_client') {
-            await deps.store
-              .forgetClientId(current.issuer, { waitMs: FORGET_CLIENT_WAIT_MS, retryMs: 50 })
-              .catch(() => undefined);
-          }
-
-          throw loginRequired(environment, `The ${environment} session is no longer valid.`);
+        // A peer spent this refresh token first: use what it stored.
+        if (rotated) {
+          return fresh(stored) || deadline !== undefined || until <= Date.now()
+            ? stored.accessToken
+            : doRefresh(stored.accessToken, until);
         }
 
-        throw err;
+        const deleted = await deps.store.deleteSession(environment);
+
+        // Best effort, and only this session's client: a login meanwhile may have registered a
+        // new one. Whatever fails here, the error to report is the sign-in one below.
+        if (deleted && err.code === 'invalid_client') {
+          try {
+            if ((await deps.store.readClientId(current.issuer)) === current.clientId) {
+              await deps.store.forgetClientId(current.issuer);
+            }
+          } catch {
+            // The next login copes with a stale or unreadable cache.
+          }
+        }
+
+        throw loginRequired(environment, `The ${environment} session is no longer valid.`);
       }
 
-      const next = withTokens(current, tokens, deps.now());
-
-      // Newer tokens another refresh stored stay; this command uses the one it was just issued.
-      await commit(() => deps.store.writeSession(next));
-
-      return next.accessToken;
-    } finally {
-      await lease();
+      throw err;
     }
+
+    const next = withTokens(current, tokens, deps.now());
+
+    // Writes only over the session this refresh read: a logout or another login makes the re-read
+    // throw, and a peer's rotation is kept (this command still uses the token it was issued). A
+    // logout or login landing between this re-read and the rename can still be overwritten, and
+    // likewise a write landing between the invalid_grant re-read and its unlink is lost; the cost
+    // is a local file back for a token the server still accepts, or a re-login. Vault entry:
+    // cli-oauth-via-kizen-dcr-what-webapp-supports-the-app-builder-poc-design-and-its-gotchas
+    if (!(await reread()).rotated) {
+      await deps.store.writeSession(next);
+    }
+
+    return next.accessToken;
   };
 
   const refreshAccessToken = (rejected: string): Promise<string> => {

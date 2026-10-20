@@ -269,7 +269,7 @@ describe('requestToken', () => {
     expect(init?.body).toBe('grant_type=refresh_token');
   });
 
-  it('bounds token requests by default well under the 30s lock stale window', () => {
+  it('bounds token requests by default to at most 20s', () => {
     expect(DEFAULT_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(20_000);
   });
 });
@@ -291,6 +291,32 @@ const closesWithin = async (port: number, boundMs = 2000): Promise<boolean> => {
 
   return false;
 };
+
+/**
+ * Sends `GET <target>` over a raw socket, so a target fetch and node:http would refuse
+ * (like `//[`) reaches the server as-is. Resolves with the response's status code.
+ */
+const rawGetStatus = (port: number, target: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    let response = '';
+
+    socket.setEncoding('utf-8');
+    socket.on('data', (chunk: string) => {
+      response += chunk;
+    });
+    socket.on('error', reject);
+    socket.on('close', () => {
+      const status = /^HTTP\/1\.1 (\d{3}) /.exec(response)?.[1];
+
+      if (status === undefined) {
+        reject(new Error(`No HTTP status line in: ${JSON.stringify(response)}`));
+      } else {
+        resolve(Number(status));
+      }
+    });
+    socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
+  });
 
 /** Starts a loopback server and closes it after the test, for cleanup only. */
 const start = async (
@@ -374,6 +400,27 @@ describe('startLoopbackServer', () => {
       expect(await canConnect(server.port)).toBe(true);
     }
 
+    expect(settled).toBe(false);
+
+    const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
+
+    expect(response.status).toBe(200);
+    await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
+    expect(await closesWithin(server.port)).toBe(true);
+  });
+
+  it('a callback request with an unparsable URL gets an error response and the login keeps waiting', async () => {
+    const server = await start({ state: 'good' });
+    let settled = false;
+
+    void server.result.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+
+    expect(() => new URL('//[', 'http://127.0.0.1')).toThrow();
+    expect(await rawGetStatus(server.port, '//[')).toBe(404);
+    expect(await canConnect(server.port)).toBe(true);
     expect(settled).toBe(false);
 
     const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);

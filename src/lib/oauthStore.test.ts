@@ -1,20 +1,11 @@
-import { spawn } from 'node:child_process';
-import { once } from 'node:events';
-import { chmod, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import type * as FsPromisesModule from 'node:fs/promises';
 import type * as OsModule from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { GLOBAL_CREDENTIALS_DIR, listCredentialProfiles } from './credentials.js';
-import {
-  createOAuthStore,
-  LEASE_LOST,
-  withSessionLock,
-  type OAuthSession,
-  type OAuthStore,
-} from './oauthStore.js';
-import { deferred, lockIsFree, oauthSession, rejectionOf } from '../test/oauth.js';
+import { createOAuthStore, type OAuthSession } from './oauthStore.js';
+import { oauthSession, rejectionOf } from '../test/oauth.js';
 
 // Point the home directory at a fresh temp dir before credentials.ts computes
 // GLOBAL_CREDENTIALS_DIR, so the real ~/.kizenappbuilder is never touched and
@@ -28,50 +19,9 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...os, homedir: () => home, default: { ...os, homedir: () => home } };
 });
 
-// A pass-through fs whose exclusive `open` can be paused, so a test can stall
-// one taker between deciding to create a lock generation and creating it.
-const fsHooks = vi.hoisted(() => ({
-  beforeExclusiveOpen: undefined as ((path: string) => Promise<void>) | undefined,
-}));
-
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const fs = await importOriginal<typeof FsPromisesModule>();
-  const open = (async (...args: Parameters<typeof fs.open>) => {
-    if (args[1] === 'wx' && fsHooks.beforeExclusiveOpen) {
-      await fsHooks.beforeExclusiveOpen(String(args[0]));
-    }
-
-    return fs.open(...args);
-  }) as typeof fs.open;
-
-  return { ...fs, open, default: { ...fs, open } };
-});
-
 afterAll(async () => {
   await rm(homedir(), { recursive: true, force: true });
 });
-
-/** The current (highest-generation, unreleased) lock file for staging. */
-async function heldLock(store: OAuthStore): Promise<{ path: string; nonce: string }> {
-  const entries = await readdir(store.dir);
-  const generations = entries
-    .map((entry) => /^staging\.lock\.(0|[1-9]\d*)$/.exec(entry)?.[1])
-    .filter((n): n is string => n !== undefined)
-    .map(Number);
-  const top = Math.max(...generations);
-
-  expect(entries).not.toContain(`staging.lock.${String(top)}.released`);
-
-  const path = join(store.dir, `staging.lock.${String(top)}`);
-
-  return { path, nonce: await readFile(path, 'utf-8') };
-}
-
-const ageFile = async (path: string): Promise<void> => {
-  const old = new Date(Date.now() - 60_000);
-
-  await utimes(path, old, old);
-};
 
 describe('oauth store', () => {
   it('uses a temp home, never the real one', () => {
@@ -102,11 +52,9 @@ describe('oauth store', () => {
     expect((await stat(join(GLOBAL_CREDENTIALS_DIR, 'oauth'))).mode & 0o777).toBe(0o700);
     // Nothing OAuth-related lands at the top level, and no temp files are left behind.
     expect((await readdir(GLOBAL_CREDENTIALS_DIR)).sort()).toStrictEqual(['oauth', 'work.json']);
-    // The clients.json update's lock stays as a released generation.
+    // No lock files: only the sessions and the client cache.
     expect((await readdir(join(GLOBAL_CREDENTIALS_DIR, 'oauth'))).sort()).toStrictEqual([
       'clients.json',
-      'clients.lock.0',
-      'clients.lock.0.released',
       'go.json',
       'staging.json',
     ]);
@@ -142,392 +90,6 @@ describe('oauth store', () => {
 
     expect(await store.readClientId('https://a.test')).toBeUndefined();
     expect(await store.readClientId('https://b.test')).toBe('b1');
-  });
-
-  it('serializes lock holders', async () => {
-    const store = createOAuthStore(join(homedir(), 'locks'));
-    const release = await store.acquireLock('staging');
-    let second = false;
-    const waiting = store.acquireLock('staging', { retryMs: 5 }).then((r) => {
-      second = true;
-
-      return r;
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(second).toBe(false);
-    await release();
-
-    const releaseSecond = await waiting;
-
-    expect(second).toBe(true);
-    await releaseSecond();
-    expect(await lockIsFree(store, 'staging')).toBe(true);
-  });
-
-  it("release after staleMs overrun does not delete the successor's lock", async () => {
-    const store = createOAuthStore(join(homedir(), 'takeover'));
-    const releaseFirst = await store.acquireLock('staging');
-    const firstLock = await heldLock(store);
-
-    // The first holder stalls past the stale window and a second taker takes over.
-    await ageFile(firstLock.path);
-
-    const releaseSecond = await store.acquireLock('staging', { retryMs: 5, waitMs: 1000 });
-    const secondLock = await heldLock(store);
-
-    expect(secondLock.path).not.toBe(firstLock.path);
-    expect(secondLock.nonce).not.toBe(firstLock.nonce);
-
-    // The stalled first holder finishing must not delete or free the second holder's lock.
-    await releaseFirst();
-    expect(await readFile(secondLock.path, 'utf-8')).toBe(secondLock.nonce);
-    expect(await heldLock(store)).toStrictEqual(secondLock);
-
-    // So a third taker still has to wait for the second.
-    await expect(store.acquireLock('staging', { retryMs: 5, waitMs: 50 })).rejects.toThrow(
-      'Timed out waiting',
-    );
-
-    await releaseSecond();
-    expect(await lockIsFree(store, 'staging')).toBe(true);
-  });
-
-  it('confirm fails after another process takes over a stale lock', async () => {
-    const base = join(homedir(), 'confirm-takeover');
-    const first = await createOAuthStore(base).acquireLock('staging');
-
-    await expect(first.confirm()).resolves.toBe(true);
-    // The holder pauses past the taker's staleMs, and the taker takes over.
-    await new Promise((resolve) => setTimeout(resolve, 40));
-
-    const second = await createOAuthStore(base).acquireLock('staging', {
-      staleMs: 20,
-      retryMs: 5,
-      waitMs: 1000,
-    });
-
-    await expect(first.confirm()).resolves.toBe(false);
-    await expect(second.confirm()).resolves.toBe(true);
-    // The superseded holder's confirm didn't renew anything that matters: still second's.
-    await expect(
-      createOAuthStore(base).acquireLock('staging', { retryMs: 5, waitMs: 50 }),
-    ).rejects.toThrow('Timed out waiting');
-
-    await first();
-    await second();
-
-    // A taker that has just created the next generation, before it deletes the
-    // older ones: the holder's file is intact, but it's no longer the highest.
-    const third = await createOAuthStore(base).acquireLock('staging');
-    const { path } = await heldLock(createOAuthStore(base));
-    const next = Number(/\.(\d+)$/.exec(path)?.[1]) + 1;
-
-    await writeFile(
-      join(base, 'oauth', `staging.lock.${String(next)}`),
-      `${String(process.pid)} ${'b'.repeat(32)}`,
-    );
-    await expect(stat(path)).resolves.toBeDefined();
-    await expect(third.confirm()).resolves.toBe(false);
-    await third();
-  });
-
-  it('confirm fails after release', async () => {
-    const store = createOAuthStore(join(homedir(), 'confirm-release'));
-    const lock = await store.acquireLock('staging');
-
-    await lock();
-    await expect(lock.confirm()).resolves.toBe(false);
-
-    // Still false once a new holder has taken the next generation.
-    const next = await store.acquireLock('staging');
-
-    await expect(lock.confirm()).resolves.toBe(false);
-    await expect(next.confirm()).resolves.toBe(true);
-    await next();
-  });
-
-  it('confirm succeeds for the current holder and renews its lease', async () => {
-    const base = join(homedir(), 'confirm-renew');
-    const STALE = { staleMs: 200, retryMs: 5 };
-    const holder = await createOAuthStore(base).acquireLock('staging');
-    const { path } = await heldLock(createOAuthStore(base));
-
-    // Past the waiter's staleMs: without a renewal a waiter would take over now.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    const before = (await stat(path)).mtimeMs;
-
-    await expect(holder.confirm()).resolves.toBe(true);
-    expect((await stat(path)).mtimeMs).toBeGreaterThan(before);
-    // So a waiter with the same staleMs doesn't take over within the renewed window...
-    await expect(
-      createOAuthStore(base).acquireLock('staging', { ...STALE, waitMs: 50 }),
-    ).rejects.toThrow('Timed out waiting');
-    await expect(holder.confirm()).resolves.toBe(true);
-
-    // ...and staleMs still applies to an alive holder that stops renewing.
-    await new Promise((resolve) => setTimeout(resolve, 250));
-
-    const taker = await createOAuthStore(base).acquireLock('staging', { ...STALE, waitMs: 1000 });
-
-    await expect(holder.confirm()).resolves.toBe(false);
-    await holder();
-    await taker();
-  });
-
-  it('withSessionLock gives up after three lost leases and leaves the lock free', async () => {
-    const real = createOAuthStore(join(homedir(), 'lease-attempts'));
-    let acquired = 0;
-    // Real locks whose lease always reads as lost; releasing them is left to withSessionLock.
-    const store: OAuthStore = {
-      ...real,
-      acquireLock: async (environment, options) => {
-        acquired += 1;
-
-        return Object.assign(await real.acquireLock(environment, options), {
-          confirm: () => Promise.resolve(false),
-        });
-      },
-    };
-    let steps = 0;
-    let mutated = false;
-
-    await expect(
-      withSessionLock(
-        store,
-        'staging',
-        async (lock) => {
-          steps += 1;
-
-          if (!(await lock.confirm())) {
-            return LEASE_LOST;
-          }
-
-          mutated = true;
-
-          return 'mutated';
-        },
-        { lock: { retryMs: 5, waitMs: 1000 } },
-      ),
-    ).rejects.toThrow(
-      'Another appbuilder process kept taking over the staging session lock. Run the command again.',
-    );
-    expect({ steps, acquired, mutated }).toStrictEqual({ steps: 3, acquired: 3, mutated: false });
-    expect(await lockIsFree(real, 'staging')).toBe(true);
-  });
-
-  it('stale lock taken by concurrent takers yields exactly one holder', async () => {
-    const TAKERS = 4;
-    const ROUNDS = 40;
-
-    for (let round = 0; round < ROUNDS; round += 1) {
-      const base = join(homedir(), 'concurrent', String(round));
-      // Separate store instances on one directory, as separate processes would be.
-      const abandoned = createOAuthStore(base);
-
-      await abandoned.acquireLock('staging');
-      await ageFile((await heldLock(abandoned)).path);
-
-      let holders = 0;
-      let maxHolders = 0;
-      let completed = 0;
-
-      await Promise.all(
-        Array.from({ length: TAKERS }, async () => {
-          const release = await createOAuthStore(base).acquireLock('staging', {
-            retryMs: 1,
-            waitMs: 5000,
-          });
-
-          holders += 1;
-          maxHolders = Math.max(maxHolders, holders);
-          // Hold across real fs round trips so other takers' attempts interleave.
-          await readdir(join(base, 'oauth'));
-          await stat(join(base, 'oauth'));
-          holders -= 1;
-          completed += 1;
-          await release();
-        }),
-      );
-
-      expect({ round, maxHolders, completed }).toStrictEqual({
-        round,
-        maxHolders: 1,
-        completed: TAKERS,
-      });
-    }
-  });
-
-  it('lock held by a dead pid is taken over without waiting staleMs', async () => {
-    const base = join(homedir(), 'dead-pid');
-    const DEAD = 424_242;
-
-    await createOAuthStore(base, { pid: DEAD }).acquireLock('staging');
-
-    const probed: number[] = [];
-    const taker = createOAuthStore(base, {
-      probeProcess: (pid) => {
-        probed.push(pid);
-
-        if (pid === DEAD) {
-          throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
-        }
-      },
-    });
-    // The default 30s staleMs applies; only the dead pid lets this through.
-    const release = await taker.acquireLock('staging', { retryMs: 5, waitMs: 1000 });
-
-    expect(probed).toContain(DEAD);
-    // The taker really holds it now: a live-pid lock that a third taker must wait for.
-    await expect(
-      createOAuthStore(base).acquireLock('staging', { retryMs: 5, waitMs: 50 }),
-    ).rejects.toThrow('Timed out waiting');
-    await release();
-
-    // With the real process.kill probe: a child that has exited.
-    const exited = spawn(process.execPath, ['-e', '']);
-    const exitedPid = exited.pid ?? 0;
-
-    await once(exited, 'exit');
-    expect(exitedPid).toBeGreaterThan(0);
-
-    const realBase = join(homedir(), 'dead-pid-real');
-
-    await createOAuthStore(realBase, { pid: exitedPid }).acquireLock('staging');
-    await expect(
-      createOAuthStore(realBase).acquireLock('staging', { retryMs: 5, waitMs: 1000 }),
-    ).resolves.toBeTypeOf('function');
-  });
-
-  it('a slow taker that recreates a deleted generation backs off and waits for the real holder', async () => {
-    /**
-     * Z decides generation 0 is next and stalls before creating it. Meanwhile A
-     * takes and releases 0, and B takes 1 (deleting 0) and holds it. Z then
-     * creates 0 successfully, because it was deleted, and must not believe it
-     * holds the lock.
-     */
-    const scenario = async (
-      base: string,
-      zWaitMs: number,
-    ): Promise<{ z: Promise<() => Promise<void>>; releaseB: () => Promise<void> }> => {
-      const target = join(base, 'oauth', 'staging.lock.0');
-      let paused = false;
-      const atOpen = deferred();
-      const resumed = deferred();
-
-      fsHooks.beforeExclusiveOpen = async (path) => {
-        if (path === target && !paused) {
-          paused = true;
-          atOpen.resolve();
-          await resumed.promise;
-        }
-      };
-
-      const z = createOAuthStore(base).acquireLock('staging', { retryMs: 5, waitMs: zWaitMs });
-
-      z.catch(() => undefined);
-      await atOpen.promise;
-
-      await (
-        await createOAuthStore(base).acquireLock('staging')
-      )();
-
-      const releaseB = await createOAuthStore(base).acquireLock('staging');
-
-      expect(await readdir(join(base, 'oauth'))).not.toContain('staging.lock.0');
-      resumed.resolve();
-
-      return { z, releaseB };
-    };
-
-    try {
-      // While B holds generation 1, Z never gets the lock.
-      const short = await scenario(join(homedir(), 'slow-taker-short'), 200);
-
-      await expect(short.z).rejects.toThrow('Timed out waiting');
-      await short.releaseB();
-
-      // Once B releases, Z gets it, above B's generation.
-      const base = join(homedir(), 'slow-taker-long');
-      const long = await scenario(base, 5000);
-      let zHolds = false;
-
-      void long.z.then(() => (zHolds = true));
-      // Z's recreated 0 is marked released: it backed off rather than holding it.
-      await vi.waitFor(async () => {
-        expect(await readdir(join(base, 'oauth'))).toContain('staging.lock.0.released');
-      });
-      expect(zHolds).toBe(false);
-      await long.releaseB();
-
-      const releaseZ = await long.z;
-      const store = createOAuthStore(base);
-
-      expect((await heldLock(store)).path).toBe(join(store.dir, 'staging.lock.2'));
-      await releaseZ();
-    } finally {
-      fsHooks.beforeExclusiveOpen = undefined;
-    }
-  });
-
-  it('lock dir with a foreign non-canonical generation name still honours waitMs', async () => {
-    const store = createOAuthStore(join(homedir(), 'foreign-generation'));
-
-    await mkdir(store.dir, { recursive: true });
-    // Not a name this code writes: it must neither win as "generation 7" nor spin.
-    await writeFile(join(store.dir, 'staging.lock.007'), '');
-    await writeFile(join(store.dir, 'staging.lock.12x'), '');
-
-    const release = await store.acquireLock('staging', { retryMs: 5, waitMs: 200 });
-
-    expect((await heldLock(store)).path).toBe(join(store.dir, 'staging.lock.0'));
-
-    // A waiter behind a real holder still gives up on time.
-    const started = Date.now();
-
-    await expect(
-      createOAuthStore(join(homedir(), 'foreign-generation')).acquireLock('staging', {
-        retryMs: 5,
-        waitMs: 200,
-      }),
-    ).rejects.toThrow('Timed out waiting');
-    expect(Date.now() - started).toBeLessThan(2000);
-    await release();
-  });
-
-  it('lock held by a live pid is not taken over before staleMs', async () => {
-    const base = join(homedir(), 'live-pid');
-    const OTHER = 515_151;
-
-    await createOAuthStore(base, { pid: OTHER }).acquireLock('staging');
-
-    const alive = (): void => undefined;
-    // EPERM: the process exists but belongs to someone else. A clean probe: it's ours.
-    const probes: ((pid: number) => void)[] = [
-      () => {
-        throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
-      },
-      alive,
-    ];
-
-    for (const probeProcess of probes) {
-      await expect(
-        createOAuthStore(base, { probeProcess }).acquireLock('staging', {
-          retryMs: 5,
-          waitMs: 100,
-        }),
-      ).rejects.toThrow('Timed out waiting for another appbuilder process');
-    }
-
-    // The mtime rule still applies to a live pid once the lock is older than staleMs.
-    await ageFile((await heldLock(createOAuthStore(base))).path);
-    await expect(
-      createOAuthStore(base, { probeProcess: alive }).acquireLock('staging', {
-        retryMs: 5,
-        waitMs: 1000,
-      }),
-    ).resolves.toBeTypeOf('function');
   });
 
   it('corrupt session file reports an unreadable-session error naming the path', async () => {
@@ -628,24 +190,40 @@ describe('oauth store', () => {
     expect(await readdir(store.dir)).toStrictEqual(['staging.json']);
   });
 
-  it('concurrent client registrations for two issuers keep both client ids', async () => {
+  it('concurrent clients.json writes leave a parseable file', async () => {
+    const issuers = ['https://a.test', 'https://b.test', 'https://c.test', 'https://d.test'];
+
     for (let round = 0; round < 8; round += 1) {
       const base = join(homedir(), 'clients-race', String(round));
-      // Two stores on one directory, as two `appbuilder login` processes would be.
-      const a = createOAuthStore(base);
-      const b = createOAuthStore(base);
+      // Separate stores on one directory, as separate `appbuilder` processes would be.
+      const stores = issuers.map(() => createOAuthStore(base));
 
-      await Promise.all([
-        a.writeClientId('https://a.test', `a-${String(round)}`),
-        b.writeClientId('https://b.test', `b-${String(round)}`),
-      ]);
+      await stores[0]?.writeClientId('https://kept.test', 'kept');
+      await Promise.all(
+        stores.map((store, i) =>
+          i % 2 === 0
+            ? store.writeClientId(issuers[i] ?? '', `${String(i)}-${String(round)}`)
+            : store.forgetClientId('https://kept.test'),
+        ),
+      );
 
-      expect(
-        JSON.parse(await readFile(join(base, 'oauth', 'clients.json'), 'utf-8')),
-      ).toStrictEqual({
-        'https://a.test': { clientId: `a-${String(round)}` },
-        'https://b.test': { clientId: `b-${String(round)}` },
-      });
+      const dir = join(base, 'oauth');
+      const clients = JSON.parse(await readFile(join(dir, 'clients.json'), 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+
+      // Unlocked, so an update can be lost; but every entry that is there is one that was
+      // written whole, and no temp file is left behind.
+      for (const [issuer, entry] of Object.entries(clients)) {
+        const i = issuers.indexOf(issuer);
+
+        expect(entry).toStrictEqual({
+          clientId: issuer === 'https://kept.test' ? 'kept' : `${String(i)}-${String(round)}`,
+        });
+      }
+
+      expect(await readdir(dir)).toStrictEqual(['clients.json']);
     }
   });
 

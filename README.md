@@ -472,7 +472,7 @@ appbuilder block targets --oauth [--env <env>] [flags]
 
 With `--oauth`, the production write gate (`--allow-production`) and every other flag of `block push` and `block targets` work the same as with an API key.
 
-Sessions are stored in `~/.kizenappbuilder/oauth/<env>.json` (directory `0700`, files `0600`), separate from API-key profiles. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Signing in, signing out and refreshing coordinate through a lock in `~/.kizenappbuilder/oauth/`, so concurrent `appbuilder` processes refresh a session only once. A lock left by a process that crashed is taken over right away, or after 30 seconds if the CLI can't tell whether that process is still running. If the refresh token is rejected, the session is deleted, and the command asks you to run `appbuilder login --env <env>` again.
+Sessions are stored in `~/.kizenappbuilder/oauth/<env>.json` (directory `0700`, files `0600`), separate from API-key profiles. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Each process makes one refresh at a time, and the session file is written atomically. Concurrent `appbuilder` processes may each refresh, which is safe because Kizen returns the same token pair when a refresh token is reused within 5 minutes. Before saving, a refresh re-reads the session: it skips the write if another process already refreshed, and it fails with a sign-in error if you signed out or signed in again meanwhile. If the refresh token is rejected, the CLI keeps the tokens another process already refreshed to; otherwise it deletes the session, and the command asks you to run `appbuilder login --env <env>` again.
 
 A session file that is corrupt or can't be read isn't treated as "not signed in". Commands that use it report the file's path and ask you to run `appbuilder login --env <env>`, and `appbuilder logout --env <env>` removes it.
 
@@ -505,7 +505,7 @@ User scope is recommended: Claude Code then passes the helper its environment va
 
 The helper picks the environment from the MCP server URL that Claude Code passes it in `CLAUDE_CODE_MCP_SERVER_URL`: the environment whose API origin (scheme, host and port) matches that URL's origin. A URL that matches no environment is an error, so a token is never sent to a server it doesn't belong to. If you also pass `--env`, it must name that same environment, or the helper fails without printing a token. When the variable isn't set (for example, when you run the command yourself), it uses `--env`, or the only environment you're signed in to.
 
-Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts than the other commands: 3s to wait for another process's refresh, and 5s for the token request. On failure, it prints one line to stderr, such as a reminder to run `appbuilder login --env <env>`, and nothing to stdout.
+Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts than the other commands: 5s in total for token requests, including a retry after another process's refresh. On failure, it prints one line to stderr, such as a reminder to run `appbuilder login --env <env>`, and nothing to stdout.
 
 `auth-header` prints a live access token by design: treat its output like a password. The token acts as you, in the one business you chose when signing in, until it expires (up to an hour).
 
