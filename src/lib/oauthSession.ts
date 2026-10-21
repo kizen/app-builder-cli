@@ -90,15 +90,15 @@ const labelsOf = (
   email: identity.email,
 });
 
-/** `base` with newly issued `tokens`; a token or scope the response leaves out keeps `base`'s. */
+/** `base` with newly issued `tokens`; a scope the response leaves out keeps `base`'s. */
 const withTokens = (
-  base: Omit<OAuthSession, 'accessToken' | 'expiresAt'>,
+  base: Omit<OAuthSession, 'accessToken' | 'refreshToken' | 'expiresAt'>,
   tokens: TokenResponse,
   now: number,
 ): OAuthSession => ({
   ...base,
   accessToken: tokens.accessToken,
-  refreshToken: tokens.refreshToken ?? base.refreshToken,
+  refreshToken: tokens.refreshToken,
   expiresAt: now + tokens.expiresIn * 1000,
   scope: tokens.scope ?? base.scope,
 });
@@ -240,7 +240,6 @@ export async function login(
       issuer: metadata.issuer,
       clientId,
       tokenEndpoint: metadata.tokenEndpoint,
-      refreshToken: undefined,
       scope: undefined,
     },
     tokens,
@@ -414,14 +413,6 @@ export function createTokenProvider(
 
       return { stored, rotated: stored.refreshToken !== current.refreshToken };
     };
-
-    if (current.refreshToken === undefined) {
-      if (!(await reread()).rotated) {
-        await deps.store.deleteSession(environment, current);
-      }
-
-      throw loginRequired(environment, `The ${environment} session has expired.`);
-    }
 
     const remainingMs = until - deps.now();
 

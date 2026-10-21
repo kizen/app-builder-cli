@@ -54,7 +54,7 @@ export interface AuthServerMetadata {
 
 export interface TokenResponse {
   accessToken: string;
-  refreshToken: string | undefined;
+  refreshToken: string;
   expiresIn: number;
   scope: string | undefined;
 }
@@ -279,10 +279,12 @@ export async function requestToken(
   }
 
   const accessToken = isRecord(body) ? nonEmptyString(body.access_token) : undefined;
+  const refreshToken = isRecord(body) ? nonEmptyString(body.refresh_token) : undefined;
 
   if (
     !isRecord(body) ||
     accessToken === undefined ||
+    refreshToken === undefined ||
     typeof body.token_type !== 'string' ||
     body.token_type.toLowerCase() !== 'bearer'
   ) {
@@ -291,7 +293,7 @@ export async function requestToken(
 
   return {
     accessToken,
-    refreshToken: nonEmptyString(body.refresh_token),
+    refreshToken,
     expiresIn: typeof body.expires_in === 'number' && body.expires_in > 0 ? body.expires_in : 3600,
     scope: typeof body.scope === 'string' ? body.scope : undefined,
   };

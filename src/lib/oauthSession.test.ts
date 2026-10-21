@@ -1099,58 +1099,6 @@ describe('createTokenProvider', () => {
       ]);
       expect(await store.readSession('staging')).toStrictEqual(stale('peer2'));
     });
-
-    it('a refresh with no refresh token does not delete another account that became current', async () => {
-      await signIn(store, oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
-
-      const paused = deferred();
-      const resume = deferred();
-      let reads = 0;
-      const server = fakeAuthServer();
-      const pending = provider(server, {
-        store: {
-          ...store,
-          readSession: async (environment) => {
-            reads += 1;
-
-            const read = await store.readSession(environment);
-
-            // The second read is the refresh's own: pause right after it.
-            if (reads === 2) {
-              paused.resolve();
-              await resume.promise;
-            }
-
-            return read;
-          },
-        },
-      }).getAccessToken();
-
-      pending.catch(() => undefined);
-      await paused.promise;
-      await signIn(createOAuthStore(dir), LOGIN_B);
-      resume.resolve();
-
-      const error = await rejectionOf(pending);
-
-      expect(error.code).toBe('login_required');
-      expect(error.message).toBe(SIGN_IN_CHANGED);
-      expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
-      expect(server.fetch).not.toHaveBeenCalled();
-    });
-
-    it('a refresh with no refresh token deletes the unchanged session', async () => {
-      await signIn(store, oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
-
-      const server = fakeAuthServer();
-      const error = await rejectionOf(provider(server).getAccessToken());
-
-      expect(error.message).toBe(
-        'The staging session has expired. Run `appbuilder login --env staging` to sign in.',
-      );
-      expect(await store.readSession('staging')).toBeNull();
-      expect(server.fetch).not.toHaveBeenCalled();
-    });
   });
 
   describe('a refresh held after its last check', () => {
@@ -1399,11 +1347,7 @@ describe('createTokenProvider', () => {
   });
 
   it.each([
-    ['an expiring session with a refresh token', { expiresAt: EXPIRING }],
-    [
-      'an expiring session without a refresh token',
-      { expiresAt: EXPIRING, refreshToken: undefined },
-    ],
+    ['an expiring session', { expiresAt: EXPIRING }],
     ['a fresh session', {}],
   ] as const)(
     'refresh does not request or write when another account became current (%s)',

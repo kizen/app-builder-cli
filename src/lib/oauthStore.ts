@@ -41,7 +41,7 @@ export interface OAuthSession extends OAuthAccount {
   clientId: string;
   tokenEndpoint: string;
   accessToken: string;
-  refreshToken: string | undefined;
+  refreshToken: string;
   /** Epoch milliseconds. */
   expiresAt: number;
   scope: string | undefined;
@@ -200,6 +200,7 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
     typeof raw.clientId !== 'string' ||
     typeof raw.tokenEndpoint !== 'string' ||
     typeof raw.accessToken !== 'string' ||
+    typeof raw.refreshToken !== 'string' ||
     typeof raw.expiresAt !== 'number'
   ) {
     return null;
@@ -215,7 +216,7 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
     clientId: raw.clientId,
     tokenEndpoint: raw.tokenEndpoint,
     accessToken: raw.accessToken,
-    refreshToken: optionalString(raw.refreshToken),
+    refreshToken: raw.refreshToken,
     expiresAt: raw.expiresAt,
     scope: optionalString(raw.scope),
   };
