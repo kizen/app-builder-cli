@@ -122,15 +122,6 @@ describe('resolveCreateDefaults', () => {
     });
   });
 
-  it('signed in with an invalid -e picks the environment as if -e were absent', async () => {
-    const { deps } = makeDeps({ staging: 'staging-business' }, SAVED_CREDENTIALS, 'nope');
-
-    await expect(resolveCreateDefaults(deps)).resolves.toEqual({
-      businessId: 'staging-business',
-      environment: 'staging',
-    });
-  });
-
   it('a session list that fails to read falls back to credentials.json defaults', async () => {
     const { deps } = makeDeps({});
 

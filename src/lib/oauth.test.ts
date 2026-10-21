@@ -5,10 +5,9 @@ import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import {
   buildAuthorizeUrl,
   DEFAULT_REQUEST_TIMEOUT_MS,
-  CALLBACK_FAILURE_HEADING,
-  CALLBACK_SUCCESS_HEADING,
-  CALLBACK_WRONG_STATE_HEADING,
-  CALLBACK_WRONG_STATE_TEXT,
+  CALLBACK_FAILURE,
+  CALLBACK_SUCCESS,
+  CALLBACK_WRONG_STATE,
   createPkcePair,
   discover,
   loginCommandFor,
@@ -365,8 +364,8 @@ describe('startLoopbackServer', () => {
     const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
 
     expect(response.status).toBe(200);
-    expect(response.body).toContain('You can close this window.');
-    expect(response.body).toContain(`<h1>${CALLBACK_SUCCESS_HEADING}</h1>`);
+    expect(response.body).toContain(CALLBACK_SUCCESS.text);
+    expect(response.body).toContain(`<h1>${CALLBACK_SUCCESS.heading}</h1>`);
     expect(response.body).toContain('class="card success"');
     await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
     expect(await closesWithin(server.port)).toBe(true);
@@ -392,7 +391,7 @@ describe('startLoopbackServer', () => {
     expect(error.message).toContain('User said no');
     // The server's text isn't echoed into the page.
     expect(response.body).not.toContain('User said no');
-    expect(response.body).toContain(`<h1>${CALLBACK_FAILURE_HEADING}</h1>`);
+    expect(response.body).toContain(`<h1>${CALLBACK_FAILURE.heading}</h1>`);
     expect(response.body).toContain('class="card error"');
     expect(await closesWithin(server.port)).toBe(true);
   });
@@ -412,8 +411,8 @@ describe('startLoopbackServer', () => {
       const response = await httpGet(`${server.redirectUri}?${query}`);
 
       expect(response.status).toBe(400);
-      expect(response.body).toContain(CALLBACK_WRONG_STATE_TEXT);
-      expect(response.body).toContain(`<h1>${CALLBACK_WRONG_STATE_HEADING}</h1>`);
+      expect(response.body).toContain(CALLBACK_WRONG_STATE.text);
+      expect(response.body).toContain(`<h1>${CALLBACK_WRONG_STATE.heading}</h1>`);
       expect(response.body).toContain('class="card error"');
       expect(await canConnect(server.port)).toBe(true);
     }

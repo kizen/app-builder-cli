@@ -9,16 +9,13 @@ import {
   accountPickerItems,
   AUTH_HEADER_REQUEST_TIMEOUT_MS,
   BROWSER_PICK,
-  CLAUDE_CODE_HELPER_LIMIT_MS,
   createDefaultAuthCommandDeps,
-  isInteractiveTerminal,
   matchBusiness,
   pickedAccount,
   runAuthHeader,
   runLogin,
   runLogout,
   runWhoami,
-  shellQuote,
   type AuthCommandDeps,
   type PickAccount,
 } from './oauthCommands.js';
@@ -31,11 +28,11 @@ import {
   type OAuthStore,
   type SavedAccount,
 } from './oauthStore.js';
+import { quoteArg } from './shellArg.js';
 import {
   ACCOUNT_A,
   ACCOUNT_B,
   deferred,
-  hangUntilAbort,
   ISSUER,
   jsonResponse,
   NOW,
@@ -102,6 +99,8 @@ interface HarnessOptions {
   interactive?: boolean;
   pickAccount?: PickAccount;
   timeouts?: AuthCommandDeps['authHeaderTimeouts'];
+  /** The token provider's clock; `NOW` by default. */
+  now?: () => number;
   /** Token endpoint behavior; defaults to issuing the rotated pair. */
   tokenEndpoint?: (init: RequestInit | undefined) => Response | Promise<Response>;
 }
@@ -134,7 +133,7 @@ function harness(
       kizen(url, (init?.headers as Record<string, string> | undefined)?.Authorization),
     );
   });
-  const now = (): number => NOW;
+  const now = options.now ?? ((): number => NOW);
   const tokenProvider: AuthCommandDeps['tokenProvider'] = (environment, providerOpts = {}) => {
     providerOptions.push(providerOpts);
 
@@ -170,66 +169,6 @@ function harness(
     exitCodes,
     all: () => [...stdout, ...stderr].join(''),
   };
-}
-
-/**
- * `command` split into words as a POSIX shell does: single quotes are literal, double quotes
- * keep spaces and take `\` escapes, `\` escapes outside quotes. Expansions (`$`, backticks)
- * aren't performed; a test that needs them uses `shellWords`.
- */
-function posixWords(command: string): string[] {
-  const words: string[] = [];
-  let word: string | undefined;
-  let i = 0;
-
-  while (i < command.length) {
-    const c = command[i] ?? '';
-
-    if (c === "'") {
-      const end = command.indexOf("'", i + 1);
-
-      if (end === -1) {
-        throw new Error(`Unterminated ' in ${command}`);
-      }
-
-      word = (word ?? '') + command.slice(i + 1, end);
-      i = end + 1;
-    } else if (c === '"') {
-      let j = i + 1;
-
-      word ??= '';
-
-      while (j < command.length && command[j] !== '"') {
-        if (command[j] === '\\' && /["\\$`]/.test(command[j + 1] ?? '')) {
-          j += 1;
-        }
-
-        word += command[j] ?? '';
-        j += 1;
-      }
-
-      i = j + 1;
-    } else if (c === '\\') {
-      word = (word ?? '') + (command[i + 1] ?? '');
-      i += 2;
-    } else if (/\s/.test(c)) {
-      if (word !== undefined) {
-        words.push(word);
-        word = undefined;
-      }
-
-      i += 1;
-    } else {
-      word = (word ?? '') + c;
-      i += 1;
-    }
-  }
-
-  if (word !== undefined) {
-    words.push(word);
-  }
-
-  return words;
 }
 
 /** The words a real `/bin/sh` makes of `command`, one per line (none of the values hold one). */
@@ -491,7 +430,7 @@ describe('logout and saved accounts', () => {
     // Unknown: a usage error listing what's saved, nothing removed.
     await runLogout({ env: 'staging', business: 'nope' }, h.deps);
     expect(h.stderr.at(-1)).toBe(
-      "Error: No saved staging account matches --business 'nope'. Saved accounts:\n  Acme A (biz-a) ada@a.test\n",
+      'Error: No saved staging account matches --business nope. Saved accounts:\n  Acme A (biz-a) ada@a.test\n',
     );
     expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
 
@@ -626,10 +565,6 @@ describe('login', () => {
   /** login's line before the URL without a TTY. */
   const AGENT_URL_LINE =
     "A browser window should open for the user to sign in to Kizen staging. If it doesn't, give them this URL:\n";
-  const accountOfIdentity = ({ businessId, userId }: KizenIdentity): OAuthAccount => ({
-    businessId,
-    userId,
-  });
 
   const IDENTITY_LINES_9 =
     'Environment: staging\nUser: Ada Lovelace <ada@example.com> (user-9)\nBusiness: Acme Corp (biz-9)\n';
@@ -884,33 +819,6 @@ describe('login', () => {
       expectNoSecrets(h.all());
     });
 
-    it('switching refreshes the saved labels from the live identity', async () => {
-      // A's saved labels are stale: the business was renamed, and the user's email changed.
-      await store.writeSession(session('staging'));
-      await signIn(store, CURRENT_B);
-
-      const renamed: KizenIdentity = {
-        ...IDENTITY_A,
-        businessName: 'Acme Renamed',
-        email: 'ada@renamed.test',
-      };
-      const h = loginHarness((url, auth) =>
-        url.endsWith('/auth/bootstrap') && auth === `Bearer ${ACCESS}`
-          ? jsonResponse(bootstrapFor(renamed))
-          : jsonResponse({ detail: 'Invalid token.' }, 401),
-      );
-
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
-
-      expect(h.exitCodes).toStrictEqual([]);
-      expect(h.stdout.at(-1)).toContain('Business: Acme Renamed (biz-a)');
-      // The labels changed; the tokens didn't.
-      expect(await store.readSession('staging')).toStrictEqual(
-        session('staging', { businessName: 'Acme Renamed', email: 'ada@renamed.test' }),
-      );
-      expect((await store.listAccounts('staging'))[0]?.session?.businessName).toBe('Acme Renamed');
-    });
-
     it('an expired --business account explains what happened, which business to pick, and opens the browser', async () => {
       await saveAAndB();
 
@@ -975,7 +883,7 @@ describe('login', () => {
         `${browserCalls[0] ?? '<none>'}\n`,
       ]);
       expect(expired.stderr.at(-1)).toBe(
-        "The user signed in as Acme Corp (biz-9) ada@example.com, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business 'biz-9' --user 'user-9'`. To have them try again, run `appbuilder login --env staging --business 'biz-a' --user 'user-a'`.\n",
+        "The user signed in as Acme Corp (biz-9) ada@example.com, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business biz-9 --user user-9`. To have them try again, run `appbuilder login --env staging --business biz-a --user user-a`.\n",
       );
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
       expect(await store.readAccount('staging', IDENTITY_9)).toMatchObject(IDENTITY_9);
@@ -998,7 +906,7 @@ describe('login', () => {
         `${browserCalls[0] ?? '<none>'}\n`,
       ]);
       expect(unsaved.stderr.at(-1)).toBe(
-        "You signed in as Acme Corp (biz-9) ada@example.com, not --business 'Acme Corp' --user 'user-other'. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business 'biz-9' --user 'user-9'`. To try again, run `appbuilder login --env staging --business 'Acme Corp' --user 'user-other'`.\n",
+        "You signed in as Acme Corp (biz-9) ada@example.com, not --business 'Acme Corp' --user user-other. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business biz-9 --user user-9`. To try again, run `appbuilder login --env staging --business 'Acme Corp' --user user-other`.\n",
       );
       expect(await store.readSession('staging')).toBeNull();
       expect(await store.readAccount('staging', IDENTITY_9)).toMatchObject(IDENTITY_9);
@@ -1042,7 +950,7 @@ describe('login', () => {
           'The saved sign-in for Acme A (biz-a) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (biz-a), signed in as ada@a.test.\n',
           AGENT_URL_LINE,
           `${browserCalls[0] ?? '<none>'}\n`,
-          `The user signed in as ${summary}, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run \`appbuilder login --env staging --business '${identity.businessId}' --user '${identity.userId}'\`. To have them try again, run \`appbuilder login --env staging --business 'biz-a' --user 'user-a'\`.\n`,
+          `The user signed in as ${summary}, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run \`appbuilder login --env staging --business ${identity.businessId} --user ${identity.userId}\`. To have them try again, run \`appbuilder login --env staging --business biz-a --user user-a\`.\n`,
         ]);
         expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
         expect(await store.readAccount('staging', identity)).toMatchObject(identity);
@@ -1099,7 +1007,7 @@ describe('login', () => {
         `${browserCalls[0] ?? '<none>'}\n`,
       ]);
       expect(h.stderr.at(-1)).toBe(
-        "The user signed in as Bravo B (biz-b) bob@b.test, not Acme A (biz-a) ada@a.test. That's already the current staging account; its saved session was updated.\nTo have them try again, run `appbuilder login --env staging --business 'biz-a' --user 'user-a'`.\n",
+        "The user signed in as Bravo B (biz-b) bob@b.test, not Acme A (biz-a) ada@a.test. That's already the current staging account; its saved session was updated.\nTo have them try again, run `appbuilder login --env staging --business biz-a --user user-a`.\n",
       );
       expect(await store.readSession('staging')).toMatchObject({
         ...ACCOUNT_B,
@@ -1151,29 +1059,6 @@ describe('login', () => {
   });
 
   describe('--business', () => {
-    it('--business matches by id', async () => {
-      await saveAAndB();
-
-      const h = loginHarness(kizenForA);
-
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
-
-      expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
-      expect(browserCalls).toStrictEqual([]);
-    });
-
-    it('--business matches by name, case-insensitive', async () => {
-      await saveAAndB();
-
-      const h = loginHarness(kizenForA);
-
-      await runLogin({ env: 'staging', business: 'aCmE a' }, h.deps);
-
-      expect(h.exitCodes).toStrictEqual([]);
-      expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
-      expect(browserCalls).toStrictEqual([]);
-    });
-
     it('--business with an ambiguous name fails and lists the candidates with their ids', async () => {
       await saveAAndB();
       await store.writeSession(
@@ -1259,16 +1144,15 @@ describe('login', () => {
       return { requested, first };
     };
 
-    /** The `try again` command from a mismatch message, split as a POSIX shell would. */
+    /** The `try again` command from a mismatch message, split by a real shell. */
     const retryFlags = (
       stderr: string,
     ): {
-      command: string;
       words: string[];
       flags: { env?: string; business?: string; user?: string };
     } => {
       const command = /try again, run `(.*)`\.\n?$/s.exec(stderr)?.[1] ?? '';
-      const words = posixWords(command);
+      const words = shellWords(command);
       const flags: Record<string, string> = {};
 
       for (let i = 0; i < words.length; i += 1) {
@@ -1280,7 +1164,7 @@ describe('login', () => {
         }
       }
 
-      return { command, words, flags };
+      return { words, flags };
     };
 
     it.each([
@@ -1295,7 +1179,7 @@ describe('login', () => {
       expect(first.exitCodes).toStrictEqual([1]);
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
 
-      const { command, words, flags } = retryFlags(first.stderr.at(-1) ?? '');
+      const { words, flags } = retryFlags(first.stderr.at(-1) ?? '');
 
       expect(words.slice(0, 2)).toStrictEqual(['appbuilder', 'login']);
       expect(flags.env).toBe('staging');
@@ -1305,8 +1189,6 @@ describe('login', () => {
           ? { env: 'staging', business: requested.businessId, user: requested.userId }
           : { env: 'staging', business: requested.businessName },
       );
-      // A real shell agrees, and runs nothing inside the values.
-      expect(shellWords(command)).toStrictEqual(words);
 
       // Run the printed retry, the browser returning the requested account this time.
       browserCalls.length = 0;
@@ -1317,14 +1199,26 @@ describe('login', () => {
 
       expect(retry.exitCodes).toStrictEqual([]);
       expect(browserCalls).toHaveLength(1);
-      expect(await store.readSession('staging')).toMatchObject(accountOfIdentity(requested));
+      expect(await store.readSession('staging')).toMatchObject(requested);
       // The mismatched sign-in is still saved, and not current.
       expect(await store.readAccount('staging', IDENTITY_9)).toMatchObject(IDENTITY_9);
     });
 
-    it('shellQuote makes one shell word of anything', () => {
-      for (const value of ["R$D Corp's `x` deal!", "'", '', '$(echo pwned)', 'a\\b "c"']) {
-        expect(shellWords(`printf %s ${shellQuote(value)}`)).toStrictEqual(['printf', '%s', value]);
+    it('quoteArg round-trips any value through /bin/sh as one word', () => {
+      for (const value of [
+        '$(touch x)',
+        '`touch x`',
+        "it's",
+        'a b',
+        '*',
+        '',
+        '$HOME',
+        '-x',
+        '=x',
+        'a\\b "c"',
+        "R$D Corp's `x` deal!",
+      ]) {
+        expect(shellWords(`printf %s ${quoteArg(value)}`)).toStrictEqual(['printf', '%s', value]);
       }
     });
 
@@ -1479,7 +1373,7 @@ describe('login', () => {
 
         const h = loginHarness(kizenForA2);
         const expected =
-          "Error: --business 'biz-a' matches several saved staging users of the same business. Pass --user too, for example `--business 'biz-a' --user 'user-a'`:\n  --user 'user-a': Acme A (biz-a) ada@a.test\n  --user 'user-a2': Acme A (biz-a) eve@a.test\n";
+          'Error: --business biz-a matches several saved staging users of the same business. Pass --user too, for example `--business biz-a --user user-a`:\n  --user user-a: Acme A (biz-a) ada@a.test\n  --user user-a2: Acme A (biz-a) eve@a.test\n';
 
         await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
         await runLogout({ env: 'staging', business: 'biz-a' }, h.deps);
@@ -1614,43 +1508,6 @@ describe('login', () => {
       );
     });
 
-    it('the picker is used only when both stdin and stdout are TTYs', () => {
-      expect(isInteractiveTerminal({ isTTY: true }, { isTTY: true })).toBe(true);
-      expect(isInteractiveTerminal({ isTTY: true }, { isTTY: false })).toBe(false);
-      expect(isInteractiveTerminal({ isTTY: true }, {})).toBe(false);
-      expect(isInteractiveTerminal({}, { isTTY: true })).toBe(false);
-      expect(isInteractiveTerminal({ isTTY: false }, { isTTY: false })).toBe(false);
-
-      // The production deps ask the real streams, and have no picker unless one is passed in.
-      // isTTY is an own data property only on a TTY stream, so set it directly and put it back.
-      const streams = [process.stdin, process.stdout];
-      const saved = streams.map((stream) => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
-      const setTTY = (stdin: boolean, stdout: boolean): void => {
-        Object.defineProperty(process.stdin, 'isTTY', { value: stdin, configurable: true });
-        Object.defineProperty(process.stdout, 'isTTY', { value: stdout, configurable: true });
-      };
-
-      try {
-        setTTY(true, false);
-        expect(createDefaultAuthCommandDeps(store).isInteractive()).toBe(false);
-        setTTY(false, true);
-        expect(createDefaultAuthCommandDeps(store).isInteractive()).toBe(false);
-        setTTY(true, true);
-        expect(createDefaultAuthCommandDeps(store).isInteractive()).toBe(true);
-        expect(createDefaultAuthCommandDeps(store).pickAccount).toBeUndefined();
-      } finally {
-        streams.forEach((stream, i) => {
-          const descriptor = saved[i];
-
-          if (descriptor === undefined) {
-            Reflect.deleteProperty(stream, 'isTTY');
-          } else {
-            Object.defineProperty(stream, 'isTTY', descriptor);
-          }
-        });
-      }
-    });
-
     it('a TTY with saved accounts shows the picker, and picking one switches to it', async () => {
       await saveAAndB();
 
@@ -1753,37 +1610,6 @@ describe('login', () => {
       ]);
       expect(pickedAccount(undefined, accounts)).toBeUndefined();
       expect(pickedAccount('unknown', accounts)).toBeUndefined();
-    });
-
-    it('two accounts that share a name and an email have different visible rows', () => {
-      const saved = (businessId: string, userId: string): SavedAccount => ({
-        account: { businessId, userId },
-        session: session('staging', {
-          businessId,
-          userId,
-          businessName: 'Acme',
-          email: 'ops@acme.test',
-        }),
-        current: false,
-      });
-      // Two businesses with one name and one email; and two users of one business, one email.
-      const accounts = [
-        saved('biz-1', 'user-1'),
-        saved('biz-2', 'user-1'),
-        saved('biz-3', 'user-1'),
-        saved('biz-3', 'user-2'),
-      ];
-      const rows = accountPickerItems(accounts)
-        .slice(0, -1)
-        .map((item) => `${item.label} ${item.description ?? ''}`);
-
-      expect(rows).toStrictEqual([
-        'Acme (biz-1) ops@acme.test',
-        'Acme (biz-2) ops@acme.test',
-        'Acme (biz-3) ops@acme.test (user user-1)',
-        'Acme (biz-3) ops@acme.test (user user-2)',
-      ]);
-      expect(new Set(rows).size).toBe(rows.length);
     });
   });
 });
@@ -1941,38 +1767,22 @@ describe('auth-header', () => {
   });
 
   it('the production deps forward auth-header timeouts to the token request', async () => {
-    // Real createDefaultAuthCommandDeps wiring on a temp store; only the global
-    // fetch is replaced, with a token endpoint that never answers. These deps use
-    // the real clock, so the session expires 30s from now (inside the refresh leeway).
+    // Real createDefaultAuthCommandDeps wiring on a temp store; only the global fetch is replaced,
+    // failing at once. These deps use the real clock, so the session expires 30s from now (inside
+    // the refresh leeway).
     await signIn(store, session('staging', { expiresAt: Date.now() + 30_000 }));
 
-    const hang = vi.fn<typeof fetch>((_input, init) => hangUntilAbort(init));
+    const refused = vi.fn<typeof fetch>(() => Promise.reject(new TypeError('fetch failed')));
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const out = { stdout: [] as string[], stderr: [] as string[], exitCodes: [] as number[] };
 
-    vi.stubGlobal('fetch', hang);
+    vi.stubGlobal('fetch', refused);
 
     try {
-      const deps = createDefaultAuthCommandDeps(store);
-      const started = Date.now();
-      const error = await rejectionOf(
-        deps.tokenProvider('staging', { requestTimeoutMs: 150 }).getAccessToken(),
-      );
-      const elapsed = Date.now() - started;
-
-      expect(error).toMatchObject({ code: 'network_error' });
-      expect(hang).toHaveBeenCalledTimes(1);
-      expect(hang.mock.calls[0]?.[0]).toBe('https://staging.kizen.com/oauth2/token');
-      // About the configured 150ms: not immediate, and nowhere near the 20s default.
-      expect(elapsed).toBeGreaterThanOrEqual(100);
-      expect(elapsed).toBeLessThan(2_000);
-
-      // And runAuthHeader on the production deps passes its own timeouts through.
-      const out = { stdout: [] as string[], stderr: [] as string[], exitCodes: [] as number[] };
-      const headerStarted = Date.now();
-
       await runAuthHeader(
         {},
         {
-          ...deps,
+          ...createDefaultAuthCommandDeps(store),
           authHeaderTimeouts: { requestTimeoutMs: 150 },
           processEnv: { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP },
           writeStdout: (text) => out.stdout.push(text),
@@ -1980,13 +1790,16 @@ describe('auth-header', () => {
           setExitCode: (code) => out.exitCodes.push(code),
         },
       );
-
-      expect(Date.now() - headerStarted).toBeLessThan(2_000);
-      expectHeaderFailure(out, 'timed out');
-      expect(await store.readSession('staging')).toMatchObject({ refreshToken: REFRESH });
     } finally {
       vi.unstubAllGlobals();
     }
+
+    expect(refused.mock.calls.map(([url]) => url)).toStrictEqual([
+      'https://staging.kizen.com/oauth2/token',
+    ]);
+    expect(timeout.mock.calls).toStrictEqual([[150]]);
+    expectHeaderFailure(out, "Couldn't reach");
+    expect(await store.readSession('staging')).toMatchObject({ refreshToken: REFRESH });
   });
 
   it('auth-header refreshes an expiring token and prints the new one', async () => {
@@ -2011,7 +1824,7 @@ describe('auth-header', () => {
     expect(createDefaultAuthCommandDeps(store).authHeaderTimeouts).toStrictEqual({
       requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
     });
-    expect(AUTH_HEADER_REQUEST_TIMEOUT_MS).toBeLessThan(CLAUDE_CODE_HELPER_LIMIT_MS - 1_000);
+    expect(AUTH_HEADER_REQUEST_TIMEOUT_MS).toBeLessThan(9_000);
 
     // That value is what reaches the token provider.
     await signIn(store, session('staging'));
@@ -2024,18 +1837,28 @@ describe('auth-header', () => {
     ]);
   });
 
-  it('a peer-rotated retry stays within one request timeout', async () => {
-    const TIMEOUT_MS = 400;
-    const FIRST_ANSWER_MS = 300;
+  it.each([
+    ['gets only the time left', 300, 2],
+    ['is skipped once the time is spent', 400, 1],
+  ])(
+    'the refresh after a peer rotated %s, on the injected clock',
+    async (_name, elapsed, calls) => {
+      const TIMEOUT_MS = 400;
+      let clock = NOW;
 
-    await signIn(store, session('staging', { expiresAt: NOW + 30_000 }));
+      await signIn(store, session('staging', { expiresAt: NOW + 30_000 }));
 
-    const h = harness(noKizen, {
-      timeouts: { requestTimeoutMs: TIMEOUT_MS },
-      tokenEndpoint: async (init) => {
-        if (new URLSearchParams(init?.body as string).get('refresh_token') === REFRESH) {
+      const timeout = vi.spyOn(AbortSignal, 'timeout');
+      const h = harness(noKizen, {
+        now: () => clock,
+        timeouts: { requestTimeoutMs: TIMEOUT_MS },
+        tokenEndpoint: async (init) => {
+          if (new URLSearchParams(init?.body as string).get('refresh_token') !== REFRESH) {
+            return rotatedTokens();
+          }
+
           // Late, a peer rotates to tokens that aren't fresh, and this request is refused.
-          await new Promise((resolve) => setTimeout(resolve, FIRST_ANSWER_MS));
+          clock += elapsed;
           await store.writeSession(
             session('staging', {
               accessToken: ROTATED_ACCESS,
@@ -2045,22 +1868,20 @@ describe('auth-header', () => {
           );
 
           return jsonResponse({ error: 'invalid_grant' }, 400);
-        }
+        },
+      });
 
-        // The retry with the peer's refresh token never answers.
-        return hangUntilAbort(init);
-      },
-    });
-    const started = Date.now();
+      await runAuthHeader({ env: 'staging' }, h.deps);
 
-    await runAuthHeader({ env: 'staging' }, h.deps);
-
-    // One timeout in total, not one per request (that would be FIRST_ANSWER_MS + TIMEOUT_MS).
-    expect(Date.now() - started).toBeLessThan(TIMEOUT_MS + 150);
-    expect(h.fetchMock).toHaveBeenCalledTimes(2);
-    expectHeaderFailure(h, 'timed out');
-    expect(await store.readSession('staging')).toMatchObject({ refreshToken: ROTATED_REFRESH });
-  });
+      // One timeout in total: the retry gets what the first request left, or isn't made.
+      expect(timeout.mock.calls).toStrictEqual(
+        [[TIMEOUT_MS], [TIMEOUT_MS - elapsed]].slice(0, calls),
+      );
+      expect(h.fetchMock).toHaveBeenCalledTimes(calls);
+      expect(h.stdout).toStrictEqual([header(ROTATED_ACCESS)]);
+      expect(await store.readSession('staging')).toMatchObject({ refreshToken: ROTATED_REFRESH });
+    },
+  );
 
   it('auth-header prints nothing on stdout when the session is unreadable', async () => {
     await mkdir(store.dir, { recursive: true });

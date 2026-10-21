@@ -18,12 +18,6 @@ export const TOKEN_ENDPOINT = `${ISSUER}/discovered/token`;
 export const ACCOUNT_A: OAuthAccount = { businessId: 'biz-a', userId: 'user-a' };
 export const ACCOUNT_B: OAuthAccount = { businessId: 'biz-b', userId: 'user-b' };
 
-/** `{ businessId, userId }` of a session, as the store's pointer holds it. */
-export const accountOf = ({ businessId, userId }: OAuthAccount): OAuthAccount => ({
-  businessId,
-  userId,
-});
-
 /** A stored staging session for account A, fresh for an hour at `NOW`; override what a test needs. */
 export const oauthSession = (overrides: Partial<OAuthSession> = {}): OAuthSession => ({
   environment: 'staging',
@@ -44,7 +38,7 @@ export const oauthSession = (overrides: Partial<OAuthSession> = {}): OAuthSessio
 /** Stores `session` and makes its account current for its environment, as `login` does. */
 export const signIn = async (store: OAuthStore, session: OAuthSession): Promise<void> => {
   await store.writeSession(session);
-  await store.setCurrent(session.environment, accountOf(session));
+  await store.setCurrent(session.environment, session);
 };
 
 export const jsonResponse = (body: unknown, status = 200): Response =>

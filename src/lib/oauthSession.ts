@@ -79,6 +79,9 @@ const issuedTokenProvider = (
     Promise.reject(loginRequired(environment, `Kizen rejected the new ${environment} sign-in.`)),
 });
 
+const notSignedIn = (environment: Environment): OAuthError =>
+  loginRequired(environment, `You're not signed in to ${environment}.`);
+
 const labelsOf = (
   identity: KizenIdentity,
 ): Pick<OAuthSession, 'businessName' | 'fullName' | 'email'> => ({
@@ -251,7 +254,7 @@ export async function login(
   if (options.makeCurrent !== undefined && !options.makeCurrent(identity)) {
     // Saved only. Read back like the pointer case, so a removal meanwhile isn't reported as saved.
     if ((await deps.store.readAccount(environment, account)) === null) {
-      throw loginRequired(environment, `You're not signed in to ${environment}.`);
+      throw notSignedIn(environment);
     }
 
     return session;
@@ -262,7 +265,7 @@ export async function login(
   // Read back through the pointer, so a session file removed in between (a logout of this
   // account in another terminal) fails here instead of reporting a sign-in that isn't there.
   if ((await deps.store.readSession(environment)) === null) {
-    throw loginRequired(environment, `You're not signed in to ${environment}.`);
+    throw notSignedIn(environment);
   }
 
   return session;
@@ -313,28 +316,12 @@ export async function switchAccount(
     );
   }
 
-  // Refresh the labels from the live identity, so a rename on the server shows up in --list and
-  // the picker. Only this account's file is written, and only when a label changed. Accepted
-  // window: a peer's token rotation landing between this read and the write is overwritten,
-  // like a same-account refresh write (within Kizen's grace window the old pair still works).
-  const stored = await deps.store.readAccount(environment, account);
-  const labels = labelsOf(identity);
-
-  if (
-    stored !== null &&
-    (stored.businessName !== labels.businessName ||
-      stored.fullName !== labels.fullName ||
-      stored.email !== labels.email)
-  ) {
-    await deps.store.writeSession({ ...stored, ...labels });
-  }
-
   await deps.store.setCurrent(environment, account);
 
   const current = await deps.store.readSession(environment);
 
   if (current === null) {
-    throw loginRequired(environment, `You're not signed in to ${environment}.`);
+    throw notSignedIn(environment);
   }
 
   return current;
@@ -393,7 +380,7 @@ export function createTokenProvider(
         : await deps.store.readAccount(environment, deps.account);
 
     if (session === null) {
-      throw loginRequired(environment, `You're not signed in to ${environment}.`);
+      throw notSignedIn(environment);
     }
 
     pinned ??= { businessId: session.businessId, userId: session.userId };
@@ -409,7 +396,7 @@ export function createTokenProvider(
   };
 
   /**
-   * `deadline` (wall clock) is set only on the retry after a peer's rotation, which runs at most
+   * `deadline` (on `deps.now`) is set only on the retry after a peer's rotation, which runs at most
    * once and shares the first request's timeout, so a refresh never waits longer than one timeout.
    */
   const doRefresh = async (rejected: string, deadline?: number): Promise<string> => {
@@ -419,7 +406,7 @@ export function createTokenProvider(
       return current.accessToken;
     }
 
-    const until = deadline ?? Date.now() + (deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+    const until = deadline ?? deps.now() + (deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 
     /** Re-reads through the pin: the stored session, and whether a peer rotated it since. */
     const reread = async (): Promise<{ stored: OAuthSession; rotated: boolean }> => {
@@ -436,7 +423,7 @@ export function createTokenProvider(
       throw loginRequired(environment, `The ${environment} session has expired.`);
     }
 
-    const remainingMs = until - Date.now();
+    const remainingMs = until - deps.now();
 
     // Out of time for the retry: the peer's token as it is.
     if (remainingMs <= 0) {
@@ -465,7 +452,7 @@ export function createTokenProvider(
 
         // A peer spent this refresh token first: use what it stored.
         if (rotated) {
-          return fresh(stored) || deadline !== undefined || until <= Date.now()
+          return fresh(stored) || deadline !== undefined || until <= deps.now()
             ? stored.accessToken
             : doRefresh(stored.accessToken, until);
         }

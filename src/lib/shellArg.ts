@@ -1,3 +1,3 @@
-/** `arg` as one pasteable shell argument: bare when it's plain, else JSON-quoted (escapes newlines too). */
+/** `arg` as one POSIX shell word: bare when it's plain (not a zsh `=cmd`), else single-quoted so nothing in it expands. */
 export const quoteArg = (arg: string): string =>
-  /^[\w./:@=-]+$/.test(arg) ? arg : JSON.stringify(arg);
+  /^[\w@%+:,./-][\w@%+=:,./-]*$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;

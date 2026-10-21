@@ -1,34 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { escapeHtml, renderCallbackPage } from './callbackPage.js';
+import { renderCallbackPage } from './callbackPage.js';
 
 /** Every absolute URL in the page except the SVG namespace, which is an identifier, not a fetch. */
 const remoteReferences = (html: string): string[] =>
   (html.match(/https?:\/\/[^\s"')]+/g) ?? []).filter((url) => url !== 'http://www.w3.org/2000/svg');
 
 describe('renderCallbackPage', () => {
-  it.each([
-    ['success', 'You’re signed in', 'Sign-in complete. You can close this window.'],
-    [
-      'error',
-      'Sign-in failed',
-      'Sign-in failed. Return to the terminal for details. You can close this window.',
-    ],
-    [
-      'error',
-      'Outdated link',
-      'This sign-in link is out of date. Use the latest link from the terminal.',
-    ],
-  ] as const)('%s page renders heading %j and its body', (kind, heading, body) => {
-    const html = renderCallbackPage(kind, heading, body);
-
-    expect(html).toContain(`<h1>${heading}</h1>`);
-    expect(html).toContain(`<p>${body}</p>`);
-    expect(html).toContain('<title>Kizen App Builder</title>');
-    expect(html).toContain('<html lang="en">');
-    expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
-    expect(html).toContain('aria-label="Kizen"');
-  });
-
   it('marks the card with the success or error styling hook', () => {
     const success = renderCallbackPage('success', 'h', 'b');
     const error = renderCallbackPage('error', 'h', 'b');
@@ -52,14 +29,6 @@ describe('renderCallbackPage', () => {
     }
   });
 
-  it('wordmark clip id is the one the clip-path references', () => {
-    const html = renderCallbackPage('success', 'h', 'b');
-
-    expect(html).toContain('<clipPath id="kizen-callback-wordmark-clip">');
-    expect(html).toContain('clip-path="url(#kizen-callback-wordmark-clip)"');
-    expect(html).not.toContain('clip0_7190_510154');
-  });
-
   it('escapes heading and body so they cannot inject markup', () => {
     const html = renderCallbackPage(
       'error',
@@ -73,15 +42,5 @@ describe('renderCallbackPage', () => {
     expect(html).toContain(
       '<p>a &amp; b &quot;c&quot; &#39;d&#39; &lt;/p&gt;&lt;script&gt;x&lt;/script&gt;</p>',
     );
-  });
-});
-
-describe('escapeHtml', () => {
-  it('leaves plain text unchanged and escapes each special character once', () => {
-    expect(escapeHtml('Sign-in complete. You can close this window.')).toBe(
-      'Sign-in complete. You can close this window.',
-    );
-    expect(escapeHtml('&amp;')).toBe('&amp;amp;');
-    expect(escapeHtml(`<>&"'`)).toBe('&lt;&gt;&amp;&quot;&#39;');
   });
 });

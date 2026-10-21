@@ -16,6 +16,7 @@ import {
 } from './managedFiles.js';
 import { DEFAULT_LOGIN_ENVIRONMENT, loginCommandFor } from './oauth.js';
 import { createOAuthStore } from './oauthStore.js';
+import { quoteArg } from './shellArg.js';
 
 export const CLAUDE_SKILL_PATH = '.claude/skills/kizen-custom-block/SKILL.md';
 
@@ -201,9 +202,6 @@ interface McpServerPlan {
   addCommand: string;
 }
 
-const shellQuote = (arg: string): string =>
-  /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
-
 export function mcpServerPlan(environment: Environment, cliVersion: string): McpServerPlan {
   const name = `kizen-${environment}`;
   const url = `${apiOriginFor(environment)}/api/mcp`;
@@ -221,7 +219,7 @@ export function mcpServerPlan(environment: Environment, cliVersion: string): Mcp
     name,
     url,
     addArgs,
-    addCommand: ['claude', ...addArgs].map(shellQuote).join(' '),
+    addCommand: ['claude', ...addArgs].map(quoteArg).join(' '),
   };
 }
 

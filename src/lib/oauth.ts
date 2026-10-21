@@ -322,32 +322,21 @@ const respond = (res: ServerResponse, status: number, page: CallbackPage): void 
     .end(renderCallbackPage(page.kind, page.heading, page.text));
 };
 
-const CALLBACK_SUCCESS_TEXT = 'Sign-in complete. You can close this window.';
-const CALLBACK_FAILURE_TEXT =
-  'Sign-in failed. Return to the terminal for details. You can close this window.';
-
-export const CALLBACK_WRONG_STATE_TEXT =
-  'This sign-in link is out of date. Use the latest link from the terminal.';
-
-export const CALLBACK_SUCCESS_HEADING = 'You’re signed in';
-export const CALLBACK_FAILURE_HEADING = 'Sign-in failed';
-export const CALLBACK_WRONG_STATE_HEADING = 'Outdated link';
-
 // Constants only: nothing from the request reaches the page.
-const CALLBACK_SUCCESS: CallbackPage = {
+export const CALLBACK_SUCCESS: CallbackPage = {
   kind: 'success',
-  heading: CALLBACK_SUCCESS_HEADING,
-  text: CALLBACK_SUCCESS_TEXT,
+  heading: 'You’re signed in',
+  text: 'Sign-in complete. You can close this window.',
 };
-const CALLBACK_FAILURE: CallbackPage = {
+export const CALLBACK_FAILURE: CallbackPage = {
   kind: 'error',
-  heading: CALLBACK_FAILURE_HEADING,
-  text: CALLBACK_FAILURE_TEXT,
+  heading: 'Sign-in failed',
+  text: 'Sign-in failed. Return to the terminal for details. You can close this window.',
 };
-const CALLBACK_WRONG_STATE: CallbackPage = {
+export const CALLBACK_WRONG_STATE: CallbackPage = {
   kind: 'error',
-  heading: CALLBACK_WRONG_STATE_HEADING,
-  text: CALLBACK_WRONG_STATE_TEXT,
+  heading: 'Outdated link',
+  text: 'This sign-in link is out of date. Use the latest link from the terminal.',
 };
 
 /** The request target as a URL, or undefined when it doesn't parse. */

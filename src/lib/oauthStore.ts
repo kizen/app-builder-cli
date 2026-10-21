@@ -14,7 +14,9 @@
  *
  * Nothing is locked: every write is an atomic rename. A refresh only ever writes or deletes its
  * own account's file, and only login, a switch and logout move the pointer, so a refresh racing a
- * logout or a switch to another account can't undo it (see `createTokenProvider`).
+ * logout or a switch to another account can't undo it (see `createTokenProvider`). Accepted: a
+ * logout racing a sign-in to the same account can delete that sign-in's new session file, leaving
+ * the account signed out.
  */
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
@@ -164,15 +166,7 @@ export const accountKey = (account: OAuthAccount): string => {
     throw new Error('Refusing a session file name built from an invalid account id.');
   }
 
-  const key = `${encodeId(account.businessId)}.${encodeId(account.userId)}`;
-
-  // Redundant with the check above (hex never produces anything else), kept so no path is
-  // ever built from a key that isn't exactly two encoded segments.
-  if (!key.split('.').every((segment) => ENCODED_ID.test(segment))) {
-    throw new Error('Refusing a session file name built from an invalid account id.');
-  }
-
-  return key;
+  return `${encodeId(account.businessId)}.${encodeId(account.userId)}`;
 };
 
 /** The pointer's account; undefined unless the file is exactly `{ businessId, userId }`. */
@@ -185,8 +179,8 @@ function parsePointer(text: string): OAuthAccount | undefined {
     return undefined;
   }
 
-  // Exactly these two keys, so a whole session or a pointer from an earlier build (`{ loginId }`)
-  // is unreadable rather than a pointer to a file that was never written.
+  // Exactly these two keys, so a whole session written to the pointer is unreadable rather than
+  // a pointer to a file that was never written.
   return isRecord(raw) && Object.keys(raw).length === 2 ? validAccount(raw) : undefined;
 }
 
@@ -224,9 +218,6 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
     scope: optionalString(raw.scope),
   };
 }
-
-/** `randomUUID()` shape: the per-login session files of earlier unreleased builds. */
-const LEGACY_LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** @param baseDir the credentials directory; `oauth/` is created inside it. */
 export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAuthStore {
@@ -292,31 +283,19 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     });
 
   /**
-   * Best effort, on login, switch and logout: deletes `<env>.<uuid>.json` session files left by
-   * earlier unreleased builds (nothing reads them any more, and they hold live refresh tokens),
-   * and `<env>.json.<hex>.signout` pointers a crash left mid-logout once they're old enough.
-   * Only names matching those fixed patterns reach `join`.
+   * Best effort, on login, switch and logout: deletes `<env>.json.<hex>.signout` pointers a crash
+   * left mid-logout once they're old enough. Only names matching that fixed pattern reach `join`.
    */
   const cleanUp = async (environment: Environment): Promise<void> => {
     try {
-      const prefix = `${environment}.`;
       const signout = new RegExp(`^${environment}\\.json\\.[0-9a-f]{12}\\.signout$`);
 
-      for (const name of await listNames()) {
-        const legacy =
-          name.startsWith(prefix) &&
-          name.endsWith('.json') &&
-          LEGACY_LOGIN_ID.test(name.slice(prefix.length, -'.json'.length));
+      for (const name of (await listNames()).filter((name) => signout.test(name))) {
+        const path = join(dir, name);
+        const stats = await ifExists(stat(path));
 
-        if (legacy) {
-          await ifExists(unlink(join(dir, name)));
-        } else if (signout.test(name)) {
-          const path = join(dir, name);
-          const stats = await ifExists(stat(path));
-
-          if (stats !== undefined && Date.now() - stats.mtimeMs > SIGNOUT_MAX_AGE_MS) {
-            await ifExists(unlink(path));
-          }
+        if (stats !== undefined && Date.now() - stats.mtimeMs > SIGNOUT_MAX_AGE_MS) {
+          await ifExists(unlink(path));
         }
       }
     } catch {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,7 +19,6 @@ import { accountKey, createOAuthStore, type OAuthSession, type OAuthStore } from
 import {
   ACCOUNT_A,
   ACCOUNT_B,
-  accountOf,
   deferred,
   hangUntilAbort,
   holdingStore,
@@ -321,7 +320,7 @@ describe('login', () => {
       loginDeps(fakeAuthServer(), fakeBrowser(approve), [], traversal),
     );
 
-    expect(accountOf(saved)).toStrictEqual(accountOf(traversal));
+    expect(saved).toMatchObject({ businessId: '../../x', userId: '/etc/passwd' });
     expect((await readdir(store.dir)).sort()).toStrictEqual([
       'clients.json',
       `staging.${accountKey(traversal)}.json`,
@@ -348,7 +347,7 @@ describe('login', () => {
   });
 
   it('re-login to the same account overwrites its file and leaves no second file', async () => {
-    const first = await login(
+    await login(
       'staging',
       loginDeps(
         fakeAuthServer(() => jsonResponse(tokenBody(1))),
@@ -365,9 +364,12 @@ describe('login', () => {
       ),
     );
 
-    expect(accountOf(first)).toStrictEqual(accountOf(second));
     expect(await store.readSession('staging')).toStrictEqual(second);
-    expect(second).toMatchObject({ accessToken: 'access-2', businessName: 'Acme Renamed' });
+    expect(second).toMatchObject({
+      ...ACCOUNT_A,
+      accessToken: 'access-2',
+      businessName: 'Acme Renamed',
+    });
     expect((await readdir(store.dir)).sort()).toStrictEqual([
       'clients.json',
       `staging.${accountKey(ACCOUNT_A)}.json`,
@@ -1595,19 +1597,6 @@ describe('createTokenProvider', () => {
       accessToken: 'access-2',
       refreshToken: 'refresh-2',
     });
-  });
-
-  it('a whole session in the pointer file (an earlier build) reads as unreadable and asks to log in', async () => {
-    await mkdir(store.dir, { recursive: true });
-    await writeFile(store.sessionPath('staging'), JSON.stringify(oauthSession()));
-
-    const server = fakeAuthServer();
-    const error = await rejectionOf(provider(server).getAccessToken());
-
-    expect(error.code).toBe('login_required');
-    expect(error.message).toContain("can't be read");
-    expect(error.message).toContain('appbuilder login --env staging');
-    expect(server.fetch).not.toHaveBeenCalled();
   });
 
   it('concurrent first reads pin one account', async () => {

@@ -130,7 +130,7 @@ const HTML_ESCAPES: Record<string, string> = {
 };
 
 /** Escapes text for an HTML text node or a quoted attribute value. */
-export const escapeHtml = (text: string): string =>
+const escapeHtml = (text: string): string =>
   text.replace(/[&<>"']/g, (char) => HTML_ESCAPES[char] ?? char);
 
 /**

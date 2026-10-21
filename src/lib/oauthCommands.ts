@@ -30,13 +30,13 @@ import {
   type OAuthStore,
   type SavedAccount,
 } from './oauthStore.js';
+import { quoteArg } from './shellArg.js';
 
 /**
  * Claude Code kills a `headersHelper` after 10s. auth-header's worst case is one
  * `requestTimeoutMs` of token requests in total (a retry after a peer's rotation gets only what's
  * left of it) plus local file I/O, and must stay under the limit with room for start-up.
  */
-export const CLAUDE_CODE_HELPER_LIMIT_MS = 10_000;
 export const AUTH_HEADER_REQUEST_TIMEOUT_MS = 5_000;
 
 /** One row of the account picker; the same shape as the ink `SelectList`'s items. */
@@ -66,11 +66,12 @@ export interface AuthCommandDeps {
   setExitCode: (code: number) => void;
 }
 
-/** Both streams must be terminals for a prompt: a piped stdout means a script is reading it. */
-export const isInteractiveTerminal = (
-  stdin: { isTTY?: boolean },
-  stdout: { isTTY?: boolean },
-): boolean => stdin.isTTY === true && stdout.isTTY === true;
+/**
+ * Both streams must be terminals for a prompt: a piped stdout means a script is reading it. Node
+ * types `isTTY` as boolean, but it's undefined on a stream that isn't a TTY.
+ */
+const isInteractiveTerminal = (stdin: { isTTY?: boolean }, stdout: { isTTY?: boolean }): boolean =>
+  stdin.isTTY === true && stdout.isTTY === true;
 
 export function createDefaultAuthCommandDeps(
   store: OAuthStore = createOAuthStore(),
@@ -135,17 +136,18 @@ async function sessionEnvironment(
   return resolved.environment;
 }
 
+/** `<name> (<id>)`, or just the id when the business has no name. */
+const businessLabel = (name: string | undefined, id: string): string =>
+  name ? `${name} (${id})` : id;
+
 const identityLines = (environment: Environment, identity: KizenIdentity): string => {
   const who = [identity.fullName, identity.email && `<${identity.email}>`]
     .filter(Boolean)
     .join(' ');
-  const business = identity.businessName
-    ? `${identity.businessName} (${identity.businessId})`
-    : identity.businessId;
 
   return `Environment: ${environment}
 User: ${who === '' ? identity.userId : `${who} (${identity.userId})`}
-Business: ${business}
+Business: ${businessLabel(identity.businessName, identity.businessId)}
 `;
 };
 
@@ -205,53 +207,27 @@ const signedInOutput = (deps: AuthCommandDeps, session: OAuthSession): void => {
 export const BROWSER_PICK = 'browser';
 
 /** A saved account as one short line: business name and id, then email or user id. */
-export const accountSummary = ({ account, session }: SavedAccount): string => {
-  const business = session?.businessName
-    ? `${session.businessName} (${account.businessId})`
-    : account.businessId;
-  const who = session?.email ?? `user ${account.userId}`;
-
-  return `${business} ${who}${session === undefined ? " (can't be read)" : ''}`;
-};
+const accountSummary = ({ account, session }: SavedAccount): string =>
+  `${businessLabel(session?.businessName, account.businessId)} ${session?.email ?? `user ${account.userId}`}${session === undefined ? " (can't be read)" : ''}`;
 
 /**
  * The picker's rows: each saved account, labeled by business name and id and described by email
- * (or user id), then the browser. Rows that would still look the same (same name, id and email)
- * also show the user id, so no two rows are identical.
+ * (or user id), then the browser.
  */
-export const accountPickerItems = (accounts: readonly SavedAccount[]): PickerItem[] => {
-  const base = accounts.map(({ account, session }) => ({
-    label: session?.businessName
-      ? `${session.businessName} (${account.businessId})`
-      : account.businessId,
-    who: session?.email ?? account.userId,
-  }));
-  const seen = (row: { label: string; who: string }): number =>
-    base.filter((other) => other.label === row.label && other.who === row.who).length;
-
-  return [
-    ...accounts.map(({ account, session, current }, i) => {
-      const row = base[i] ?? { label: account.businessId, who: account.userId };
-      const who =
-        seen(row) > 1 && row.who !== account.userId
-          ? `${row.who} (user ${account.userId})`
-          : row.who;
-
-      return {
-        key: accountKey(account),
-        label: row.label,
-        description: [
-          who,
-          session === undefined ? "(can't be read)" : '',
-          current ? '(current)' : '',
-        ]
-          .filter(Boolean)
-          .join(' '),
-      };
-    }),
-    { key: BROWSER_PICK, label: 'Sign in with the browser' },
-  ];
-};
+export const accountPickerItems = (accounts: readonly SavedAccount[]): PickerItem[] => [
+  ...accounts.map(({ account, session, current }) => ({
+    key: accountKey(account),
+    label: businessLabel(session?.businessName, account.businessId),
+    description: [
+      session?.email ?? account.userId,
+      session === undefined ? "(can't be read)" : '',
+      current ? '(current)' : '',
+    ]
+      .filter(Boolean)
+      .join(' '),
+  })),
+  { key: BROWSER_PICK, label: 'Sign in with the browser' },
+];
 
 /** What a picked key means: a saved account, the browser sign-in, or undefined (cancelled). */
 export const pickedAccount = (
@@ -260,12 +236,12 @@ export const pickedAccount = (
 ): SavedAccount | typeof BROWSER_PICK | undefined =>
   key === BROWSER_PICK ? BROWSER_PICK : accounts.find(({ account }) => accountKey(account) === key);
 
-export type BusinessMatch =
+type BusinessMatch =
   | { kind: 'one'; account: SavedAccount }
   | { kind: 'none' | 'several'; candidates: SavedAccount[] };
 
 /** What `--business` (and `--user`) ask for. */
-export interface BusinessRequest {
+interface BusinessRequest {
   business: string;
   user?: string | undefined;
 }
@@ -276,7 +252,7 @@ export interface BusinessRequest {
  * its businessName matches it ignoring case; and its userId is exactly `--user`, when given. The
  * retry printed after an expired account pins its business id and user id.
  */
-export const matchesRequest = (
+const matchesRequest = (
   identity: Pick<KizenIdentity, 'businessId' | 'userId' | 'businessName'>,
   { business, user }: BusinessRequest,
 ): boolean =>
@@ -317,24 +293,20 @@ export function matchBusiness(
 const candidateLines = (candidates: readonly SavedAccount[]): string =>
   candidates.map((candidate) => `\n  ${accountSummary(candidate)}`).join('');
 
-/**
- * `value` as one POSIX shell word: single-quoted, with each `'` written as `'\''`, so nothing in
- * it (`$`, backticks, `!`, spaces) is expanded when a printed command is pasted into a shell.
- */
-export const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
-/** `--business '<q>'`, plus ` --user '<id>'` when given, as the flags to repeat. */
+/** `--business <q>`, plus ` --user <id>` when given, shell-quoted, as the flags to repeat. */
 const requestFlags = ({ business, user }: BusinessRequest): string =>
-  `--business ${shellQuote(business)}${user === undefined ? '' : ` --user ${shellQuote(user)}`}`;
+  `--business ${quoteArg(business)}${user === undefined ? '' : ` --user ${quoteArg(user)}`}`;
 
-/** The one saved account `--business` names; several or none is a usage error listing them. */
+/**
+ * The one saved account `--business` names; several or none is a usage error listing them. Pass
+ * `match` when the caller already ran `matchBusiness`.
+ */
 function requireBusiness(
   environment: Environment,
   accounts: readonly SavedAccount[],
   request: BusinessRequest,
+  match = matchBusiness(accounts, request.business, request.user),
 ): SavedAccount {
-  const match = matchBusiness(accounts, request.business, request.user);
-
   if (match.kind === 'one') {
     return match.account;
   }
@@ -358,7 +330,7 @@ function requireBusiness(
       `${flags} matches several saved ${environment} users of the same business. Pass --user too, for example \`${requestFlags({ business: first.account.businessId, user: first.account.userId })}\`:${match.candidates
         .map(
           (candidate) =>
-            `\n  --user ${shellQuote(candidate.account.userId)}: ${accountSummary(candidate)}`,
+            `\n  --user ${quoteArg(candidate.account.userId)}: ${accountSummary(candidate)}`,
         )
         .join('')}`,
     );
@@ -423,14 +395,14 @@ async function chooseAccount(
   if (options.business !== undefined) {
     const request = { business: options.business, user: options.user };
 
+    const match = matchBusiness(accounts, request.business, request.user);
+
     // No saved account matches: the browser, with guidance an agent can relay, whatever else is
     // saved. That's also how a printed retry after a mismatched sign-in gets back here. Several
     // matches stay a usage error that lists them.
-    if (matchBusiness(accounts, request.business, request.user).kind === 'none') {
-      return { kind: 'not_saved', request };
-    }
-
-    return requireBusiness(environment, accounts, request);
+    return match.kind === 'none'
+      ? { kind: 'not_saved', request }
+      : requireBusiness(environment, accounts, request, match);
   }
 
   if (accounts.length === 0) {
@@ -468,9 +440,11 @@ function browserGuidance(
       : `There's no saved ${environment} account for ${JSON.stringify(reason.request.business)}${reason.request.user === undefined ? '' : ` with user ${JSON.stringify(reason.request.user)}`}.`;
   const business =
     reason.kind === 'expired'
-      ? reason.account.session?.businessName !== undefined
-        ? `"${reason.account.session.businessName}" (${reason.account.account.businessId})`
-        : reason.account.account.businessId
+      ? businessLabel(
+          reason.account.session?.businessName &&
+            JSON.stringify(reason.account.session.businessName),
+          reason.account.account.businessId,
+        )
       : JSON.stringify(reason.request.business);
   const user =
     reason.kind === 'expired'
@@ -626,7 +600,11 @@ export const runLogout = guarded<LogoutCommandOptions>(async (options, deps) => 
 
   const resolved = await resolveSessionEnvironment(options.env, () => deps.store.listSessions());
 
-  if (!resolved.ok && resolved.problem === 'not_signed_in') {
+  if (!resolved.ok) {
+    if (resolved.problem !== 'not_signed_in') {
+      throw new Error(resolved.message);
+    }
+
     // Saved accounts that aren't current don't make an environment "signed in", so only --env
     // can name the one whose saved accounts to remove.
     if (options.business !== undefined) {
@@ -635,12 +613,6 @@ export const runLogout = guarded<LogoutCommandOptions>(async (options, deps) => 
 
     if (options.all === true) {
       throw new Error('Pass --env <env> with --all to remove every saved account.');
-    }
-  }
-
-  if (!resolved.ok) {
-    if (resolved.problem !== 'not_signed_in') {
-      throw new Error(resolved.message);
     }
 
     deps.writeStdout('Not signed in.\n');

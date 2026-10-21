@@ -6,8 +6,9 @@
  * file is never read. Signed out, they fall back to the API-key `credentials.json`, as before.
  */
 
-import { isEnvironment, type Credentials, type Environment } from './credentials.js';
+import type { Credentials, Environment } from './credentials.js';
 import type { HeadlessDefaults } from './createHeadless.js';
+import { resolveSessionEnvironment } from './oauthSession.js';
 
 export interface CreateDefaultsDeps {
   /** Environments with a sign-in session. */
@@ -15,7 +16,11 @@ export interface CreateDefaultsDeps {
   /** The environment's current session; may throw for an unreadable one. */
   readSession: (environment: Environment) => Promise<{ businessId: string } | null>;
   loadGlobalCredentials: () => Promise<Credentials | null>;
-  /** The raw `-e, --environment` value. An invalid one is ignored here; createHeadless rejects it. */
+  /**
+   * The raw `-e, --environment` value, trimmed and blank meaning absent as createHeadless reads it.
+   * Signed in, an invalid one (or several sessions and no -e) defaults to go; createHeadless
+   * rejects an invalid one.
+   */
   requestedEnvironment?: string;
 }
 
@@ -31,10 +36,11 @@ export async function resolveCreateDefaults(deps: CreateDefaultsDeps): Promise<H
     };
   }
 
-  const requested = deps.requestedEnvironment?.trim();
-  const environment: Environment = isEnvironment(requested)
-    ? requested
-    : ((signedIn.length === 1 ? signedIn[0] : undefined) ?? 'go');
+  const resolved = await resolveSessionEnvironment(
+    deps.requestedEnvironment?.trim() || undefined,
+    () => Promise.resolve(signedIn),
+  );
+  const environment = resolved.ok ? resolved.environment : 'go';
 
   const session = await deps.readSession(environment).catch(() => null);
 

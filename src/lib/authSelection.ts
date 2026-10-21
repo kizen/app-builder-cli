@@ -25,7 +25,7 @@ export type AuthSelectionResult =
   | { ok: true; selection: AuthSelection }
   | { ok: false; message: string };
 
-export const API_KEY_FLAGS_HINT =
+const API_KEY_FLAGS_HINT =
   'To use an API key instead (deprecated), pass --profile <name> or -c <path>.';
 
 export function selectAuth(flags: AuthFlags): AuthSelectionResult {
@@ -56,9 +56,12 @@ export function selectAuth(flags: AuthFlags): AuthSelectionResult {
   };
 }
 
-/** The notice for a `.kizenapp/config.json` profile pin, which no longer opts into API keys. */
+/**
+ * The notice for a `.kizenapp/config.json` profile pin, which no longer opts into API keys. The
+ * profile comes from the repo, so a name with control characters is only shown JSON-escaped.
+ */
 export const pinnedProfileNotice = (profile: string): string =>
-  `Ignoring the API-key profile ${JSON.stringify(profile)} pinned in .kizenapp/config.json and using your sign-in session. Pass --profile ${quoteArg(profile)} to use the API key.`;
+  `Ignoring the API-key profile ${JSON.stringify(profile)} pinned in .kizenapp/config.json and using your sign-in session.${/[\x00-\x1f\x7f]/.test(profile) ? '' : ` Pass --profile ${quoteArg(profile)} to use the API key.`}`;
 
 export const notSignedInWithApiKeyHint = (notSignedInMessage: string): string =>
   `${notSignedInMessage} ${API_KEY_FLAGS_HINT}`;
