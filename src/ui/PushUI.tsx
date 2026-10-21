@@ -59,6 +59,8 @@ interface ErrorView {
 
 interface Session {
   credentials: PushAccount | null;
+  /** Notices about how the command signed in, such as an ignored profile pin. */
+  credentialNotices: string[];
   warnings: ValidationIssue[];
   notices: string[];
 }
@@ -70,7 +72,7 @@ interface Resolving {
 
 type Phase =
   | { type: 'loading'; label: string }
-  | { type: 'profile-select'; options: PushCommandOptions; choices: PushChoice[] }
+  | { type: 'environment-select'; options: PushCommandOptions; choices: PushChoice[] }
   | { type: 'packaging' }
   | {
       type: 'block-select';
@@ -192,14 +194,18 @@ function withTarget(
   return isCreateChoice(choice) ? { ...next, create: true } : { ...next, dashlet: choice.value };
 }
 
-function createPushFlow(
+/** The push flow behind PushUI's phases; exported for tests. */
+export function createPushFlow(
   apiName: string | undefined,
   deps: PushDeps,
   setPhase: Setter<Phase>,
   setSession: Setter<Session>,
 ): {
   start: (options: PushCommandOptions) => void;
-  pickProfile: (phase: Extract<Phase, { type: 'profile-select' }>, choice: PushChoice) => void;
+  pickEnvironment: (
+    phase: Extract<Phase, { type: 'environment-select' }>,
+    choice: PushChoice,
+  ) => void;
   pickBlock: (phase: Extract<Phase, { type: 'block-select' }>, choice: PushChoice) => void;
   pickSurface: (phase: Extract<Phase, { type: 'surface-select' }>, surface: Surface) => void;
   pickObject: (
@@ -385,8 +391,8 @@ function createPushFlow(
     const step = await resolveCredentials(options, deps);
 
     if (!step.ok) {
-      if (step.choice === 'profile' && step.choices) {
-        setPhase({ type: 'profile-select', options, choices: step.choices });
+      if (step.choice === 'environment' && step.choices) {
+        setPhase({ type: 'environment-select', options, choices: step.choices });
 
         return;
       }
@@ -396,7 +402,11 @@ function createPushFlow(
       return;
     }
 
-    setSession((session) => ({ ...session, credentials: step.value.credentials }));
+    setSession((session) => ({
+      ...session,
+      credentials: step.value.credentials,
+      credentialNotices: step.value.notices,
+    }));
     await packageBlock(options, step.value, apiName);
   };
 
@@ -441,8 +451,8 @@ function createPushFlow(
     start: (options) => {
       guard(() => loadCredentials(options));
     },
-    pickProfile: (phase, choice) => {
-      guard(() => loadCredentials({ ...phase.options, profile: choice.value }));
+    pickEnvironment: (phase, choice) => {
+      guard(() => loadCredentials({ ...phase.options, env: choice.value }));
     },
     pickBlock: (phase, choice) => {
       guard(() => packageBlock(phase.options, phase.resolved, choice.value));
@@ -635,6 +645,7 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
   const [phase, setPhase] = useState<Phase>({ type: 'loading', label: 'Loading credentials…' });
   const [session, setSession] = useState<Session>({
     credentials: null,
+    credentialNotices: [],
     warnings: [],
     notices: [],
   });
@@ -667,6 +678,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           {session.credentials.businessId}
         </Text>
       )}
+      {session.credentialNotices.length > 0 && (
+        <Lines lines={session.credentialNotices} color="yellow" />
+      )}
       {session.warnings.length > 0 && (
         <Text dimColor>{formatValidationIssues(session.warnings)}</Text>
       )}
@@ -686,14 +700,14 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           label={`Pushing ${phase.plan.summary.blockName} to "${phase.plan.dashboard.name}"…`}
         />,
       );
-    case 'profile-select':
+    case 'environment-select':
       return frame(
         <SelectList
-          key="profile"
-          title="Credential profile"
+          key="environment"
+          title="Environment"
           items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
           onSelect={pick(phase.choices, (choice) => {
-            flow.pickProfile(phase, choice);
+            flow.pickEnvironment(phase, choice);
           })}
           onCancel={flow.cancel}
         />,

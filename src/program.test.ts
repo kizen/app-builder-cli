@@ -44,7 +44,8 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   report: 'Generate a self-contained HTML report of the plugin',
   icons: 'List all valid icon names accepted by toolbar items, pages, and adornments',
   block: 'Work with plugin content blocks',
-  login: 'Sign in to Kizen in the browser and store the session on this machine',
+  login:
+    'Sign in to Kizen in the browser, or switch to a saved account, and store the session on this machine',
   logout: 'Remove the stored session from this machine',
   whoami: 'Show the user and business of the stored session',
   'auth-header':
@@ -85,8 +86,8 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
   report: ['-o, --output <path>'],
   icons: [],
   block: [],
-  login: ['--env <env>'],
-  logout: ['--env <env>'],
+  login: ['--env <env>', '--business <id-or-name>', '--user <userId>', '--list', '--json'],
+  logout: ['--env <env>', '--all', '--business <id-or-name>', '--user <userId>'],
   whoami: ['--env <env>'],
   'auth-header': ['--env <env>'],
 };

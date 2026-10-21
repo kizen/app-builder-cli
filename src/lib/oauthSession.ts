@@ -2,7 +2,6 @@
  * The OAuth login flow and the Bearer access-token provider. Nothing here prints or logs a
  * token or the PKCE verifier; tokens only go to the Kizen client.
  */
-import { randomUUID } from 'node:crypto';
 import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import { parseEnvironment, type Environment } from './credentials.js';
 import {
@@ -22,9 +21,22 @@ import {
   type AuthServerMetadata,
   type TokenResponse,
 } from './oauth.js';
-import type { OAuthSession, OAuthStore } from './oauthStore.js';
+import type { KizenIdentity } from './kizenClient.js';
+import {
+  sameAccount,
+  validAccount,
+  type OAuthAccount,
+  type OAuthSession,
+  type OAuthStore,
+} from './oauthStore.js';
 
 const REFRESH_LEEWAY_MS = 60_000;
+
+/** Thrown when the pointer names another account than a provider is pinned to. */
+class SignInChangedError extends OAuthError {}
+
+/** `/auth/bootstrap` through `bearer`: who its tokens act as. */
+export type Identify = (bearer: BearerTokenProvider) => Promise<KizenIdentity>;
 
 export interface LoginDeps {
   store: OAuthStore;
@@ -34,6 +46,8 @@ export interface LoginDeps {
   print: (line: string) => void;
   openBrowser: typeof openBrowser;
   startLoopbackServer: typeof startLoopbackServer;
+  /** Looks up the account the new tokens belong to, before anything is saved. */
+  identify: Identify;
   timeoutMs?: number;
 }
 
@@ -43,6 +57,7 @@ const defaultNow = (): number => Date.now();
 export const createDefaultLoginDeps = (
   store: OAuthStore,
   print: LoginDeps['print'],
+  identify: Identify,
 ): LoginDeps => ({
   store,
   fetch: defaultFetch,
@@ -50,6 +65,26 @@ export const createDefaultLoginDeps = (
   print,
   openBrowser,
   startLoopbackServer,
+  identify,
+});
+
+/** A provider for tokens that aren't saved yet: it hands out `accessToken` and never refreshes. */
+const issuedTokenProvider = (
+  environment: Environment,
+  accessToken: string,
+): BearerTokenProvider => ({
+  environment,
+  getAccessToken: () => Promise.resolve(accessToken),
+  refreshAccessToken: () =>
+    Promise.reject(loginRequired(environment, `Kizen rejected the new ${environment} sign-in.`)),
+});
+
+const labelsOf = (
+  identity: KizenIdentity,
+): Pick<OAuthSession, 'businessName' | 'fullName' | 'email'> => ({
+  businessName: identity.businessName,
+  fullName: identity.fullName,
+  email: identity.email,
 });
 
 /** `base` with newly issued `tokens`; a token or scope the response leaves out keeps `base`'s. */
@@ -65,10 +100,20 @@ const withTokens = (
   scope: tokens.scope ?? base.scope,
 });
 
+/**
+ * The line before the authorize URL. At a terminal it speaks to the person; otherwise to the
+ * agent or script reading stderr, which relays the URL to the person who signs in.
+ */
+const urlIntro = (environment: Environment, interactive: boolean): string =>
+  interactive
+    ? 'Opening your browser to sign in to Kizen. If it does not open, visit:'
+    : `A browser window should open for the user to sign in to Kizen ${environment}. If it doesn't, give them this URL:`;
+
 async function authorizeOnce(
   metadata: AuthServerMetadata,
   clientId: string,
   deps: LoginDeps,
+  intro: string,
 ): Promise<TokenResponse> {
   const { verifier, challenge } = createPkcePair();
   const state = random256();
@@ -85,7 +130,7 @@ async function authorizeOnce(
       codeChallenge: challenge,
     });
 
-    deps.print('Opening your browser to sign in to Kizen. If it does not open, visit:');
+    deps.print(intro);
     deps.print(url);
     deps.openBrowser(url);
 
@@ -113,7 +158,25 @@ async function authorizeOnce(
  * cached client drops the cache without retrying (it may be a user who walked away). An
  * `invalid_client` that reaches the CLI re-registers once and runs the browser flow again.
  */
-export async function login(environment: Environment, deps: LoginDeps): Promise<OAuthSession> {
+export interface LoginOptions {
+  /**
+   * Whether the signed-in account becomes current. When it says no, the session is saved as a
+   * saved account and the pointer stays where it was. Default: always.
+   */
+  makeCurrent?: (identity: KizenIdentity) => boolean;
+  /**
+   * Whether a person is at a terminal, which decides who the line before the authorize URL
+   * speaks to. Default: true.
+   */
+  interactive?: boolean;
+}
+
+export async function login(
+  environment: Environment,
+  deps: LoginDeps,
+  options: LoginOptions = {},
+): Promise<OAuthSession> {
+  const intro = urlIntro(environment, options.interactive ?? true);
   const metadata = await discover(apiOriginFor(environment), deps.fetch);
   const register = async (): Promise<string> => {
     const clientId = await registerClient(metadata, deps.fetch);
@@ -128,7 +191,7 @@ export async function login(environment: Environment, deps: LoginDeps): Promise<
   let tokens: TokenResponse;
 
   try {
-    tokens = await authorizeOnce(metadata, clientId, deps);
+    tokens = await authorizeOnce(metadata, clientId, deps, intro);
   } catch (err) {
     if (
       !(
@@ -151,13 +214,26 @@ export async function login(environment: Environment, deps: LoginDeps): Promise<
 
     deps.print('The saved app registration was rejected; registering again.');
     clientId = await register();
-    tokens = await authorizeOnce(metadata, clientId, deps);
+    tokens = await authorizeOnce(metadata, clientId, deps, intro);
+  }
+
+  // The account keys the session file, so nothing is saved until Kizen says whose tokens these
+  // are. A failure here leaves the previous sign-in, if any, as it was.
+  const identity = await deps.identify(issuedTokenProvider(environment, tokens.accessToken));
+  const account = validAccount(identity);
+
+  if (account === undefined) {
+    throw new OAuthError(
+      'invalid_identity',
+      `Kizen returned an account id this CLI can't save, so the ${environment} sign-in wasn't saved.`,
+    );
   }
 
   const session = withTokens(
     {
       environment,
-      loginId: randomUUID(),
+      ...account,
+      ...labelsOf(identity),
       issuer: metadata.issuer,
       clientId,
       tokenEndpoint: metadata.tokenEndpoint,
@@ -168,9 +244,100 @@ export async function login(environment: Environment, deps: LoginDeps): Promise<
     deps.now(),
   );
 
+  // Written (in place, for an account signed in before), then pointed to: a crash in between
+  // leaves the previous account current.
   await deps.store.writeSession(session);
 
+  if (options.makeCurrent !== undefined && !options.makeCurrent(identity)) {
+    // Saved only. Read back like the pointer case, so a removal meanwhile isn't reported as saved.
+    if ((await deps.store.readAccount(environment, account)) === null) {
+      throw loginRequired(environment, `You're not signed in to ${environment}.`);
+    }
+
+    return session;
+  }
+
+  await deps.store.setCurrent(environment, account);
+
+  // Read back through the pointer, so a session file removed in between (a logout of this
+  // account in another terminal) fails here instead of reporting a sign-in that isn't there.
+  if ((await deps.store.readSession(environment)) === null) {
+    throw loginRequired(environment, `You're not signed in to ${environment}.`);
+  }
+
   return session;
+}
+
+export interface SwitchDeps {
+  store: OAuthStore;
+  /** A provider pinned to the saved account being switched to (`account` option). */
+  provider: BearerTokenProvider;
+  identify: Identify;
+}
+
+/**
+ * Makes a saved account current, after proving its tokens still work: `/auth/bootstrap` through
+ * a provider for that account, so an expiring token is refreshed under the usual rules first.
+ * Resolves to the now-current session, or undefined when the saved sign-in is no longer valid
+ * (its refresh token was refused, so the provider deleted its file) and a browser sign-in is
+ * needed. Any other failure, a transient one included, rejects and leaves the pointer alone.
+ */
+export async function switchAccount(
+  environment: Environment,
+  account: OAuthAccount,
+  deps: SwitchDeps,
+): Promise<OAuthSession | undefined> {
+  let identity: KizenIdentity;
+
+  try {
+    identity = await deps.identify(deps.provider);
+  } catch (err) {
+    // Transient failures never delete, so a missing file means the sign-in was refused (or
+    // removed by a logout --all meanwhile): either way only the browser can sign it in again.
+    const gone = await deps.store.readAccount(environment, account).then(
+      (session) => session === null,
+      () => false,
+    );
+
+    if (gone) {
+      return undefined;
+    }
+
+    throw err;
+  }
+
+  if (!sameAccount(identity, account)) {
+    throw new OAuthError(
+      'invalid_identity',
+      `The saved ${environment} sign-in belongs to another account than it was saved as, so it wasn't switched to.`,
+    );
+  }
+
+  // Refresh the labels from the live identity, so a rename on the server shows up in --list and
+  // the picker. Only this account's file is written, and only when a label changed. Accepted
+  // window: a peer's token rotation landing between this read and the write is overwritten,
+  // like a same-account refresh write (within Kizen's grace window the old pair still works).
+  const stored = await deps.store.readAccount(environment, account);
+  const labels = labelsOf(identity);
+
+  if (
+    stored !== null &&
+    (stored.businessName !== labels.businessName ||
+      stored.fullName !== labels.fullName ||
+      stored.email !== labels.email)
+  ) {
+    await deps.store.writeSession({ ...stored, ...labels });
+  }
+
+  await deps.store.setCurrent(environment, account);
+
+  const current = await deps.store.readSession(environment);
+
+  if (current === null) {
+    throw loginRequired(environment, `You're not signed in to ${environment}.`);
+  }
+
+  return current;
 }
 
 export interface BearerTokenProvider {
@@ -183,6 +350,11 @@ export interface BearerTokenProvider {
 export interface TokenProviderOptions {
   requestTimeoutMs?: number;
   fetch?: typeof fetch;
+  /**
+   * Serve this saved account, current or not, reading its own file instead of the pointer. Used
+   * to verify an account before switching to it; never moves the pointer.
+   */
+  account?: OAuthAccount;
 }
 
 export interface TokenProviderDeps extends TokenProviderOptions {
@@ -198,30 +370,36 @@ export interface TokenProviderDeps extends TokenProviderOptions {
  * anything. So each refresh re-reads the session before acting on a failure or writing, and keeps
  * a peer's rotation rather than overwriting it or signing out.
  *
- * Pinned to the first session's `loginId`: a command resolves who it acts as once, so after
- * another login (maybe another business) every read throws rather than hand out its tokens.
+ * Pinned to the first session's account (business and user): a command resolves who it acts as
+ * once, so after a switch to another account every read throws rather than hand out its tokens.
+ * Signing in again to the same account doesn't: its new tokens are kept like a peer's rotation.
+ * Reads go through the store's pointer (or, with `account`, that account's file); writes and
+ * deletes touch only the pinned account's file, never the pointer.
  */
 export function createTokenProvider(
   environment: Environment,
   deps: TokenProviderDeps,
 ): BearerTokenProvider {
   let inflight: Promise<string> | undefined;
-  let pinnedLoginId: string | undefined;
+  let pinned: OAuthAccount | undefined = deps.account;
 
   const fresh = (session: OAuthSession): boolean =>
     session.expiresAt - deps.now() > REFRESH_LEEWAY_MS;
 
   const readOrThrow = async (): Promise<OAuthSession> => {
-    const session = await deps.store.readSession(environment);
+    const session =
+      deps.account === undefined
+        ? await deps.store.readSession(environment)
+        : await deps.store.readAccount(environment, deps.account);
 
     if (session === null) {
       throw loginRequired(environment, `You're not signed in to ${environment}.`);
     }
 
-    pinnedLoginId ??= session.loginId;
+    pinned ??= { businessId: session.businessId, userId: session.userId };
 
-    if (session.loginId !== pinnedLoginId) {
-      throw new OAuthError(
+    if (!sameAccount(session, pinned)) {
+      throw new SignInChangedError(
         'login_required',
         `The ${environment} sign-in changed while this command was running. Run it again.`,
       );
@@ -252,7 +430,7 @@ export function createTokenProvider(
 
     if (current.refreshToken === undefined) {
       if (!(await reread()).rotated) {
-        await deps.store.deleteSession(environment);
+        await deps.store.deleteSession(environment, current);
       }
 
       throw loginRequired(environment, `The ${environment} session has expired.`);
@@ -292,7 +470,10 @@ export function createTokenProvider(
             : doRefresh(stored.accessToken, until);
         }
 
-        const deleted = await deps.store.deleteSession(environment);
+        // Only this account's file, so a logout or a switch to another account meanwhile is
+        // untouched. A same-account peer write (a refresh, or a sign-in again) landing between the
+        // re-read above and this unlink is lost; the cost is a re-login.
+        const deleted = await deps.store.deleteSession(environment, current);
 
         // Best effort, and only this session's client: a login meanwhile may have registered a
         // new one. Whatever fails here, the error to report is the sign-in one below.
@@ -314,13 +495,38 @@ export function createTokenProvider(
 
     const next = withTokens(current, tokens, deps.now());
 
-    // Writes only over the session this refresh read: a logout or another login makes the re-read
-    // throw, and a peer's rotation is kept (this command still uses the token it was issued). A
-    // logout or login landing between this re-read and the rename can still be overwritten, and
-    // likewise a write landing between the invalid_grant re-read and its unlink is lost; the cost
-    // is a local file back for a token the server still accepts, or a re-login. Vault entry:
+    // Writes only this account's own file, never the pointer, so a logout or a switch to another
+    // account can't be undone or replaced by it, whenever it lands. The re-read is for a
+    // same-account peer: a logout or a switch makes it throw, and a peer's rotation or a sign-in
+    // again to this account is kept (this command still uses the token it was issued). What's
+    // left is a peer writing between this re-read and the rename, which this write overwrites:
+    // a peer rotation holds the same pair within Kizen's 300s grace window (beyond it the cost is
+    // a re-login), and tokens from a sign-in again are replaced by this grant's, which Kizen
+    // still accepts. A write landing after a logout of this account leaves it saved but not
+    // current. The deletes above are likewise scoped to this account's file. Vault entry:
     // cli-oauth-via-kizen-dcr-what-webapp-supports-the-app-builder-poc-design-and-its-gotchas
-    if (!(await reread()).rotated) {
+    let rotated: boolean;
+
+    try {
+      ({ rotated } = await reread());
+    } catch (err) {
+      // A switch to another account landed while the request was out. The server has already
+      // spent this account's refresh token, so its file would be useless to switch back to:
+      // save the new pair there (its own file only, and only if no peer rotated it or a logout
+      // removed it), then abort as usual.
+      if (err instanceof SignInChangedError) {
+        const own = await deps.store.readAccount(environment, current).catch(() => null);
+
+        if (own !== null && own.refreshToken === current.refreshToken) {
+          // Best effort: the error to report is the abort below.
+          await deps.store.writeSession(next).catch(() => undefined);
+        }
+      }
+
+      throw err;
+    }
+
+    if (!rotated) {
       await deps.store.writeSession(next);
     }
 
@@ -362,7 +568,7 @@ export const createDefaultTokenProvider = (
     fetch: options.fetch ?? defaultFetch,
   });
 
-const NOT_SIGNED_IN_MESSAGE = `You're not signed in. Run \`${loginCommandFor(DEFAULT_LOGIN_ENVIRONMENT)}\` (or another --env).`;
+const NOT_SIGNED_IN_MESSAGE = `You're not signed in. Run \`${loginCommandFor(DEFAULT_LOGIN_ENVIRONMENT)}\` (add \`--env <env>\` to sign in to an environment other than ${DEFAULT_LOGIN_ENVIRONMENT}).`;
 
 export type SessionEnvironment =
   | { ok: true; environment: Environment }

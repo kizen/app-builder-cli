@@ -3,27 +3,38 @@
  * top-level `*.json` that `listCredentialProfiles` would mistake for an API-key
  * profile:
  *
- *   oauth/          0700
- *     <env>.json    0600  the session (tokens) for one environment
- *     clients.json  0600  DCR client_id cache, keyed by issuer
+ *   oauth/                          0700
+ *     <env>.json                    0600  pointer: `{ "businessId", "userId" }`, the current account
+ *     <env>.<business>.<user>.json  0600  one saved account's session (tokens and labels)
+ *     clients.json                  0600  DCR client_id cache, keyed by issuer
  *
- * Nothing is locked: every write is an atomic rename, and the token provider re-reads before it
- * writes (see `createTokenProvider`).
+ * `<business>` and `<user>` are the account's ids as lowercase hex, so any id Kizen returns makes
+ * a safe file name, and distinct ids stay distinct on a case-insensitive filesystem (macOS's
+ * default), where a case-sensitive encoding such as base64url would let two accounts share a file. Each account file is a saved account; the pointer picks the current one.
+ *
+ * Nothing is locked: every write is an atomic rename. A refresh only ever writes or deletes its
+ * own account's file, and only login, a switch and logout move the pointer, so a refresh racing a
+ * logout or a switch to another account can't undo it (see `createTokenProvider`).
  */
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ENVIRONMENTS, GLOBAL_CREDENTIALS_DIR, type Environment } from './credentials.js';
 import { ifExists, isRecord, nonEmptyString } from './guards.js';
-import { loginRequired } from './oauth.js';
+import { loginRequired, OAuthError } from './oauth.js';
 
-export interface OAuthSession {
+/** Who a session acts as: a token is bound to one Kizen user in one business. */
+export interface OAuthAccount {
+  businessId: string;
+  userId: string;
+}
+
+export interface OAuthSession extends OAuthAccount {
   environment: Environment;
-  /**
-   * Random per login, kept across refreshes. A token provider pins it so a later
-   * login (another business, say) never feeds its tokens into a running command.
-   */
-  loginId: string;
+  /** Labels from `/auth/bootstrap` at sign-in, so saved accounts can be listed offline. */
+  businessName: string | undefined;
+  fullName: string | undefined;
+  email: string | undefined;
   issuer: string;
   clientId: string;
   tokenEndpoint: string;
@@ -34,15 +45,65 @@ export interface OAuthSession {
   scope: string | undefined;
 }
 
+/** One `<env>.<business>.<user>.json` file. */
+export interface SavedAccount {
+  account: OAuthAccount;
+  /** Undefined when the file can't be read; it's still listed, by its ids. */
+  session: OAuthSession | undefined;
+  /** Whether the pointer names it. */
+  current: boolean;
+}
+
 export interface OAuthStore {
   dir: string;
+  /** The pointer file, `<env>.json`; an unreadable one is reported by this path. */
   sessionPath: (environment: Environment) => string;
-  /** Null when there is none. An unreadable session file throws an OAuthError naming it. */
+  /** One account's session file. Throws for an account id that fails validation. */
+  accountPath: (environment: Environment, account: OAuthAccount) => string;
+  /**
+   * The session the pointer names. Null with no pointer, or when the file it names is gone. An
+   * unreadable pointer or session file throws an OAuthError naming it.
+   */
   readSession: (environment: Environment) => Promise<OAuthSession | null>;
+  /** One saved account's session, current or not. Null when its file is gone; unreadable throws. */
+  readAccount: (environment: Environment, account: OAuthAccount) => Promise<OAuthSession | null>;
+  /** Every saved account for the environment, unreadable ones included, in a stable order. */
+  listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
+  /** Writes this account's session file only, in place; never moves the pointer. */
   writeSession: (session: OAuthSession) => Promise<void>;
-  /** Returns whether a session file existed. Never reads the file. */
-  deleteSession: (environment: Environment) => Promise<boolean>;
-  /** Readable or not, so a corrupt file is reported on use rather than as "not signed in". */
+  /** Points the environment at `account` (after `writeSession` of it), then cleans up. */
+  setCurrent: (environment: Environment, account: OAuthAccount) => Promise<void>;
+  /**
+   * Deletes this account's file only; never touches the pointer, so a pointer to it then reads as
+   * not signed in. Returns whether the file existed.
+   */
+  deleteSession: (environment: Environment, account: OAuthAccount) => Promise<boolean>;
+  /**
+   * Removes the pointer, then the account file it named, without reading that file (so an
+   * unreadable session is removed too). Other saved accounts stay. Returns whether anyone was
+   * signed in: an unreadable pointer counts, a pointer to a missing file doesn't. Throws if the
+   * account file is there but can't be removed (the pointer is already gone by then).
+   */
+  signOut: (environment: Environment) => Promise<boolean>;
+  /**
+   * Removes one saved account's file. When the pointer names it, the pointer goes first (moved
+   * aside before it's read, as in `signOut`, and never restored). `removed` says whether the file
+   * existed, `current` whether this removed the pointer, so nobody is signed in afterwards.
+   */
+  removeAccount: (
+    environment: Environment,
+    account: OAuthAccount,
+  ) => Promise<{ removed: boolean; current: boolean }>;
+  /**
+   * Removes the pointer and every saved account for the environment. `signedIn` is as for
+   * `signOut`; `removed` counts the account files deleted. Throws if one can't be removed.
+   */
+  signOutAll: (environment: Environment) => Promise<{ signedIn: boolean; removed: number }>;
+  /**
+   * Environments with a pointer that names an existing session file, or that can't be read, so a
+   * corrupt file is reported on use rather than as "not signed in". Saved accounts that aren't
+   * current don't count.
+   */
   listSessions: () => Promise<Environment[]>;
   readClientId: (issuer: string) => Promise<string | undefined>;
   writeClientId: (issuer: string, clientId: string) => Promise<void>;
@@ -51,16 +112,94 @@ export interface OAuthStore {
 
 const CLIENTS_FILE = 'clients.json';
 
-function parseSession(raw: unknown, environment: Environment): OAuthSession | null {
-  if (!isRecord(raw)) {
-    return null;
+/**
+ * A `<env>.json.<hex>.signout` file is a pointer a logout moved aside and crashed before removing.
+ * It's deleted once older than this, so a logout in progress keeps its own.
+ */
+export const SIGNOUT_MAX_AGE_MS = 10 * 60_000;
+
+/**
+ * An account id is used only hex-encoded in a file name. Kizen's id formats aren't pinned down,
+ * so any non-empty UTF-8 string without control characters is accepted, up to a length that keeps
+ * the longest name within the usual 255-byte limit: `integration.` (12) + 2 * (110 hex + 1 dot)
+ * + `json` (4) + writeAtomic's `.<12 hex>.tmp` (17) = 255.
+ */
+export const MAX_ID_BYTES = 55;
+const ENCODED_ID = /^(?:[0-9a-f]{2}){1,55}$/;
+const CONTROL = /[\u0000-\u001f\u007f]/;
+
+const validId = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value !== '' &&
+  !CONTROL.test(value) &&
+  Buffer.byteLength(value, 'utf-8') <= MAX_ID_BYTES &&
+  // Lone surrogates don't survive a UTF-8 round trip, so they'd decode to another id.
+  Buffer.from(value, 'utf-8').toString('utf-8') === value;
+
+const encodeId = (id: string): string => Buffer.from(id, 'utf-8').toString('hex');
+
+/** The id a file name segment encodes; undefined unless it's the canonical encoding of a valid id. */
+const decodeId = (segment: string): string | undefined => {
+  if (!ENCODED_ID.test(segment)) {
+    return undefined;
   }
 
-  const loginId = nonEmptyString(raw.loginId);
+  const id = Buffer.from(segment, 'hex').toString('utf-8');
+
+  return validId(id) && encodeId(id) === segment ? id : undefined;
+};
+
+/** `{ businessId, userId }` if both are valid ids, else undefined. */
+export const validAccount = (raw: unknown): OAuthAccount | undefined =>
+  isRecord(raw) && validId(raw.businessId) && validId(raw.userId)
+    ? { businessId: raw.businessId, userId: raw.userId }
+    : undefined;
+
+export const sameAccount = (a: OAuthAccount, b: OAuthAccount): boolean =>
+  a.businessId === b.businessId && a.userId === b.userId;
+
+/** The file-name key for an account, `<business>.<user>`. Throws for an invalid id. */
+export const accountKey = (account: OAuthAccount): string => {
+  if (validAccount(account) === undefined) {
+    throw new Error('Refusing a session file name built from an invalid account id.');
+  }
+
+  const key = `${encodeId(account.businessId)}.${encodeId(account.userId)}`;
+
+  // Redundant with the check above (hex never produces anything else), kept so no path is
+  // ever built from a key that isn't exactly two encoded segments.
+  if (!key.split('.').every((segment) => ENCODED_ID.test(segment))) {
+    throw new Error('Refusing a session file name built from an invalid account id.');
+  }
+
+  return key;
+};
+
+/** The pointer's account; undefined unless the file is exactly `{ businessId, userId }`. */
+function parsePointer(text: string): OAuthAccount | undefined {
+  let raw: unknown;
+
+  try {
+    raw = JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+
+  // Exactly these two keys, so a whole session or a pointer from an earlier build (`{ loginId }`)
+  // is unreadable rather than a pointer to a file that was never written.
+  return isRecord(raw) && Object.keys(raw).length === 2 ? validAccount(raw) : undefined;
+}
+
+const optionalString = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value : undefined;
+
+function parseSession(raw: unknown, environment: Environment): OAuthSession | null {
+  const account = validAccount(raw);
 
   if (
+    !isRecord(raw) ||
+    account === undefined ||
     raw.environment !== environment ||
-    loginId === undefined ||
     typeof raw.issuer !== 'string' ||
     typeof raw.clientId !== 'string' ||
     typeof raw.tokenEndpoint !== 'string' ||
@@ -72,22 +211,51 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
 
   return {
     environment,
-    loginId,
+    ...account,
+    businessName: optionalString(raw.businessName),
+    fullName: optionalString(raw.fullName),
+    email: optionalString(raw.email),
     issuer: raw.issuer,
     clientId: raw.clientId,
     tokenEndpoint: raw.tokenEndpoint,
     accessToken: raw.accessToken,
-    refreshToken: typeof raw.refreshToken === 'string' ? raw.refreshToken : undefined,
+    refreshToken: optionalString(raw.refreshToken),
     expiresAt: raw.expiresAt,
-    scope: typeof raw.scope === 'string' ? raw.scope : undefined,
+    scope: optionalString(raw.scope),
   };
 }
+
+/** `randomUUID()` shape: the per-login session files of earlier unreleased builds. */
+const LEGACY_LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** @param baseDir the credentials directory; `oauth/` is created inside it. */
 export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAuthStore {
   const dir = join(baseDir, 'oauth');
   const sessionPath = (environment: Environment): string => join(dir, `${environment}.json`);
+  const accountPath = (environment: Environment, account: OAuthAccount): string =>
+    join(dir, `${environment}.${accountKey(account)}.json`);
   const clientsPath = join(dir, CLIENTS_FILE);
+
+  /** The account a file name in `dir` holds, for this environment; undefined for anything else. */
+  const accountOfName = (environment: Environment, name: string): OAuthAccount | undefined => {
+    const prefix = `${environment}.`;
+
+    if (!name.startsWith(prefix) || !name.endsWith('.json')) {
+      return undefined;
+    }
+
+    const segments = name.slice(prefix.length, -'.json'.length).split('.');
+
+    if (segments.length !== 2) {
+      return undefined;
+    }
+
+    const [businessId, userId] = segments.map(decodeId);
+
+    return businessId === undefined || userId === undefined ? undefined : { businessId, userId };
+  };
+
+  const listNames = async (): Promise<string[]> => (await ifExists(readdir(dir))) ?? [];
 
   const ensureDir = async (): Promise<void> => {
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -118,6 +286,44 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     }
   };
 
+  const unreadable = (environment: Environment, path: string): OAuthError =>
+    loginRequired(environment, `The saved ${environment} session at ${path} can't be read.`, {
+      again: true,
+    });
+
+  /**
+   * Best effort, on login, switch and logout: deletes `<env>.<uuid>.json` session files left by
+   * earlier unreleased builds (nothing reads them any more, and they hold live refresh tokens),
+   * and `<env>.json.<hex>.signout` pointers a crash left mid-logout once they're old enough.
+   * Only names matching those fixed patterns reach `join`.
+   */
+  const cleanUp = async (environment: Environment): Promise<void> => {
+    try {
+      const prefix = `${environment}.`;
+      const signout = new RegExp(`^${environment}\\.json\\.[0-9a-f]{12}\\.signout$`);
+
+      for (const name of await listNames()) {
+        const legacy =
+          name.startsWith(prefix) &&
+          name.endsWith('.json') &&
+          LEGACY_LOGIN_ID.test(name.slice(prefix.length, -'.json'.length));
+
+        if (legacy) {
+          await ifExists(unlink(join(dir, name)));
+        } else if (signout.test(name)) {
+          const path = join(dir, name);
+          const stats = await ifExists(stat(path));
+
+          if (stats !== undefined && Date.now() - stats.mtimeMs > SIGNOUT_MAX_AGE_MS) {
+            await ifExists(unlink(path));
+          }
+        }
+      }
+    } catch {
+      // Best effort: a later login or logout cleans up again.
+    }
+  };
+
   /** Only a cache: a missing or corrupt file reads as empty and costs one re-registration. */
   const readClients = async (): Promise<Record<string, unknown>> => {
     let raw: unknown;
@@ -135,47 +341,244 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     return isRecord(raw) ? raw : {};
   };
 
+  /** The file's text, or undefined if it's absent; any other read error makes it unreadable. */
+  const readOrUnreadable = async (
+    environment: Environment,
+    path: string,
+  ): Promise<string | undefined> => {
+    try {
+      return await ifExists(readFile(path, 'utf-8'));
+    } catch {
+      // EACCES, EISDIR, EIO, ...: not "not signed in", and not an error that names no file.
+      throw unreadable(environment, path);
+    }
+  };
+
+  const readAccount = async (
+    environment: Environment,
+    account: OAuthAccount,
+  ): Promise<OAuthSession | null> => {
+    const path = accountPath(environment, account);
+    const text = await readOrUnreadable(environment, path);
+
+    if (text === undefined) {
+      return null;
+    }
+
+    try {
+      const session = parseSession(JSON.parse(text) as unknown, environment);
+
+      if (session !== null && sameAccount(session, account)) {
+        return session;
+      }
+    } catch {
+      // Not passed on: a JSON.parse message would quote the file's contents.
+    }
+
+    throw unreadable(environment, path);
+  };
+
+  /** The pointer's account; undefined with no pointer. An unreadable pointer throws. */
+  const readPointer = async (environment: Environment): Promise<OAuthAccount | undefined> => {
+    const pointerPath = sessionPath(environment);
+    const pointer = await readOrUnreadable(environment, pointerPath);
+
+    if (pointer === undefined) {
+      return undefined;
+    }
+
+    const account = parsePointer(pointer);
+
+    if (account === undefined) {
+      throw unreadable(environment, pointerPath);
+    }
+
+    return account;
+  };
+
+  const readSession = async (environment: Environment): Promise<OAuthSession | null> => {
+    const account = await readPointer(environment);
+
+    return account === undefined ? null : readAccount(environment, account);
+  };
+
+  /**
+   * Renames the pointer aside before reading it, so exactly the account it named is signed out,
+   * and a login that lands meanwhile keeps its new pointer. Undefined with no pointer; `account`
+   * is undefined for an unreadable one.
+   */
+  const takePointer = async (
+    environment: Environment,
+  ): Promise<{ account: OAuthAccount | undefined } | undefined> => {
+    const pointerPath = sessionPath(environment);
+    const moved = `${pointerPath}.${randomBytes(6).toString('hex')}.signout`;
+
+    if ((await ifExists(rename(pointerPath, moved).then(() => true))) !== true) {
+      return undefined;
+    }
+
+    try {
+      return { account: parsePointer(await readFile(moved, 'utf-8')) };
+    } catch {
+      return { account: undefined };
+    } finally {
+      await rm(moved, { force: true });
+    }
+  };
+
+  /** Unlinks one account file; a failure other than "already gone" surfaces. */
+  const unlinkAccount = async (environment: Environment, account: OAuthAccount): Promise<boolean> =>
+    (await ifExists(unlink(accountPath(environment, account)).then(() => true))) ?? false;
+
   return {
     dir,
     sessionPath,
+    accountPath,
+    readSession,
+    readAccount,
 
-    async readSession(environment) {
-      const path = sessionPath(environment);
+    async listAccounts(environment) {
+      let current: OAuthAccount | undefined;
 
       try {
-        const text = await ifExists(readFile(path, 'utf-8'));
-
-        if (text === undefined) {
-          return null;
-        }
-
-        const session = parseSession(JSON.parse(text) as unknown, environment);
-
-        if (session !== null) {
-          return session;
-        }
+        current = await readPointer(environment);
       } catch {
-        // Not passed on: a JSON.parse message would quote the file's contents.
+        // An unreadable pointer names no account; the accounts are still listed.
       }
 
-      const reason = `The saved ${environment} session at ${path} can't be read.`;
+      const accounts = (await listNames())
+        .map((name) => accountOfName(environment, name))
+        .filter((account) => account !== undefined);
+      const saved = await Promise.all(
+        accounts.map(async (account): Promise<SavedAccount | undefined> => {
+          let session: OAuthSession | undefined;
 
-      throw loginRequired(environment, reason, { again: true });
+          try {
+            const read = await readAccount(environment, account);
+
+            // Deleted since the listing: not saved any more.
+            if (read === null) {
+              return undefined;
+            }
+
+            session = read;
+          } catch (err) {
+            if (!(err instanceof OAuthError && err.code === 'login_required')) {
+              throw err;
+            }
+          }
+
+          return {
+            account,
+            session,
+            current: current !== undefined && sameAccount(current, account),
+          };
+        }),
+      );
+      const label = (entry: SavedAccount): string =>
+        (entry.session?.businessName ?? entry.account.businessId).toLowerCase();
+
+      return saved
+        .filter((entry) => entry !== undefined)
+        .sort(
+          (a, b) =>
+            label(a).localeCompare(label(b)) ||
+            accountKey(a.account).localeCompare(accountKey(b.account)),
+        );
     },
 
     async writeSession(session) {
-      await writeAtomic(sessionPath(session.environment), session);
+      await writeAtomic(accountPath(session.environment, session), session);
     },
 
-    async deleteSession(environment) {
-      return (await ifExists(unlink(sessionPath(environment)).then(() => true))) ?? false;
+    async setCurrent(environment, account) {
+      const { businessId, userId } = account;
+
+      // accountKey validates both ids before anything is written.
+      accountKey(account);
+      await writeAtomic(sessionPath(environment), { businessId, userId });
+      await cleanUp(environment);
+    },
+
+    async deleteSession(environment, account) {
+      return unlinkAccount(environment, account);
+    },
+
+    async signOut(environment) {
+      const taken = await takePointer(environment);
+      // An unreadable pointer counts as signed in; no account file is removed for it, since
+      // there's no telling which it was (each one is a saved account).
+      let signedIn = taken !== undefined;
+
+      if (taken?.account !== undefined) {
+        signedIn = await unlinkAccount(environment, taken.account);
+      }
+
+      await cleanUp(environment);
+
+      return signedIn;
+    },
+
+    async removeAccount(environment, account) {
+      // Validates the ids before anything is touched.
+      accountKey(account);
+
+      let current = false;
+      let pointer: OAuthAccount | undefined;
+
+      try {
+        pointer = await readPointer(environment);
+      } catch {
+        // An unreadable pointer names no account, so it isn't this one.
+      }
+
+      if (pointer !== undefined && sameAccount(pointer, account)) {
+        // Whatever the moved-aside pointer names is signed out, even another account that a
+        // switch made current between the read and the move: it's never put back, since a
+        // restore races other logouts and logins. That account's own file stays saved, so
+        // `login --business` brings it back without the browser.
+        current = (await takePointer(environment)) !== undefined;
+      }
+
+      const removed = await unlinkAccount(environment, account);
+
+      await cleanUp(environment);
+
+      return { removed, current };
+    },
+
+    async signOutAll(environment) {
+      const taken = await takePointer(environment);
+      let signedIn = taken !== undefined && taken.account === undefined;
+      let removed = 0;
+
+      for (const name of await listNames()) {
+        const account = accountOfName(environment, name);
+
+        if (account !== undefined && (await unlinkAccount(environment, account))) {
+          removed += 1;
+          signedIn ||= taken?.account !== undefined && sameAccount(taken.account, account);
+        }
+      }
+
+      await cleanUp(environment);
+
+      return { signedIn, removed };
     },
 
     async listSessions() {
       const found = await Promise.all(
-        ENVIRONMENTS.map((environment) =>
-          ifExists(stat(sessionPath(environment)).then(() => environment)),
-        ),
+        ENVIRONMENTS.map(async (environment) => {
+          try {
+            return (await readSession(environment)) === null ? undefined : environment;
+          } catch (err) {
+            if (err instanceof OAuthError && err.code === 'login_required') {
+              return environment;
+            }
+
+            throw err;
+          }
+        }),
       );
 
       return found.filter((environment) => environment !== undefined);

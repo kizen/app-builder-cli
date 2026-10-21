@@ -121,7 +121,7 @@ Before writing any markup or styles, read `design.md` in this skill directory an
 
 ## The loop
 
-Run these exact commands. The flags and JSON keys are the contract. `<api_name>` is the block's `config.json` `api_name`. `block targets` and `block push` both accept `-c/--credentials <path>` and `--profile <name>` to pick the credential.
+Run these exact commands. The flags and JSON keys are the contract. `<api_name>` is the block's `config.json` `api_name`. `block targets` and `block push` use the user's `appbuilder login` session by default. `-c/--credentials <path>` and `--profile <name>` opt in to a deprecated API key; use them only when the user asks.
 
 1. **Validate.** Run `appbuilder block export <api_name>`. Fix every validation error it prints, then run it again until it passes.
 2. **Choose the target with the user (first publish only).**
@@ -158,7 +158,7 @@ Never run any other injected code in the user's tabs. `refresh.script` is the on
 
 ### `needs_choice`
 
-`choice` is `'profile'`, `'block'`, `'dashboard'` or `'target'`. `choices` is a list of `{ value, label, args, surface?, canEdit?, pushKey?, isFromThisPlugin? }`, where `args` is a string array. Ask the user using each option's `label`, then re-run the same command with the chosen option's `args` appended exactly. Never construct these flags by hand. The "new" option is `{ value: 'new', args: ['--dashboard', <id>, '--create'] }`.
+`choice` is `'environment'`, `'block'`, `'dashboard'` or `'target'`. `choices` is a list of `{ value, label, args, surface?, canEdit?, pushKey?, isFromThisPlugin? }`, where `args` is a string array. Ask the user using each option's `label`, then re-run the same command with the chosen option's `args` appended exactly. Never construct these flags by hand. The "new" option is `{ value: 'new', args: ['--dashboard', <id>, '--create'] }`.
 
 ## Guardrails
 
@@ -166,7 +166,7 @@ Never run any other injected code in the user's tabs. `refresh.script` is the on
 - On `drift_detected`, stop and ask the user. Someone edited the block in Kizen since your last push, and `--force` overwrites their changes. Pass `--force` only when the user says to discard them.
 - On `needs_choice`, ask the user using the returned `choices` as described above. Never guess.
 - On `remembered_target_missing`, the remembered dashboard or dashlet is gone. Ask the user where to publish instead, then push with `--dashboard <id>` plus `--create` or a `--dashlet` choice, or use `--forget` to clear the memory. `--create` alone won't work.
-- On `credentials_invalid`, tell the user to fix the credential file named in `message`, or to pass `--profile` or `-c`.
+- On `credentials_invalid`, if `message` says they're not signed in, tell the user to run `appbuilder login` (add `--env <env>` for an environment other than `go`). Otherwise tell them to fix the credential file named in `message`. Don't run `--profile` or `-c` unless the user asks for an API key.
 - On `production_requires_flag`, the target is `go` or `fmo`. Apply the production rule above.
 - Never push to a new target without first showing the user a dry run.
 - Blocks run with the viewing user's permissions for every viewer. Don't write code that creates, updates or deletes data unless the user asked for it.

@@ -102,7 +102,7 @@ function resolveEnvironment(options: CreateOptions, defaults: HeadlessDefaults):
 
   if (options.businessId !== undefined && defaults.businessId === '') {
     throw new Error(
-      '--environment is required alongside --business-id when no credentials are saved, so the id is keyed to the environment that issued it.',
+      '--environment is required alongside --business-id when neither a sign-in session nor saved credentials give a default business, so the id is keyed to the environment that issued it.',
     );
   }
 

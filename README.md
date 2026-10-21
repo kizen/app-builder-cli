@@ -47,13 +47,13 @@ appbuilder create
 
 The wizard first asks where the plugin should live (the current directory, or a new sub-directory named after the API name), then collects five fields:
 
-| Field         | Required | Notes                                                                                |
-| ------------- | -------- | ------------------------------------------------------------------------------------ |
-| Name          | yes      | Human-readable plugin name.                                                          |
-| API name      | yes      | Defaults to a snake_cased version of the name. Hyphens are rejected by the platform. |
-| External link | no       | Documentation or marketing URL for the plugin.                                       |
-| Description   | no\*     | See the note below.                                                                  |
-| Business ID   | no\*     | Prefilled from your stored credentials' business ID, when one exists.                |
+| Field         | Required | Notes                                                                                                                       |
+| ------------- | -------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Name          | yes      | Human-readable plugin name.                                                                                                 |
+| API name      | yes      | Defaults to a snake_cased version of the name. Hyphens are rejected by the platform.                                        |
+| External link | no       | Documentation or marketing URL for the plugin.                                                                              |
+| Description   | no\*     | See the note below.                                                                                                         |
+| Business ID   | no\*     | Prefilled from your `appbuilder login` session's business when you're signed in, else from your stored API-key credentials. |
 
 > **Fill in Description and Business ID.** Both are labelled optional in the wizard, but `create` writes them into `kizen.json` as empty strings and the bundler rejects an empty `description` or `developer_business_id` — so a plugin created with those fields skipped fails `appbuilder build` until you edit `kizen.json` by hand. This is tracked internally (KZN-17594); until that fix lands, treat both as required.
 
@@ -62,6 +62,8 @@ It then asks which artifacts to scaffold — Floating frame, Block, Data adornme
 `create` writes `kizen.json`, `src/`, `releaseNotes/`, a placeholder `src/thumbnail.png` (512×512, colored from the `api_name`), the templates for the artifacts you picked, and the Copilot review files described under [`appbuilder create`](#appbuilder-create). It adds both `.kizenapp/` and `.copilot-docs/` to `.gitignore`.
 
 ### 2. Set up credentials
+
+> **API-key credentials are deprecated for block commands.** `appbuilder block push` and `appbuilder block targets` use your [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header) session by default. `appbuilder dev` and `appbuilder encrypt` still use API keys: `encrypt` until Plugin Wizard accepts sign-in sessions, and OAuth for `dev` is planned. The rest of this section applies to them.
 
 `appbuilder dev` talks to a real Kizen environment on your behalf, so it needs four things:
 
@@ -104,7 +106,7 @@ Writes `.kizenapp/bundle.json` — the same artifact `dev` serves — after runn
 
 ### `appbuilder create`
 
-Scaffolds a new Kizen plugin project. Interactive by default; passing any flag other than `--include-lib` switches it to a non-interactive run, including `--artifacts` to choose the artifact templates up front (`appbuilder create --help` lists them all). Pass `--include-lib` to also write the Kizen data helper library to `src/lib/kizenData.js`; without it, no library is written. See [Quickstart](#1-scaffold-a-plugin) for the fields it collects, the artifact picker, and everything it writes.
+Scaffolds a new Kizen plugin project. Interactive by default; passing any flag other than `--include-lib` switches it to a non-interactive run, including `--artifacts` to choose the artifact templates up front (`appbuilder create --help` lists them all). Pass `--include-lib` to also write the Kizen data helper library to `src/lib/kizenData.js`; without it, no library is written. `--business-id` and `--environment` default from your `appbuilder login` session: the environment is `-e`, else the only environment you're signed in to, else `go`, and the business is that environment's session business. Only when you're signed out entirely does it fall back to `~/.kizenappbuilder/credentials.json`. See [Quickstart](#1-scaffold-a-plugin) for the fields it collects, the artifact picker, and everything it writes.
 
 The scaffold also includes `.github/copilot-instructions.md`, two path-scoped instruction files under `.github/instructions/`, and `.github/workflows/copilot-code-review.yml`. That workflow fetches the Kizen plugin docs from `kizen/app-engine` into `.copilot-docs/` before Copilot code review runs, so reviews cite the current documentation instead of rules copied into the plugin repo. It only takes effect once it is on the repository's default branch, and `.copilot-docs/` is gitignored. Plugins scaffolded before this setup existed can pick it up with `appbuilder setup-copilot`.
 
@@ -173,7 +175,7 @@ Encrypts a secret against a plugin's encryption keys and prints the envelope you
 { "encrypted": true, "value": "<base64>" }
 ```
 
-The command talks to the Plugin Wizard host directly — `appbuilder dev` does **not** need to be running.
+The command talks to the Plugin Wizard host directly — `appbuilder dev` does **not** need to be running. It still uses API-key credentials (deprecated for block commands) until Plugin Wizard accepts sign-in sessions.
 
 | Flag                       | Default                                 | Purpose                                                                                                                                      |
 | -------------------------- | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -237,15 +239,15 @@ Packages the plugin in the current directory (same validation as `block export`)
 appbuilder block push [api_name] [flags]
 ```
 
-Interactive by default: pick credentials, the block, the surface (dashboard, homepage or chart group), the dashboard, then whether to update an existing custom code dashlet or create a new one, and confirm. Pushing to a production environment (`go`, `fmo`) asks you to type `y`. In a TTY, `--yes` skips the confirm prompt only when the headless write gate would apply, so `go` and `fmo` still ask for a typed `y` unless `--allow-production` is also passed; `--dry-run` shows the plan without writing. A dashlet edited in Kizen since the last push still prompts before overwriting unless `--force` is passed.
+Interactive by default: pick the environment (only when you're signed in to several and pass no `--env`), the block, the surface (dashboard, homepage or chart group), the dashboard, then whether to update an existing custom code dashlet or create a new one, and confirm. Pushing to a production environment (`go`, `fmo`) asks you to type `y`. In a TTY, `--yes` skips the confirm prompt only when the headless write gate would apply, so `go` and `fmo` still ask for a typed `y` unless `--allow-production` is also passed; `--dry-run` shows the plan without writing. A dashlet edited in Kizen since the last push still prompts before overwriting unless `--force` is passed.
 
 It runs headless when stdin or stdout is not a TTY, or when `--json` is passed. `--yes` never selects the mode. Headless runs never prompt: anything that would be a question fails with `needs_choice` and lists the choices.
 
 | Argument / flag            | Default                         | Purpose                                                                                     |
 | -------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------- |
 | `[api_name]`               | the plugin's only block         | Block to push. Required when the plugin has more than one block.                            |
-| `-c, --credentials <path>` | see resolution below            | Credentials JSON file to use                                                                |
-| `--profile <name>`         | see resolution below            | Stored credential profile to use                                                            |
+| `-c, --credentials <path>` | the sign-in session             | API key (deprecated): credentials JSON file to use instead of the session                   |
+| `--profile <name>`         | the sign-in session             | API key (deprecated): stored credential profile to use instead of the session               |
 | `--dashboard <id>`         | the remembered target           | Dashboard, homepage or chart group to push to                                               |
 | `--dashlet <id>`           | matched by push history or name | Existing custom code dashlet to update. Needs `--dashboard`; can't be used with `--create`. |
 | `--create`                 | off                             | Create a new dashlet instead of updating one                                                |
@@ -255,10 +257,10 @@ It runs headless when stdin or stdout is not a TTY, or when `--json` is passed. 
 | `--force`                  | off                             | Overwrite a dashlet that was edited in Kizen since the last push                            |
 | `--forget`                 | off                             | Clear the remembered target for this block before resolving                                 |
 | `--json`                   | off                             | Print a JSON result to stdout (forces headless); the human summary goes to stderr           |
-| `--oauth`                  | off                             | Use the `appbuilder login` session instead of an API key                                    |
-| `--env <env>`              | the only signed-in environment  | Environment of the session to use. Only with `--oauth`.                                     |
+| `--oauth`                  | on                              | Accepted for existing scripts; the session is already the default                           |
+| `--env <env>`              | the only signed-in environment  | Environment of the session to use. Not with `-c` or `--profile`.                            |
 
-**Credentials** resolve in this order: `-c`, then `--profile`, then the project's active profile from `.kizenapp/config.json`, then the only loadable stored profile; several profiles without a choice is `needs_choice`. A project set to local browser-only credentials must pass `-c` or `--profile`. The credentials file must name a valid `environment` (`go`, `fmo`, `staging`, `integration`, `test1`); a missing or invalid one is refused with `credentials_invalid` rather than defaulting to production. Empty `apiKey`, `userId` or `businessId` are refused the same way. With `--oauth`, which can't be combined with `-c` or `--profile`, none of this applies: the push uses the stored session for `--env`, or for the only environment you're signed in to (see [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header)).
+**Credentials.** Without `-c` or `--profile`, the push uses your [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header) session for `--env`, or for the only environment you're signed in to. If you're signed in to several environments and pass no `--env`, the run is `needs_choice` with `choice: "environment"`. If you're signed out, it fails with `credentials_invalid` and tells you to run `appbuilder login`; it never falls back to an API key. API keys (deprecated) are used only with `-c <path>` or `--profile <name>`, and never touch the session; `--env` or `--oauth` with either is a `usage_error`. The credentials file must name a valid `environment` (`go`, `fmo`, `staging`, `integration`, `test1`); a missing or invalid one is refused with `credentials_invalid` rather than defaulting to production. Empty `apiKey`, `userId` or `businessId` are refused the same way. A `.kizenapp/config.json` `activeCredentialProfile` no longer selects an API key: the push uses the session and prints a one-line notice to stderr, so `--json` output stays clean. `credentialMode: "local"` doesn't affect block commands.
 
 **Write gating (headless).** `--dry-run` is always a dry run. Without `--yes` the run is a dry run too, and stderr says `Dry run only: pass --yes to write.` With `--yes`, `go` and `fmo` also need `--allow-production` (else `production_requires_flag`). If the target dashlet was pushed from here before and its content has since been changed in Kizen, both dry runs and writes stop with `drift_detected` unless `--force` is passed.
 
@@ -356,14 +358,14 @@ A failure exits 1:
 }
 ```
 
-Optional failure fields: `choice` (`profile`, `block`, `dashboard` or `target`) and `choices` with `needs_choice`, `remembered_target_missing` and a `--dashlet` that is `not_found`; `issues` (the packager's validation issues) with `validation_failed`; `field` with `invalid_block`; `hint` with `auth_failed` and `forbidden`. Each choice's `args` are the exact CLI arguments that select it, to be appended to the command (dashboard choices also carry `surface` and `canEdit`).
+Optional failure fields: `choice` (`environment`, `block`, `dashboard` or `target`) and `choices` with `needs_choice`, `remembered_target_missing` and a `--dashlet` that is `not_found`; `issues` (the packager's validation issues) with `validation_failed`; `field` with `invalid_block`; `hint` with `auth_failed` and `forbidden`. Each choice's `args` are the exact CLI arguments that select it, to be appended to the command (dashboard choices also carry `surface` and `canEdit`).
 
 | Code                        | Meaning                                                                                                                                  |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `needs_choice`              | A profile, block, dashboard or target must be chosen; see `choice` and `choices`                                                         |
+| `needs_choice`              | An environment, block, dashboard or target must be chosen; see `choice` and `choices`                                                    |
 | `validation_failed`         | The plugin failed validation                                                                                                             |
 | `invalid_block`             | The plugin has no blocks, or the block would be rejected (`field` names the problem)                                                     |
-| `credentials_invalid`       | No usable credentials, or the file's `environment` is missing or invalid                                                                 |
+| `credentials_invalid`       | Not signed in (run `appbuilder login`), or the `-c`/`--profile` file's `environment` is missing or invalid                               |
 | `auth_failed`               | Kizen rejected the credentials                                                                                                           |
 | `forbidden`                 | The credentials can't access the dashboard                                                                                               |
 | `not_found`                 | The dashboard, or the `--dashlet` on it, doesn't exist                                                                                   |
@@ -375,7 +377,7 @@ Optional failure fields: `choice` (`profile`, `block`, `dashboard` or `target`) 
 | `api_error`                 | Any other Kizen API failure                                                                                                              |
 | `local_error`               | A local failure that isn't a validation error: no `kizen.json`, packaging, reading `.kizenapp/pushes.json`, or writing it for `--forget` |
 
-Sign-in sessions add these cases: not being signed in is `credentials_invalid`; a session that needs a new `appbuilder login` (expired, rejected or unreadable) is `auth_failed`; `--oauth` with `-c` or `--profile`, `--env` without `--oauth`, an unknown `--env`, or several signed-in environments and no `--env` is `usage_error`; an unreachable token endpoint is `network_error`; and any other failure to refresh the session is `api_error`.
+Sign-in sessions add these cases: not being signed in is `credentials_invalid`; several signed-in environments and no `--env` is `needs_choice` (`choice: "environment"`, each choice `{ value, label, args: ["--env", <env>] }`); a session that needs a new `appbuilder login` (expired, rejected or unreadable) is `auth_failed`; `--oauth` or `--env` with `-c` or `--profile`, or an unknown `--env`, is `usage_error`; an unreachable token endpoint is `network_error`; and any other failure to refresh the session is `api_error`.
 
 ### `appbuilder block targets`
 
@@ -385,16 +387,16 @@ The CLI honors `HTTP_PROXY`/`HTTPS_PROXY` and `NO_PROXY` on Node versions that s
 
 `customObjects` is sorted by name and ends with Contacts (`"fetchUrl": "client"`) when the CLI can look up the business's contacts object; Kizen doesn't list Contacts with the other custom objects, so if that lookup fails the row is silently left out. `--object <contacts id>` lists Contacts' chart groups like any other object's.
 
-| Flag                       | Default             | Purpose                                                   |
-| -------------------------- | ------------------- | --------------------------------------------------------- |
-| `-c, --credentials <path>` | as for `block push` | Credentials JSON file to use                              |
-| `--profile <name>`         | as for `block push` | Stored credential profile to use                          |
-| `--object <id>`            | —                   | List the chart groups of this custom object (or Contacts) |
-| `--json`                   | off                 | Print JSON instead of tables                              |
-| `--oauth`                  | off                 | Use the `appbuilder login` session instead of an API key  |
-| `--env <env>`              | as for `block push` | Environment of the session to use. Only with `--oauth`.   |
+| Flag                       | Default             | Purpose                                                       |
+| -------------------------- | ------------------- | ------------------------------------------------------------- |
+| `-c, --credentials <path>` | the sign-in session | API key (deprecated): credentials JSON file to use            |
+| `--profile <name>`         | the sign-in session | API key (deprecated): stored credential profile to use        |
+| `--object <id>`            | —                   | List the chart groups of this custom object (or Contacts)     |
+| `--json`                   | off                 | Print JSON instead of tables                                  |
+| `--oauth`                  | on                  | Accepted for existing scripts; the session is the default     |
+| `--env <env>`              | as for `block push` | Environment of the session to use. Not with `-c`/`--profile`. |
 
-`--oauth` and `--env` work as for `block push` (see [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header)).
+Credentials, `--oauth` and `--env` work as for `block push` (see [`appbuilder login`](#appbuilder-login-logout-whoami-and-auth-header)).
 
 ```json
 {
@@ -450,31 +452,51 @@ Guardrails:
 
 ### `appbuilder login`, `logout`, `whoami` and `auth-header`
 
-Browser sign-in, a supported alternative to a downloaded API key. `block push` and `block targets` use it when you pass `--oauth`. Without `--oauth`, they use API-key credentials exactly as before.
+Browser sign-in, the default for `block push` and `block targets`. API keys are deprecated for these commands and are used only when you pass `-c` or `--profile`.
 
 ```sh
-appbuilder login [--env <env>]
+appbuilder login [--env <env>] [--business <id or name> [--user <user id>]]
+appbuilder login [--env <env>] --list [--json]
 appbuilder whoami [--env <env>]
-appbuilder logout [--env <env>]
+appbuilder logout [--env <env>] [--all | --business <id or name> [--user <user id>]]
 appbuilder auth-header [--env <env>]
-appbuilder block push [api_name] --oauth [--env <env>] [flags]
-appbuilder block targets --oauth [--env <env>] [flags]
+appbuilder block push [api_name] [--env <env>] [flags]
+appbuilder block targets [--env <env>] [flags]
 ```
 
-`login` opens Kizen's consent page in your browser and prints the URL in case the browser doesn't open. There, you pick the business the session is for. The CLI waits up to 5 minutes for the browser to return to `http://127.0.0.1:<port>/callback`. It uses OAuth 2.0 authorization code with PKCE (S256). It only trusts the server's OAuth metadata when its `issuer` is exactly the environment's origin (for example `https://staging.kizen.com`). It registers itself with the server on first use (dynamic client registration), so you don't need an API key or a client secret. A request to the callback with the wrong `state` gets a `400` and is otherwise ignored, so the sign-in keeps waiting for the real callback. Each session belongs to one user and one business. Signing in again replaces the session for that environment. A command that's already running with `--oauth`, or `auth-header`, keeps to the sign-in it started with: if you sign in again meanwhile, even to the same business, it stops and asks you to run it again. If the browser shows an error instead of the consent page, the saved app registration is probably stale. The sign-in then times out and clears that app registration, so running `appbuilder login` again registers afresh.
+`login` opens Kizen's consent page in your browser and prints the URL in case the browser doesn't open. There, you pick the business the session is for. The CLI waits up to 5 minutes for the browser to return to `http://127.0.0.1:<port>/callback`. It uses OAuth 2.0 authorization code with PKCE (S256). It only trusts the server's OAuth metadata when its `issuer` is exactly the environment's origin (for example `https://staging.kizen.com`). It registers itself with the server on first use (dynamic client registration), so you don't need an API key or a client secret. A request to the callback with the wrong `state` gets a `400` and is otherwise ignored, so the sign-in keeps waiting for the real callback. Each session belongs to one user and one business, which the CLI looks up with `/auth/bootstrap` right after sign-in. If that lookup fails, nothing is saved. Signing in again to the same account replaces its session. A `block push` or `block targets` that's already running, or `auth-header`, keeps to the account it started with: if you switch to another account meanwhile, it stops and asks you to run it again. Signing in again to the same account doesn't stop it. If the browser shows an error instead of the consent page, the saved app registration is probably stale. The sign-in then times out and clears that app registration, so running `appbuilder login` again registers afresh.
+
+#### Saved accounts
+
+Every account you sign in to stays saved on this machine, and one of them is current for each environment. `whoami`, `auth-header`, `block push` and `block targets` always use the current one. To switch without the browser, which is how scripts and agents should do it:
+
+```sh
+appbuilder login --env staging --list           # one line per saved account; the current one is marked
+appbuilder login --env staging --list --json    # [{ businessId, userId, businessName, fullName, email, current, readable }]
+appbuilder login --env staging --business <business id or name>
+appbuilder login --env staging --business <business id> --user <user id>   # two users of one business
+```
+
+`--business` picks the saved account whose business id is exactly the value, or else whose business name matches it, ignoring case. `--user` narrows that to the account with exactly this user id, for when two users of one business are saved; it only works together with `--business`. Before switching, the CLI checks that the saved session still works by calling `/auth/bootstrap` with it, refreshing the token first if it's about to expire. On success it prints the same output as a browser sign-in. If the value matches several saved accounts, the command fails and lists them with their business ids, so you can retry with an exact id. When the matches are users of the same business, the error lists their user ids and suggests `--business <id> --user <user id>`. Commands the CLI prints for you to run quote each value in single quotes, so they're safe to paste into a shell. A network or server error leaves the current account as it was and exits with an error. Neither form of `--list` ever prints a token.
+
+Two cases fall back to the browser: the saved account's refresh token has expired or been rejected (the CLI deletes that saved account first), or no saved account matches `--business` (and `--user`), whatever else is saved. Before the browser opens, `login` prints a short explanation to stderr: why it needs the browser, that a sign-in window is opening, which business to choose on Kizen's consent page, and the URL to open by hand if no window appears. At a terminal it addresses you; otherwise it addresses the agent or script running the command, which should pass it on to the person who signs in. Because the URL and instructions print before the sign-in finishes, an agent should run `appbuilder login` as a background command and relay its stderr to the user while it waits. After the sign-in, the CLI checks the account: after an expired saved account it must be exactly that account, and with no saved match it must match `--business` by business id or name, and `--user` by user id when given. If it does, it becomes current as usual. If the person signed in to another business, or as another user, the new account is saved but not made current, the command prints which account it got and the commands to use it or to try again, and it exits with code 1. If that account is already the current one, it says so instead.
+
+When both stdin and stdout are terminals and you pass neither `--business` nor `--list`, `login` shows a picker of the saved accounts, labeled by business name, business id and email, with "Sign in with the browser" as the last option. In every other case, `login` never prompts: without `--business` it runs the browser sign-in, and if accounts are saved it first prints a hint about `--business` and `--list` to stderr.
+
+`logout` removes the current account's session and leaves the other saved accounts. `logout --business <id or name>` removes one saved account, matched the same way as for `login`; if it's the current account, you're signed out too. `logout --all` removes every saved account for the environment. When no environment has a current account, both `--business` and `--all` need `--env`.
 
 | Command       | `--env` default                                                                | What it does                                                                                                                                           |
 | ------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `login`       | `go`                                                                           | Signs in and stores the session                                                                                                                        |
+| `login`       | `go`                                                                           | Signs in with the browser, or switches to a saved account, and stores the session                                                                      |
 | `whoami`      | the only environment you're signed in to                                       | Calls `/auth/bootstrap` with the session and prints the user and business. Tokens are never printed.                                                   |
-| `logout`      | the only environment you're signed in to                                       | Deletes the stored session. It's local only: the server has no revocation endpoint, so the refresh token remains valid on the server until it expires. |
+| `logout`      | the only environment you're signed in to                                       | Deletes the current account's session, one saved account (`--business`), or all of them (`--all`). Local only: the refresh tokens stay valid on Kizen. |
 | `auth-header` | from the MCP server URL ([see below](#using-the-session-from-claude-code-mcp)) | Prints `{"Authorization":"Bearer <access token>"}` for a Claude Code MCP `headersHelper`                                                               |
 
-With `--oauth`, the production write gate (`--allow-production`) and every other flag of `block push` and `block targets` work the same as with an API key.
+The production write gate (`--allow-production`) and every other flag of `block push` and `block targets` work the same with a session as with an API key.
 
-Sessions are stored in `~/.kizenappbuilder/oauth/<env>.json` (directory `0700`, files `0600`), separate from API-key profiles. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Each process makes one refresh at a time, and the session file is written atomically. Concurrent `appbuilder` processes may each refresh, which is safe because Kizen returns the same token pair when a refresh token is reused within 5 minutes. Before saving, a refresh re-reads the session: it skips the write if another process already refreshed, and it fails with a sign-in error if you signed out or signed in again meanwhile. If the refresh token is rejected, the CLI keeps the tokens another process already refreshed to; otherwise it deletes the session, and the command asks you to run `appbuilder login --env <env>` again.
+Sessions are stored in `~/.kizenappbuilder/oauth/` (directory `0700`, files `0600`), separate from API-key profiles. Each saved account has its own file, `<env>.<business id>.<user id>.json`, with both ids hex-encoded (so they stay distinct on case-insensitive disks), and `<env>.json` names the current account. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Each process makes one refresh at a time, and every file is written atomically. Concurrent `appbuilder` processes may each refresh, which is safe because Kizen returns the same token pair when a refresh token is reused within 5 minutes. Before saving, a refresh re-reads the session: it keeps the newer tokens if another process already refreshed or you signed in again to the same account, and it fails with a sign-in error if you signed out or switched to another account meanwhile. If the refresh token is rejected, the CLI keeps the tokens another process already refreshed to; otherwise it deletes that account's file, and the command asks you to run `appbuilder login` again (with `--env <env>` for an environment other than `go`). A refresh only ever writes or deletes its own account's file, and only `login` and `logout` change which account is current, so a refresh that finishes late can't undo a logout or a switch. One that finishes just after you sign out can leave that account saved, though not current; `logout --all` removes it.
 
-A session file that is corrupt or can't be read isn't treated as "not signed in". Commands that use it report the file's path and ask you to run `appbuilder login --env <env>`, and `appbuilder logout --env <env>` removes it.
+A session file that is corrupt or can't be read isn't treated as "not signed in". Commands that use it report the file's path and ask you to run `appbuilder login` (with `--env <env>` for an environment other than `go`). `appbuilder logout --env <env>` signs you out either way. If the session file is the problem, logout removes it. If `<env>.json` is the problem, logout removes that and leaves the saved accounts, and `logout --all` removes those too. `login --list` still lists a saved account whose file can't be read, by its ids. Session files from earlier development builds of the CLI aren't read, so you sign in again. Signing in to an environment, switching accounts in it, or signing out of it also deletes that environment's `<env>.<login id>.json` files from those builds, as a best effort; files for other environments stay until you do the same there.
 
 #### Using the session from Claude Code (MCP)
 
@@ -496,7 +518,7 @@ claude mcp add-json --scope user kizen-staging '{"type":"http","url":"https://st
 - An existing server with that name is left unchanged unless you pass `--force`. After upgrading the CLI, run `setup-claude --mcp --force` to pin the helper to the new version.
 - `--force` only replaces the user-scope server. A server with the same name at local or project scope (for example, one you added by hand without `--scope user`) takes precedence over it in that project. Remove that one with `claude mcp remove kizen-<env>` (run in the project) if you want the user-scope server there.
 - If the `claude` command isn't installed, it prints this command for you to run instead, and still succeeds.
-- If you aren't signed in to that environment yet, it reminds you to run `appbuilder login --env <env>`. If the saved session can't be read, it prints that error, with the file's path, instead. Either way the server is still registered.
+- If you aren't signed in to that environment yet, it reminds you to run `appbuilder login` (with `--env <env>` for an environment other than `go`). If the saved session can't be read, it prints that error, with the file's path, instead. Either way the server is still registered.
 - If registering fails, the skill files stay installed and the command exits with code 1.
 
 The helper runs through `npx`, which reuses its cached copy of the CLI (running `setup-claude` through `npx` fills that cache), so it starts in about a second. That works when Claude Code was started from a shell with `node` on `PATH`. If it wasn't (for example, with nvm and Claude Code launched outside a terminal), use absolute paths instead, from `which node` and `which appbuilder`: `"headersHelper":"/absolute/path/to/node /absolute/path/to/appbuilder auth-header"`. `appbuilder` starts with `#!/usr/bin/env node`, so the path to `appbuilder` alone isn't enough. Use the absolute paths too when testing a local or `pnpm link` build whose version isn't published, because `npx` can't fetch that version.
@@ -505,7 +527,7 @@ User scope is recommended: Claude Code then passes the helper its environment va
 
 The helper picks the environment from the MCP server URL that Claude Code passes it in `CLAUDE_CODE_MCP_SERVER_URL`: the environment whose API origin (scheme, host and port) matches that URL's origin. A URL that matches no environment is an error, so a token is never sent to a server it doesn't belong to. If you also pass `--env`, it must name that same environment, or the helper fails without printing a token. When the variable isn't set (for example, when you run the command yourself), it uses `--env`, or the only environment you're signed in to.
 
-Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts than the other commands: 5s in total for token requests, including a retry after another process's refresh. On failure, it prints one line to stderr, such as a reminder to run `appbuilder login --env <env>`, and nothing to stdout.
+Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts than the other commands: 5s in total for token requests, including a retry after another process's refresh. On failure, it prints one line to stderr, such as a reminder to run `appbuilder login` (with `--env <env>` for an environment other than `go`), and nothing to stdout.
 
 `auth-header` prints a live access token by design: treat its output like a password. The token acts as you, in the one business you chose when signing in, until it expires (up to an hour).
 

@@ -28,7 +28,6 @@ import { canonicalContentHash, pushKey, toCustomCodeContent } from './pushBlock.
 import {
   apiFailure,
   buildBrowserRefresh,
-  createDefaultPushDeps,
   createOAuthPushDeps,
   buildPlan,
   buildTargetChoices,
@@ -42,16 +41,20 @@ import {
   runPushHeadless,
   runTargetsHeadless,
   toTargetRow,
+  type PushChoice,
   type PushCommandOptions,
   type OAuthPushDeps,
   type PushContext,
   type PushDeps,
   type ResolvedBlock,
   type ResolvedTarget,
+  type TargetsCommandOptions as TargetsOptions,
 } from './pushHeadless.js';
+import { pinnedProfileNotice } from './authSelection.js';
+import { createPushFlow } from '../ui/PushUI.js';
 import { isClaudeSkillStale } from './setupClaude.js';
 import { makePlugin, routablePage } from '../test/fixtures.js';
-import { jsonResponse, oauthSession } from '../test/oauth.js';
+import { ACCOUNT_B, jsonResponse, oauthSession, signIn } from '../test/oauth.js';
 
 const PLUGIN = 'acme';
 const BLOCK = 'chart';
@@ -277,6 +280,35 @@ const DEFAULT_PROFILE: CredentialProfile = {
   isDefault: true,
 };
 
+/** Several loadable API-key profiles, as the user who hit "pass --profile <name>" had. */
+const SEVERAL_PROFILES: CredentialProfile[] = [
+  DEFAULT_PROFILE,
+  { name: 'Demo', path: '/home/.kizenappbuilder/demo.json', isDefault: false },
+  { name: 'staging', path: '/home/.kizenappbuilder/staging.json', isDefault: false },
+];
+
+/** The sign-in identity; its business differs from the API-key credentials' "biz". */
+const IDENTITY = {
+  userId: 'oauth-user',
+  businessId: 'oauth-biz',
+  businessName: 'Acme',
+  fullName: 'Ada L',
+  email: 'ada@example.com',
+};
+
+/** Signed in to `sessions`; connect hands back `fake`'s client. */
+const oauthDeps = (
+  sessions: Environment[],
+  fake: FakeClient = makeClient(),
+  identity: typeof IDENTITY = IDENTITY,
+): OAuthPushDeps & { listSessions: Mock; connect: Mock } => ({
+  listSessions: vi.fn(() => Promise.resolve(sessions)),
+  connect: vi.fn(() => Promise.resolve({ identity, client: fake.client })),
+});
+
+/** Opts the push-logic tests into the stored API-key profile; the harness is signed out. */
+const API_KEY: PushCommandOptions = { profile: DEFAULT_PROFILE.name };
+
 const makeHarness = (options: HarnessOptions = {}): Harness => {
   const fake = options.fake ?? makeClient();
   const stdout: string[] = [];
@@ -338,6 +370,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
     setExitCode: (code) => {
       exitCodes.push(code);
     },
+    // Signed out: a test that leaves out -c / --profile must sign in explicitly.
     oauth: {
       listSessions: vi.fn(() => Promise.resolve([])),
       connect: vi.fn(() => Promise.reject(new Error('no OAuth session in this test'))),
@@ -362,7 +395,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
 };
 
 const runPush = async (harness: Harness, options: PushCommandOptions): Promise<Harness> => {
-  await runPushHeadless(BLOCK, { json: true, ...options }, harness.deps);
+  await runPushHeadless(BLOCK, { json: true, ...API_KEY, ...options }, harness.deps);
 
   return harness;
 };
@@ -447,7 +480,7 @@ describe('resolveCredentials', () => {
     { name: 'staging', path: '/home/.kizenappbuilder/staging.json', isDefault: false },
   ];
 
-  it('prefers -c over --profile and config', async () => {
+  it('prefers -c over --profile and ignores the config pin', async () => {
     const { deps, fake } = makeHarness({
       profiles,
       config: { activeCredentialProfile: 'staging' },
@@ -456,7 +489,7 @@ describe('resolveCredentials', () => {
 
     expect(step).toStrictEqual({
       ok: true,
-      value: { credentials: makeCredentials(), client: fake.client },
+      value: { credentials: makeCredentials(), client: fake.client, notices: [] },
     });
     expect(deps.createClient).toHaveBeenCalledWith(makeCredentials());
     expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith('/tmp/c.json');
@@ -492,64 +525,11 @@ describe('resolveCredentials', () => {
     expect(!step.ok && step.message).toContain('credentials, staging');
   });
 
-  it("refuses config credentialMode 'local'", async () => {
-    const { deps } = makeHarness({ profiles, config: { credentialMode: 'local' } });
-    const step = await resolveCredentials({}, deps);
-
-    expect(step).toMatchObject({ ok: false, code: 'credentials_invalid' });
-    expect(!step.ok && step.message).toContain("local browser-only credentials the CLI can't read");
-    expect(deps.loadConfig).toHaveBeenCalledWith(`${CWD}/.kizenapp`);
-  });
-
-  it('uses the config activeCredentialProfile when it is loadable', async () => {
-    const { deps } = makeHarness({ profiles, config: { activeCredentialProfile: 'staging' } });
-    const step = await resolveCredentials({}, deps);
-
-    expect(step.ok).toBe(true);
-    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(
-      '/home/.kizenappbuilder/staging.json',
-    );
-  });
-
-  it('falls through an activeCredentialProfile that is not loadable', async () => {
-    const { deps } = makeHarness({ config: { activeCredentialProfile: 'gone' } });
-    const step = await resolveCredentials({}, deps);
-
-    expect(step.ok).toBe(true);
-    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(DEFAULT_PATH);
-  });
-
-  it('uses the only loadable profile', async () => {
-    const { deps } = makeHarness();
-    const step = await resolveCredentials({}, deps);
-
-    expect(step.ok).toBe(true);
-    expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith(DEFAULT_PATH);
-  });
-
-  it('asks for a profile when several are loadable', async () => {
-    const { deps } = makeHarness({ profiles });
-    const step = await resolveCredentials({}, deps);
-
-    expect(step).toMatchObject({ ok: false, code: 'needs_choice', choice: 'profile' });
-    expect(!step.ok && step.choices).toStrictEqual([
-      { value: 'credentials', label: 'credentials (default)', args: ['--profile', 'credentials'] },
-      { value: 'staging', label: 'staging', args: ['--profile', 'staging'] },
-    ]);
-  });
-
-  it('reports credentials_invalid when nothing is loadable', async () => {
-    const { deps } = makeHarness({ profiles: [] });
-    const step = await resolveCredentials({}, deps);
-
-    expect(step).toMatchObject({ ok: false, code: 'credentials_invalid' });
-  });
-
   it.each(['missing', 'invalid'] as const)(
     'refuses an environment that is %s, naming the file and the valid values',
     async (environmentSource) => {
       const { deps } = makeHarness({ environmentSource });
-      const step = await resolveCredentials({}, deps);
+      const step = await resolveCredentials(API_KEY, deps);
 
       expect(step).toMatchObject({ ok: false, code: 'credentials_invalid' });
 
@@ -563,7 +543,7 @@ describe('resolveCredentials', () => {
 
   it('refuses an empty apiKey', async () => {
     const { deps } = makeHarness({ credentials: makeCredentials({ apiKey: '  ' }) });
-    const step = await resolveCredentials({}, deps);
+    const step = await resolveCredentials(API_KEY, deps);
 
     expect(step).toMatchObject({ ok: false, code: 'credentials_invalid' });
     expect(!step.ok && step.message).toContain('"apiKey"');
@@ -1836,7 +1816,7 @@ describe('runPushHeadless', () => {
       ],
     });
 
-    await runPushHeadless(undefined, { json: true }, harness.deps);
+    await runPushHeadless(undefined, { json: true, ...API_KEY }, harness.deps);
 
     expect(harness.json()).toMatchObject({ ok: false, code: 'needs_choice', choice: 'block' });
     expect(harness.exitCodes).toStrictEqual([1]);
@@ -1862,7 +1842,7 @@ describe('runPushHeadless', () => {
       const fake = makeClient({ dashboards: [salesWith()] });
       const harness = makeHarness({ fake });
 
-      await runPushHeadless(BLOCK, { dashboard: 'D1', create: true }, harness.deps);
+      await runPushHeadless(BLOCK, { ...API_KEY, dashboard: 'D1', create: true }, harness.deps);
 
       const out = harness.stdout.join('');
 
@@ -1877,7 +1857,11 @@ describe('runPushHeadless', () => {
       const fake = makeClient({ dashboards: [salesWith()] });
       const harness = makeHarness({ fake });
 
-      await runPushHeadless(BLOCK, { dashboard: 'D1', create: true, yes: true }, harness.deps);
+      await runPushHeadless(
+        BLOCK,
+        { ...API_KEY, dashboard: 'D1', create: true, yes: true },
+        harness.deps,
+      );
 
       expect(harness.stdout.join('')).toContain('✓ Created Chart on "Sales" (dashlet NEW)');
       expect(harness.stdout.join('')).toContain('URL: https://v2.staging.kizen.com/dashboard/D1');
@@ -1889,7 +1873,7 @@ describe('runPushHeadless', () => {
 
       await runPushHeadless(
         BLOCK,
-        { dashboard: DASHBOARD_UUID, create: true, yes: true },
+        { ...API_KEY, dashboard: DASHBOARD_UUID, create: true, yes: true },
         harness.deps,
       );
 
@@ -1935,7 +1919,7 @@ describe('runPushHeadless', () => {
 
       const harness = makeHarness({ fake });
 
-      await runPushHeadless(BLOCK, { dashboard: 'D1' }, harness.deps);
+      await runPushHeadless(BLOCK, { ...API_KEY, dashboard: 'D1' }, harness.deps);
 
       expect(harness.stderr.join('')).toBe('Error: failed with 401\nHint: Check apiKey\n');
     });
@@ -2134,7 +2118,7 @@ describe('runTargetsHeadless', () => {
     const fake = makeClient({ summaries: { generic_dashboard: [summary()] } });
     const harness = makeHarness({ fake });
 
-    await runTargetsHeadless({ json: true }, harness.deps);
+    await runTargetsHeadless({ json: true, ...API_KEY }, harness.deps);
 
     expect(harness.json()).toMatchObject({
       ok: true,
@@ -2144,21 +2128,6 @@ describe('runTargetsHeadless', () => {
     expect(harness.exitCodes).toStrictEqual([]);
   });
 
-  it('outputs a profile choice failure as JSON', async () => {
-    const harness = makeHarness({
-      profiles: [
-        DEFAULT_PROFILE,
-        { name: 'staging', path: '/home/.kizenappbuilder/staging.json', isDefault: false },
-      ],
-    });
-
-    await runTargetsHeadless({ json: true }, harness.deps);
-
-    expect(harness.json()).toMatchObject({ ok: false, code: 'needs_choice', choice: 'profile' });
-    expect(harness.exitCodes).toStrictEqual([1]);
-    expect(harness.deps.createClient).not.toHaveBeenCalled();
-  });
-
   it('outputs API errors as one JSON document with exit code 1', async () => {
     const fake = makeClient();
 
@@ -2166,7 +2135,7 @@ describe('runTargetsHeadless', () => {
 
     const harness = makeHarness({ fake });
 
-    await runTargetsHeadless({ json: true }, harness.deps);
+    await runTargetsHeadless({ json: true, ...API_KEY }, harness.deps);
 
     expect(harness.json()).toStrictEqual({ ok: false, code: 'network_error', message: 'offline' });
     expect(harness.exitCodes).toStrictEqual([1]);
@@ -2183,7 +2152,7 @@ describe('runTargetsHeadless', () => {
     });
     const harness = makeHarness({ fake });
 
-    await runTargetsHeadless({}, harness.deps);
+    await runTargetsHeadless(API_KEY, harness.deps);
 
     const out = harness.stdout.join('');
 
@@ -2194,40 +2163,9 @@ describe('runTargetsHeadless', () => {
     expect(out).toContain('Contacts  CL');
     expect(out).toContain('--object <id>');
   });
-
-  it('prints profile choices with the targets command', async () => {
-    const harness = makeHarness({
-      profiles: [
-        DEFAULT_PROFILE,
-        { name: 'staging', path: '/home/.kizenappbuilder/staging.json', isDefault: false },
-      ],
-    });
-
-    await runTargetsHeadless({ object: 'O1' }, harness.deps);
-
-    expect(harness.stderr.join('')).toContain(
-      'staging  →  appbuilder block targets --profile staging --object O1',
-    );
-  });
 });
 
 describe('--oauth', () => {
-  const IDENTITY = {
-    userId: 'oauth-user',
-    businessId: 'oauth-biz',
-    businessName: 'Acme',
-    fullName: 'Ada L',
-    email: 'ada@example.com',
-  };
-
-  const oauthDeps = (
-    sessions: Environment[],
-    fake: FakeClient = makeClient(),
-  ): OAuthPushDeps & { listSessions: Mock; connect: Mock } => ({
-    listSessions: vi.fn(() => Promise.resolve(sessions)),
-    connect: vi.fn(() => Promise.resolve({ identity: IDENTITY, client: fake.client })),
-  });
-
   /** A temp OAuth store holding one staging session, removed after `run`. */
   const withStore = async (
     run: (store: ReturnType<typeof createOAuthStore>, session: OAuthSession) => Promise<void>,
@@ -2244,28 +2182,12 @@ describe('--oauth', () => {
         scope: undefined,
       });
 
-      await store.writeSession(session);
+      await signIn(store, session);
       await run(store, session);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   };
-
-  it('api-key push never reads OAuth sessions', async () => {
-    expect(createDefaultPushDeps(CWD).oauth).toBeDefined();
-
-    const fake = makeClient({ dashboards: [makeDashboard()] });
-    const harness = await runPush(makeHarness({ fake }), {
-      dashboard: 'D1',
-      create: true,
-      yes: true,
-    });
-
-    expect(harness.json()).toMatchObject({ ok: true, applied: true });
-    expect(harness.deps.createClient).toHaveBeenCalledWith(makeCredentials());
-    expect(harness.deps.oauth.listSessions).not.toHaveBeenCalled();
-    expect(harness.deps.oauth.connect).not.toHaveBeenCalled();
-  });
 
   it('resolves the session identity and client for --env, without reading API-key profiles', async () => {
     const fake = makeClient();
@@ -2278,6 +2200,7 @@ describe('--oauth', () => {
       value: {
         credentials: { environment: 'staging', businessId: 'oauth-biz' },
         client: fake.client,
+        notices: [],
       },
     });
     expect(oauth.connect).toHaveBeenCalledWith('staging');
@@ -2290,7 +2213,10 @@ describe('--oauth', () => {
   it.each([
     [['integration'] as Environment[], { ok: true }],
     [[] as Environment[], { ok: false, code: 'credentials_invalid' }],
-    [['go', 'staging'] as Environment[], { ok: false, code: 'usage_error' }],
+    [
+      ['go', 'staging'] as Environment[],
+      { ok: false, code: 'needs_choice', choice: 'environment' },
+    ],
   ])('without --env, signed in to %j resolves to %j', async (sessions, expected) => {
     const oauth = oauthDeps(sessions);
     const step = await resolveCredentials({ oauth: true }, makeHarness({ deps: { oauth } }).deps);
@@ -2306,7 +2232,6 @@ describe('--oauth', () => {
     [{ oauth: true, profile: 'staging' }, "can't be combined"],
     [{ oauth: true, credentials: '/tmp/c.json' }, "can't be combined"],
     [{ oauth: true, env: 'prod' }, 'Unknown --env "prod"'],
-    [{ env: 'staging' }, '--env only applies with --oauth'],
   ])('refuses %j as a usage error', async (options, message) => {
     const oauth = oauthDeps(['staging']);
     const { deps } = makeHarness({ deps: { oauth } });
@@ -2336,28 +2261,11 @@ describe('--oauth', () => {
     });
   });
 
-  it('carries --oauth --env into the follow-up commands it prints', async () => {
-    const fake = makeClient({ summaries: { generic_dashboard: [summary()] } });
-    const oauth = oauthDeps(['staging'], fake);
-    const harness = await runPush(makeHarness({ fake, deps: { oauth } }), {
-      json: false,
-      oauth: true,
-      env: 'staging',
-    });
-
-    expect(oauth.connect).toHaveBeenCalledWith('staging');
-    expect(harness.deps.createClient).not.toHaveBeenCalled();
-    expect(harness.exitCodes).toStrictEqual([1]);
-    expect(harness.stderr.join('')).toContain(
-      `appbuilder block push ${BLOCK} --oauth --env staging --dashboard`,
-    );
-  });
-
   it('push aborts without writing the push map when the login changes after identity lookup', async () => {
     await withStore(async (store, loginA) => {
       const loginB = {
         ...loginA,
-        loginId: 'login-b',
+        ...ACCOUNT_B,
         accessToken: 'access-b',
         refreshToken: 'refresh-b',
       };
@@ -2378,7 +2286,7 @@ describe('--oauth', () => {
 
         if (url === `${base}/auth/bootstrap`) {
           // Another terminal signs in to another business right after the lookup.
-          await store.writeSession(loginB);
+          await signIn(store, loginB);
 
           return jsonResponse({
             team: { user: 'oauth-user' },
@@ -2407,13 +2315,11 @@ describe('--oauth', () => {
         deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
       });
 
-      await runPush(harness, {
-        oauth: true,
-        env: 'staging',
-        dashboard: 'D1',
-        create: true,
-        yes: true,
-      });
+      await runPushHeadless(
+        BLOCK,
+        { json: true, oauth: true, env: 'staging', dashboard: 'D1', create: true, yes: true },
+        harness.deps,
+      );
 
       expect(harness.json()).toMatchObject({
         ok: false,
@@ -2472,6 +2378,603 @@ describe('--oauth', () => {
       expect(
         fetchMock.mock.calls.filter(([input]) => input === `${base}/auth/bootstrap`),
       ).toHaveLength(1);
+    });
+  });
+});
+
+describe('the sign-in session is the default', () => {
+  const NOT_SIGNED_IN =
+    "You're not signed in. Run `appbuilder login` (add `--env <env>` to sign in to an environment other than go). To use an API key instead (deprecated), pass --profile <name> or -c <path>.";
+
+  const targetsFake = (): FakeClient =>
+    makeClient({ summaries: { generic_dashboard: [summary()] }, dashboards: [makeDashboard()] });
+
+  /** Every API-key read a default (no -c / --profile) run must skip. */
+  const expectNoApiKeyReads = (deps: PushDeps): void => {
+    expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
+    expect(deps.loadCredentialsDetailed).not.toHaveBeenCalled();
+    expect(deps.createClient).not.toHaveBeenCalled();
+  };
+
+  const expectNoSessionReads = (
+    oauth: OAuthPushDeps & { listSessions: Mock; connect: Mock },
+  ): void => {
+    expect(oauth.listSessions).not.toHaveBeenCalled();
+    expect(oauth.connect).not.toHaveBeenCalled();
+  };
+
+  /** Turns a choice's args back into the options commander would parse from them. */
+  const parseChoiceArgs = (args: readonly string[]): PushCommandOptions & { object?: string } => {
+    const flags: Record<string, keyof PushCommandOptions | 'object'> = {
+      '--env': 'env',
+      '--profile': 'profile',
+      '-c': 'credentials',
+      '--dashboard': 'dashboard',
+      '--dashlet': 'dashlet',
+      '--object': 'object',
+    };
+    const options: Record<string, string | boolean> = {};
+
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index] ?? '';
+
+      if (arg === '--create') {
+        options.create = true;
+        continue;
+      }
+
+      const name = flags[arg];
+      const value = args[index + 1];
+
+      if (name === undefined || value === undefined) {
+        throw new Error(`Unexpected choice arg ${arg}`);
+      }
+
+      options[name] = value;
+      index += 1;
+    }
+
+    return options as PushCommandOptions & { object?: string };
+  };
+
+  describe('runTargetsHeadless', () => {
+    it('signed in to one env with several API-key profiles and no flags uses the session without asking', async () => {
+      const fake = targetsFake();
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      // `appbuilder block targets`, exactly as the user ran it.
+      await runTargetsHeadless({}, harness.deps);
+
+      const out = harness.stdout.join('');
+
+      expect(oauth.connect).toHaveBeenCalledWith('staging');
+      expectNoApiKeyReads(harness.deps);
+      expect(harness.exitCodes).toStrictEqual([]);
+      expect(harness.stderr).toStrictEqual([]);
+      expect(out).toContain('Environment: staging');
+      expect(out).toContain('Business: oauth-biz');
+      expect(out).toMatch(/Sales\s+D1\s+3\s+Owner/);
+    });
+
+    it('a pinned activeCredentialProfile is ignored with a stderr notice and --json stdout stays valid JSON', async () => {
+      const fake = targetsFake();
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = makeHarness({
+        fake,
+        profiles: SEVERAL_PROFILES,
+        config: { activeCredentialProfile: 'Demo' },
+        deps: { oauth },
+      });
+
+      await runTargetsHeadless({ json: true }, harness.deps);
+
+      expect(harness.stdout).toHaveLength(1);
+      expect(JSON.parse(harness.stdout[0] ?? '')).toMatchObject({
+        ok: true,
+        environment: 'staging',
+        businessId: 'oauth-biz',
+        surfaces: { dashboard: [{ id: 'D1' }] },
+      });
+      expect(harness.stderr).toStrictEqual([
+        'Ignoring the API-key profile "Demo" pinned in .kizenapp/config.json and using your sign-in session. Pass --profile Demo to use the API key.\n',
+      ]);
+      expect(harness.deps.loadConfig).toHaveBeenCalledWith(`${CWD}/.kizenapp`);
+      expectNoApiKeyReads(harness.deps);
+      expect(harness.exitCodes).toStrictEqual([]);
+    });
+
+    it("ignores config credentialMode 'local' when using the session", async () => {
+      const fake = targetsFake();
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = makeHarness({ fake, config: { credentialMode: 'local' }, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true }, harness.deps);
+
+      expect(harness.json()).toMatchObject({ ok: true, businessId: 'oauth-biz' });
+      expect(harness.stderr).toStrictEqual([]);
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it('signed out with no flags fails naming appbuilder login and --profile/-c without reading API-key files', async () => {
+      const oauth = oauthDeps([]);
+      const harness = makeHarness({
+        profiles: SEVERAL_PROFILES,
+        config: { activeCredentialProfile: 'Demo' },
+        deps: { oauth },
+      });
+
+      await runTargetsHeadless({ json: true }, harness.deps);
+
+      const result = harness.json() as { ok: boolean; code: string; message: string };
+
+      expect(result).toStrictEqual({
+        ok: false,
+        code: 'credentials_invalid',
+        message: NOT_SIGNED_IN,
+      });
+      expect(result.message).toContain('appbuilder login');
+      expect(result.message).toContain('--profile');
+      expect(result.message).toContain('-c');
+      expect(harness.exitCodes).toStrictEqual([1]);
+      expect(oauth.connect).not.toHaveBeenCalled();
+      expectNoApiKeyReads(harness.deps);
+      expect(harness.deps.loadConfig).not.toHaveBeenCalled();
+    });
+
+    it('--profile uses the API key even when signed in and never touches sessions', async () => {
+      const fake = targetsFake();
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true, profile: 'Demo' }, harness.deps);
+
+      expect(harness.json()).toMatchObject({ ok: true, environment: 'staging', businessId: 'biz' });
+      expect(harness.deps.loadCredentialsDetailed).toHaveBeenCalledWith(
+        '/home/.kizenappbuilder/demo.json',
+      );
+      expect(harness.deps.createClient).toHaveBeenCalledWith(makeCredentials());
+      expectNoSessionReads(oauth);
+      expect(harness.stderr).toStrictEqual([]);
+    });
+
+    it('--profile still rejects an unknown profile, listing the loadable ones, when signed in', async () => {
+      const oauth = oauthDeps(['staging']);
+      const harness = makeHarness({ profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true, profile: 'prod' }, harness.deps);
+
+      expect(harness.json()).toStrictEqual({
+        ok: false,
+        code: 'credentials_invalid',
+        message:
+          'No loadable credential profile named "prod". Loadable profiles: credentials, Demo, staging',
+      });
+      expectNoSessionReads(oauth);
+    });
+
+    it('--env selects that session without --oauth', async () => {
+      const fake = targetsFake();
+      const oauth = oauthDeps(['go', 'staging'], fake);
+      const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true, env: 'staging' }, harness.deps);
+
+      expect(harness.json()).toMatchObject({
+        ok: true,
+        environment: 'staging',
+        businessId: 'oauth-biz',
+      });
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it.each([
+      ['--env with --profile is a usage error', { profile: 'Demo' }],
+      ['--env with -c is a usage error', { credentials: '/tmp/c.json' }],
+    ] as const)('%s', async (_label, apiKeyFlag) => {
+      const oauth = oauthDeps(['staging']);
+      const harness = makeHarness({ profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true, env: 'staging', ...apiKeyFlag }, harness.deps);
+
+      expect(harness.json()).toStrictEqual({
+        ok: false,
+        code: 'usage_error',
+        message: "--env selects a sign-in session, so it can't be combined with -c or --profile.",
+      });
+      expect(harness.exitCodes).toStrictEqual([1]);
+      expectNoSessionReads(oauth);
+      expectNoApiKeyReads(harness.deps);
+      expect(harness.deps.loadConfig).not.toHaveBeenCalled();
+    });
+
+    it('--oauth still works as a no-op alias', async () => {
+      const run = async (options: TargetsOptions): Promise<Harness> => {
+        const fake = targetsFake();
+        const harness = makeHarness({
+          fake,
+          profiles: SEVERAL_PROFILES,
+          config: { activeCredentialProfile: 'Demo' },
+          deps: { oauth: oauthDeps(['staging'], fake) },
+        });
+
+        await runTargetsHeadless(options, harness.deps);
+
+        return harness;
+      };
+
+      const withFlag = await run({ json: true, oauth: true });
+      const without = await run({ json: true });
+
+      expect(withFlag.json()).toMatchObject({ ok: true, businessId: 'oauth-biz' });
+      expect(withFlag.stdout).toStrictEqual(without.stdout);
+      expect(withFlag.stderr).toStrictEqual(without.stderr);
+      expect(withFlag.deps.oauth.connect).toHaveBeenCalledWith('staging');
+      expectNoApiKeyReads(withFlag.deps);
+    });
+
+    it('signed in to several environments without --env asks for an environment with a choice per environment', async () => {
+      const oauth = oauthDeps(['go', 'staging']);
+      const json = makeHarness({ profiles: SEVERAL_PROFILES, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true }, json.deps);
+
+      expect(json.json()).toStrictEqual({
+        ok: false,
+        code: 'needs_choice',
+        message: "You're signed in to several environments; pass --env <env>: go, staging",
+        choice: 'environment',
+        choices: [
+          { value: 'go', label: 'go', args: ['--env', 'go'] },
+          { value: 'staging', label: 'staging', args: ['--env', 'staging'] },
+        ],
+      });
+      expect(oauth.listSessions).toHaveBeenCalledTimes(1);
+      expect(oauth.connect).not.toHaveBeenCalled();
+      expectNoApiKeyReads(json.deps);
+
+      const text = makeHarness({ deps: { oauth: oauthDeps(['go', 'staging']) } });
+
+      await runTargetsHeadless({ object: 'O1' }, text.deps);
+
+      const err = text.stderr.join('');
+
+      expect(err).toContain('go  →  appbuilder block targets --env go --object O1');
+      expect(err).toContain('staging  →  appbuilder block targets --env staging --object O1');
+      expect(err).not.toContain('--profile');
+      expect(err).not.toContain('--oauth');
+    });
+
+    it('needs_choice choice args re-run successfully', async () => {
+      const fake = targetsFake();
+      const asked = makeHarness({ fake, deps: { oauth: oauthDeps(['go', 'staging'], fake) } });
+
+      await runTargetsHeadless({ json: true }, asked.deps);
+
+      const { choices } = asked.json() as { choices: { value: string; args: string[] }[] };
+      const staging = choices.find((choice) => choice.value === 'staging');
+      const oauth = oauthDeps(['go', 'staging'], fake);
+      const rerun = makeHarness({ fake, deps: { oauth } });
+
+      await runTargetsHeadless({ json: true, ...parseChoiceArgs(staging?.args ?? []) }, rerun.deps);
+
+      expect(rerun.json()).toMatchObject({
+        ok: true,
+        environment: 'staging',
+        businessId: 'oauth-biz',
+      });
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expect(rerun.exitCodes).toStrictEqual([]);
+    });
+  });
+
+  describe('runPushHeadless', () => {
+    const push = async (harness: Harness, options: PushCommandOptions): Promise<Harness> => {
+      await runPushHeadless(BLOCK, options, harness.deps);
+
+      return harness;
+    };
+
+    it('signed in to one env with several API-key profiles and no flags uses the session without asking', async () => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = await push(
+        makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } }),
+        {
+          json: true,
+          dashboard: 'D1',
+          create: true,
+          yes: true,
+        },
+      );
+
+      expect(harness.json()).toMatchObject({
+        ok: true,
+        applied: true,
+        environment: 'staging',
+        businessId: 'oauth-biz',
+      });
+      expect(oauth.connect).toHaveBeenCalledWith('staging');
+      expect(fake.createDashlet).toHaveBeenCalledTimes(1);
+      expect(harness.pushMap.entries).toMatchObject([
+        { environment: 'staging', businessId: 'oauth-biz' },
+      ]);
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it('re-pushes to the remembered dashlet with zero flags through the session', async () => {
+      const fake = makeClient({
+        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
+      });
+      const oauth = oauthDeps(['staging'], fake, { ...IDENTITY, businessId: 'biz' });
+      const harness = await push(makeHarness({ fake, pushMap: [makeEntry()], deps: { oauth } }), {
+        json: true,
+        yes: true,
+      });
+
+      expect(harness.json()).toMatchObject({
+        ok: true,
+        action: 'updated',
+        resolvedBy: 'remembered',
+      });
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it('a pinned activeCredentialProfile is ignored with a stderr notice and --json stdout stays valid JSON', async () => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const harness = await push(
+        makeHarness({
+          fake,
+          profiles: SEVERAL_PROFILES,
+          config: { activeCredentialProfile: 'Demo' },
+          deps: { oauth: oauthDeps(['staging'], fake) },
+        }),
+        { json: true, dashboard: 'D1', create: true, yes: true },
+      );
+
+      expect(harness.stdout).toHaveLength(1);
+      expect(JSON.parse(harness.stdout[0] ?? '')).toMatchObject({ ok: true, applied: true });
+      expect(harness.stderr[0]).toBe(
+        'Ignoring the API-key profile "Demo" pinned in .kizenapp/config.json and using your sign-in session. Pass --profile Demo to use the API key.\n',
+      );
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it('signed out with no flags fails naming appbuilder login and --profile/-c without reading API-key files', async () => {
+      const harness = await push(makeHarness({ profiles: SEVERAL_PROFILES }), { json: true });
+
+      expect(harness.json()).toStrictEqual({
+        ok: false,
+        code: 'credentials_invalid',
+        message: NOT_SIGNED_IN,
+      });
+      expectNoApiKeyReads(harness.deps);
+      expect(harness.deps.loadConfig).not.toHaveBeenCalled();
+      expect(harness.deps.packageBlocks).not.toHaveBeenCalled();
+    });
+
+    it('-c uses the API key even when signed in and never touches sessions', async () => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = await push(
+        makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } }),
+        {
+          json: true,
+          credentials: '/tmp/c.json',
+          dashboard: 'D1',
+          create: true,
+          yes: true,
+        },
+      );
+
+      expect(harness.json()).toMatchObject({ ok: true, applied: true, businessId: 'biz' });
+      expect(harness.deps.loadCredentialsDetailed).toHaveBeenCalledWith('/tmp/c.json');
+      expect(harness.deps.createClient).toHaveBeenCalledWith(makeCredentials());
+      expect(harness.deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
+      expectNoSessionReads(oauth);
+    });
+
+    it('--profile uses the API key even when signed in and never touches sessions', async () => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const oauth = oauthDeps(['staging'], fake);
+      const harness = await push(
+        makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } }),
+        {
+          json: true,
+          profile: 'Demo',
+          dashboard: 'D1',
+          create: true,
+          yes: true,
+        },
+      );
+
+      expect(harness.json()).toMatchObject({ ok: true, applied: true, businessId: 'biz' });
+      expect(harness.deps.loadCredentialsDetailed).toHaveBeenCalledWith(
+        '/home/.kizenappbuilder/demo.json',
+      );
+      expect(harness.deps.createClient).toHaveBeenCalledWith(makeCredentials());
+      expectNoSessionReads(oauth);
+    });
+
+    it('signed in to several environments without --env asks for an environment with a choice per environment', async () => {
+      const harness = await push(
+        makeHarness({ deps: { oauth: oauthDeps(['go', 'staging']) } }),
+        {},
+      );
+      const err = harness.stderr.join('');
+
+      expect(err).toContain(
+        "Error: You're signed in to several environments; pass --env <env>: go, staging",
+      );
+      expect(err).toContain(`go  →  appbuilder block push ${BLOCK} --env go`);
+      expect(err).toContain(`staging  →  appbuilder block push ${BLOCK} --env staging`);
+      expect(harness.exitCodes).toStrictEqual([1]);
+      expect(harness.deps.packageBlocks).not.toHaveBeenCalled();
+    });
+
+    it('needs_choice choice args re-run successfully', async () => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+      const asked = await push(
+        makeHarness({ fake, deps: { oauth: oauthDeps(['go', 'staging'], fake) } }),
+        {
+          json: true,
+        },
+      );
+      const { choices } = asked.json() as { choices: { value: string; args: string[] }[] };
+      const staging = choices.find((choice) => choice.value === 'staging');
+      const oauth = oauthDeps(['go', 'staging'], fake);
+      const rerun = await push(makeHarness({ fake, deps: { oauth } }), {
+        json: true,
+        dashboard: 'D1',
+        create: true,
+        yes: true,
+        ...parseChoiceArgs(staging?.args ?? []),
+      });
+
+      expect(rerun.json()).toMatchObject({ ok: true, applied: true, environment: 'staging' });
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+    });
+
+    describe('follow-up commands carry the credential flags given, and never --oauth', () => {
+      const severalBlocks = [
+        makePlugin(PLUGIN, [makeBlock(), makeBlock({ api_name: 'table', name: 'Table' })]),
+      ];
+      const chooseFake = (): FakeClient =>
+        makeClient({
+          summaries: { generic_dashboard: [summary()] },
+          dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'other' })] })],
+        });
+
+      it.each<[string, PushCommandOptions, string]>([
+        ['the default session', {}, ''],
+        ['--oauth', { oauth: true }, ''],
+        ['--env', { env: 'staging' }, ' --env staging'],
+        ['--oauth --env', { oauth: true, env: 'staging' }, ' --env staging'],
+        ['--profile', { profile: 'credentials' }, ' --profile credentials'],
+        ['-c', { credentials: '/tmp/c.json' }, ' -c /tmp/c.json'],
+      ])('with %s', async (_label, flags, credentialArgs) => {
+        const fake = chooseFake();
+        const harnessFor = (): Harness =>
+          makeHarness({
+            fake,
+            deployable: severalBlocks,
+            deps: { oauth: oauthDeps(['staging'], fake) },
+          });
+        const block = harnessFor();
+
+        await runPushHeadless(undefined, flags, block.deps);
+
+        const dashboard = await push(harnessFor(), flags);
+        const target = await push(harnessFor(), { ...flags, dashboard: 'D1' });
+        const lines = [block, dashboard, target].map((harness) => harness.stderr.join(''));
+
+        expect(lines[0]).toContain(
+          `Chart (chart)  →  appbuilder block push chart${credentialArgs}\n`,
+        );
+        expect(lines[1]).toContain(
+          `Sales  →  appbuilder block push ${BLOCK}${credentialArgs} --dashboard D1\n`,
+        );
+        expect(lines[2]).toContain(
+          `Create a new block  →  appbuilder block push ${BLOCK}${credentialArgs} --dashboard D1 --create\n`,
+        );
+
+        for (const line of lines) {
+          expect(line).not.toContain('--oauth');
+        }
+      });
+    });
+  });
+
+  describe('PushUI flow', () => {
+    type SessionSetter = Parameters<typeof createPushFlow>[3];
+    type SessionState = Exclude<Parameters<SessionSetter>[0], (...args: never[]) => unknown>;
+    interface PhaseView {
+      type: string;
+      choices?: PushChoice[];
+    }
+
+    const startFlow = (
+      harness: Harness,
+    ): {
+      flow: ReturnType<typeof createPushFlow>;
+      phase: () => PhaseView | undefined;
+      state: { session: SessionState };
+    } => {
+      const phases: PhaseView[] = [];
+      const state: { session: SessionState } = {
+        session: { credentials: null, credentialNotices: [], warnings: [], notices: [] },
+      };
+      const flow = createPushFlow(
+        BLOCK,
+        harness.deps,
+        (next) => {
+          phases.push(
+            (typeof next === 'function' ? next(phases.at(-1) as never) : next) as PhaseView,
+          );
+        },
+        (next) => {
+          state.session = typeof next === 'function' ? next(state.session) : next;
+        },
+      );
+
+      return { flow, state, phase: () => phases.at(-1) };
+    };
+
+    it('the interactive picker offers environments, never API-key profiles', async () => {
+      const fake = makeClient();
+      const oauth = oauthDeps(['go', 'staging'], fake);
+      const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
+      const { flow, phase, state } = startFlow(harness);
+
+      flow.start({});
+
+      await vi.waitFor(() => {
+        expect(phase()?.type).toBe('environment-select');
+      });
+
+      const choices = phase()?.choices ?? [];
+
+      expect(choices.map((choice) => choice.value)).toStrictEqual(['go', 'staging']);
+      expect(choices.map((choice) => choice.value)).not.toContain('Demo');
+      expectNoApiKeyReads(harness.deps);
+
+      const staging = choices.find((choice) => choice.value === 'staging');
+
+      if (staging === undefined) {
+        throw new Error('no staging choice');
+      }
+
+      flow.pickEnvironment(phase() as Parameters<typeof flow.pickEnvironment>[0], staging);
+
+      await vi.waitFor(() => {
+        expect(phase()?.type).toBe('surface-select');
+      });
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expect(state.session.credentials).toStrictEqual({
+        environment: 'staging',
+        businessId: 'oauth-biz',
+      });
+      expectNoApiKeyReads(harness.deps);
+    });
+
+    it('shows the pinned-profile notice and keeps using the session', async () => {
+      const fake = makeClient();
+      const harness = makeHarness({
+        fake,
+        profiles: SEVERAL_PROFILES,
+        config: { activeCredentialProfile: 'Demo' },
+        deps: { oauth: oauthDeps(['staging'], fake) },
+      });
+      const { flow, phase, state } = startFlow(harness);
+
+      flow.start({});
+
+      await vi.waitFor(() => {
+        expect(phase()?.type).toBe('surface-select');
+      });
+      expect(state.session.credentialNotices).toStrictEqual([pinnedProfileNotice('Demo')]);
+      expectNoApiKeyReads(harness.deps);
     });
   });
 });

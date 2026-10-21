@@ -9,6 +9,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { platform } from 'node:process';
+import { type CallbackPageKind, renderCallbackPage } from './callbackPage.js';
 import type { Environment } from './credentials.js';
 import { errorCause, isRecord, nonEmptyString } from './guards.js';
 
@@ -58,8 +59,11 @@ export interface TokenResponse {
   scope: string | undefined;
 }
 
+/** `--env` only when it isn't `login`'s default, so hints for go read `appbuilder login`. */
 export const loginCommandFor = (environment: Environment): string =>
-  `appbuilder login --env ${environment}`;
+  environment === DEFAULT_LOGIN_ENVIRONMENT
+    ? 'appbuilder login'
+    : `appbuilder login --env ${environment}`;
 
 /** A `login_required` error: `reason`, then how to sign in (again). */
 export const loginRequired = (
@@ -302,24 +306,49 @@ export interface LoopbackServer {
   close: () => Promise<void>;
 }
 
-const respond = (res: ServerResponse, status: number, text: string): void => {
+interface CallbackPage {
+  kind: CallbackPageKind;
+  heading: string;
+  text: string;
+}
+
+const respond = (res: ServerResponse, status: number, page: CallbackPage): void => {
   res
     .writeHead(status, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
       Connection: 'close',
     })
-    .end(
-      `<!doctype html><html><head><meta charset="utf-8"><title>Kizen App Builder</title></head><body><p>${text}</p></body></html>`,
-    );
+    .end(renderCallbackPage(page.kind, page.heading, page.text));
 };
 
-const CALLBACK_SUCCESS_TEXT = 'Login complete. You can close this window.';
+const CALLBACK_SUCCESS_TEXT = 'Sign-in complete. You can close this window.';
 const CALLBACK_FAILURE_TEXT =
-  'Login failed. Return to the terminal for details. You can close this window.';
+  'Sign-in failed. Return to the terminal for details. You can close this window.';
 
 export const CALLBACK_WRONG_STATE_TEXT =
-  'This login link is not for the current login. Use the latest link from the terminal.';
+  'This sign-in link is out of date. Use the latest link from the terminal.';
+
+export const CALLBACK_SUCCESS_HEADING = 'You’re signed in';
+export const CALLBACK_FAILURE_HEADING = 'Sign-in failed';
+export const CALLBACK_WRONG_STATE_HEADING = 'Outdated link';
+
+// Constants only: nothing from the request reaches the page.
+const CALLBACK_SUCCESS: CallbackPage = {
+  kind: 'success',
+  heading: CALLBACK_SUCCESS_HEADING,
+  text: CALLBACK_SUCCESS_TEXT,
+};
+const CALLBACK_FAILURE: CallbackPage = {
+  kind: 'error',
+  heading: CALLBACK_FAILURE_HEADING,
+  text: CALLBACK_FAILURE_TEXT,
+};
+const CALLBACK_WRONG_STATE: CallbackPage = {
+  kind: 'error',
+  heading: CALLBACK_WRONG_STATE_HEADING,
+  text: CALLBACK_WRONG_STATE_TEXT,
+};
 
 /** The request target as a URL, or undefined when it doesn't parse. */
 const parseRequestTarget = (target: string | undefined): URL | undefined => {
@@ -363,7 +392,7 @@ export async function startLoopbackServer(options: {
     const params = url.searchParams;
 
     if (params.get('state') !== options.state) {
-      respond(res, 400, CALLBACK_WRONG_STATE_TEXT);
+      respond(res, 400, CALLBACK_WRONG_STATE);
 
       return;
     }
@@ -382,7 +411,7 @@ export async function startLoopbackServer(options: {
           ? new OAuthError('invalid_callback', 'The sign-in callback had no authorization code')
           : undefined;
 
-    respond(res, failure ? 400 : 200, failure ? CALLBACK_FAILURE_TEXT : CALLBACK_SUCCESS_TEXT);
+    respond(res, failure ? 400 : 200, failure ? CALLBACK_FAILURE : CALLBACK_SUCCESS);
     finish(failure, code);
   });
 

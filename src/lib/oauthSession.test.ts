@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Environment } from './credentials.js';
+import type { KizenIdentity } from './kizenClient.js';
 import { startLoopbackServer } from './oauth.js';
 import {
   createDefaultTokenProvider,
@@ -14,16 +15,21 @@ import {
   type LoginDeps,
   type TokenProviderDeps,
 } from './oauthSession.js';
-import { createOAuthStore, type OAuthSession, type OAuthStore } from './oauthStore.js';
+import { accountKey, createOAuthStore, type OAuthSession, type OAuthStore } from './oauthStore.js';
 import {
+  ACCOUNT_A,
+  ACCOUNT_B,
+  accountOf,
   deferred,
   hangUntilAbort,
+  holdingStore,
   httpGet,
   ISSUER,
   jsonResponse,
   NOW,
   oauthSession,
   rejectionOf,
+  signIn,
   TOKEN_ENDPOINT as TOKEN,
 } from '../test/oauth.js';
 
@@ -148,10 +154,42 @@ const approve = (authorize: URL): Record<string, string> => ({
   state: authorize.searchParams.get('state') ?? '',
 });
 
+/** What `/auth/bootstrap` says about account A, with the labels `oauthSession()` stores. */
+const IDENTITY_A: KizenIdentity = {
+  ...ACCOUNT_A,
+  businessName: 'Acme A',
+  fullName: 'Ada A',
+  email: 'ada@a.test',
+};
+
+const IDENTITY_B: KizenIdentity = {
+  ...ACCOUNT_B,
+  businessName: 'Bravo B',
+  fullName: 'Bob B',
+  email: 'bob@b.test',
+};
+
+/**
+ * `identify` for a login: the bootstrap answer (or rejection) the new tokens get. `tokens`
+ * collects the access token each lookup was made with.
+ */
+const identifyAs =
+  (identity: KizenIdentity | Error, tokens: string[] = []): LoginDeps['identify'] =>
+  async (bearer) => {
+    tokens.push(await bearer.getAccessToken());
+
+    if (identity instanceof Error) {
+      throw identity;
+    }
+
+    return identity;
+  };
+
 const loginDeps = (
   server: FakeAuthServer,
   browser: FakeBrowser,
   printed: string[] = [],
+  identity: KizenIdentity | Error = IDENTITY_A,
 ): LoginDeps => ({
   store,
   fetch: server.fetch,
@@ -161,6 +199,7 @@ const loginDeps = (
   },
   openBrowser: browser.open,
   startLoopbackServer,
+  identify: identifyAs(identity),
   timeoutMs: 5000,
 });
 
@@ -205,6 +244,7 @@ describe('login', () => {
     ).toBe(authorize?.searchParams.get('code_challenge'));
     expect(session).toMatchObject({
       environment: 'staging',
+      ...IDENTITY_A,
       clientId: 'registered-1',
       tokenEndpoint: TOKEN,
       accessToken: 'access-1',
@@ -218,18 +258,183 @@ describe('login', () => {
     expect(printed.join('\n')).not.toContain('access-1');
   });
 
-  it('each login writes a new loginId', async () => {
-    const server = fakeAuthServer();
-    const first = await login('staging', loginDeps(server, fakeBrowser(approve)));
-    const firstStored = await store.readSession('staging');
-    const second = await login('staging', loginDeps(server, fakeBrowser(approve)));
-    const secondStored = await store.readSession('staging');
+  it('login looks up the identity with the new tokens before saving anything', async () => {
+    const tokens: string[] = [];
+    const order: string[] = [];
+    const tracking: OAuthStore = {
+      ...store,
+      writeSession: async (session) => {
+        order.push('writeSession');
+        await store.writeSession(session);
+      },
+      setCurrent: async (environment, account) => {
+        order.push('setCurrent');
+        await store.setCurrent(environment, account);
+      },
+      readSession: async (environment) => {
+        order.push('readSession');
 
-    expect(firstStored?.loginId).toBe(first.loginId);
-    expect(secondStored?.loginId).toBe(second.loginId);
-    expect(first.loginId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(second.loginId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(second.loginId).not.toBe(first.loginId);
+        return store.readSession(environment);
+      },
+    };
+    const deps: LoginDeps = {
+      ...loginDeps(fakeAuthServer(), fakeBrowser(approve)),
+      store: tracking,
+      identify: async (bearer) => {
+        order.push('identify');
+
+        return identifyAs(IDENTITY_A, tokens)(bearer);
+      },
+    };
+
+    await login('staging', deps);
+
+    expect(tokens).toStrictEqual(['access-1']);
+    expect(order).toStrictEqual(['identify', 'writeSession', 'setCurrent', 'readSession']);
+  });
+
+  it('login saves nothing when the identity lookup fails', async () => {
+    await signIn(store, oauthSession());
+
+    const deps = loginDeps(
+      fakeAuthServer(),
+      fakeBrowser(approve),
+      [],
+      new Error('Kizen is unavailable'),
+    );
+
+    await expect(login('staging', deps)).rejects.toThrow('Kizen is unavailable');
+    // The previous sign-in is untouched, and no other account file appeared.
+    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
+    expect((await readdir(store.dir)).sort()).toStrictEqual([
+      'clients.json',
+      `staging.${accountKey(ACCOUNT_A)}.json`,
+      'staging.json',
+    ]);
+  });
+
+  it('identity ids from the server only reach a path encoded, and invalid ones save nothing', async () => {
+    // Path syntax from a (fake) server is saved inside oauth/, under its encoded name.
+    const traversal = { ...IDENTITY_A, businessId: '../../x', userId: '/etc/passwd' };
+    const saved = await login(
+      'staging',
+      loginDeps(fakeAuthServer(), fakeBrowser(approve), [], traversal),
+    );
+
+    expect(accountOf(saved)).toStrictEqual(accountOf(traversal));
+    expect((await readdir(store.dir)).sort()).toStrictEqual([
+      'clients.json',
+      `staging.${accountKey(traversal)}.json`,
+      'staging.json',
+    ]);
+    expect((await readdir(dir)).sort()).toStrictEqual(['oauth']);
+
+    // Ids that fail validation: nothing is written, and the previous sign-in stays current.
+    for (const bad of [
+      { ...IDENTITY_A, businessId: '' },
+      { ...IDENTITY_A, userId: 'a\u0000b' },
+      { ...IDENTITY_A, businessId: 'x'.repeat(200) },
+      // One byte over the cap that keeps the file name within 255 bytes.
+      { ...IDENTITY_A, businessId: 'x'.repeat(56) },
+    ]) {
+      const error = await rejectionOf(
+        login('staging', loginDeps(fakeAuthServer(), fakeBrowser(approve), [], bad)),
+      );
+
+      expect(error.code).toBe('invalid_identity');
+      expect(await store.readSession('staging')).toStrictEqual(saved);
+      expect(await readdir(store.dir)).toHaveLength(3);
+    }
+  });
+
+  it('re-login to the same account overwrites its file and leaves no second file', async () => {
+    const first = await login(
+      'staging',
+      loginDeps(
+        fakeAuthServer(() => jsonResponse(tokenBody(1))),
+        fakeBrowser(approve),
+      ),
+    );
+    const second = await login(
+      'staging',
+      loginDeps(
+        fakeAuthServer(() => jsonResponse(tokenBody(2))),
+        fakeBrowser(approve),
+        [],
+        { ...IDENTITY_A, businessName: 'Acme Renamed' },
+      ),
+    );
+
+    expect(accountOf(first)).toStrictEqual(accountOf(second));
+    expect(await store.readSession('staging')).toStrictEqual(second);
+    expect(second).toMatchObject({ accessToken: 'access-2', businessName: 'Acme Renamed' });
+    expect((await readdir(store.dir)).sort()).toStrictEqual([
+      'clients.json',
+      `staging.${accountKey(ACCOUNT_A)}.json`,
+      'staging.json',
+    ]);
+    expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+      ACCOUNT_A,
+    );
+  });
+
+  it('login to another account keeps the first one saved and makes the new one current', async () => {
+    const first = await login('staging', loginDeps(fakeAuthServer(), fakeBrowser(approve)));
+    const second = await login(
+      'staging',
+      loginDeps(
+        fakeAuthServer(() => jsonResponse(tokenBody(9))),
+        fakeBrowser(approve),
+        [],
+        IDENTITY_B,
+      ),
+    );
+
+    expect(await store.readSession('staging')).toStrictEqual(second);
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(first);
+    // Listed A (Acme) then B (Bravo); B is current.
+    expect(
+      (await store.listAccounts('staging')).map(({ account, current }) => [account, current]),
+    ).toStrictEqual([
+      [ACCOUNT_A, false],
+      [ACCOUNT_B, true],
+    ]);
+  });
+
+  it('login with makeCurrent saying no saves the account without moving the pointer', async () => {
+    await signIn(store, oauthSession({ ...IDENTITY_B }));
+
+    const seen: KizenIdentity[] = [];
+    const session = await login('staging', loginDeps(fakeAuthServer(), fakeBrowser(approve)), {
+      makeCurrent: (identity) => {
+        seen.push(identity);
+
+        return false;
+      },
+    });
+
+    expect(seen).toStrictEqual([IDENTITY_A]);
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(session);
+    expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+      ACCOUNT_B,
+    );
+  });
+
+  it('a login whose account file is removed before it is pointed to fails rather than reporting success', async () => {
+    // A logout of this account in another terminal lands between the write and the point.
+    const removed: OAuthStore = {
+      ...store,
+      setCurrent: async (environment, account) => {
+        await store.deleteSession(environment, account);
+        await store.setCurrent(environment, account);
+      },
+    };
+    const deps = { ...loginDeps(fakeAuthServer(), fakeBrowser(approve)), store: removed };
+    const error = await rejectionOf(login('staging', deps));
+
+    expect(error.code).toBe('login_required');
+    expect(error.message).toBe(NOT_SIGNED_IN);
+    expect(await store.readSession('staging')).toBeNull();
   });
 
   it('a forged callback does not end the login, and its code is never exchanged', async () => {
@@ -397,16 +602,16 @@ const EXPIRING = NOW + 30_000; // inside the 60s leeway
 describe('createTokenProvider', () => {
   /** login-a with the tokens another refresh (or process) of it stored. */
   const ROTATED = oauthSession({ accessToken: 'access-rotated', refreshToken: 'refresh-rotated' });
-  /** A newer login, with its own tokens and app registration. */
+  /** Another account, with its own tokens and app registration. */
   const LOGIN_B = oauthSession({
-    loginId: 'login-b',
+    ...IDENTITY_B,
     clientId: 'client-2',
     accessToken: 'access-b',
     refreshToken: 'refresh-b',
   });
 
   it('returns a fresh token without refreshing', async () => {
-    await store.writeSession(oauthSession({ expiresAt: NOW + 61_000 }));
+    await signIn(store, oauthSession({ expiresAt: NOW + 61_000 }));
 
     const server = fakeAuthServer();
 
@@ -415,7 +620,7 @@ describe('createTokenProvider', () => {
   });
 
   it('concurrent token requests in one process trigger a single refresh', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
     let respond: (() => void) | undefined;
     const server = fakeAuthServer(
@@ -449,12 +654,12 @@ describe('createTokenProvider', () => {
       refreshToken: 'refresh-1',
       expiresAt: NOW + 3600 * 1000,
     });
-    expect((await stat(store.sessionPath('staging'))).mode & 0o777).toBe(0o600);
+    expect((await stat(store.accountPath('staging', ACCOUNT_A))).mode & 0o777).toBe(0o600);
   });
 
   it('getAccessToken during a 401-triggered refresh of a still-fresh token returns the refreshed token', async () => {
     // Fresh by expiry, so only the in-flight refresh says its token is rejected.
-    await store.writeSession(oauthSession());
+    await signIn(store, oauthSession());
 
     const respond = deferred();
     const server = fakeAuthServer(async (_, index) => {
@@ -479,7 +684,7 @@ describe('createTokenProvider', () => {
 
   it('a 401 refresh after another process rotated past the rejected token uses the new one', async () => {
     // Fresh by expiry but rejected by the server: refresh even though it isn't expiring.
-    await store.writeSession(oauthSession());
+    await signIn(store, oauthSession());
 
     const server = fakeAuthServer();
 
@@ -492,7 +697,7 @@ describe('createTokenProvider', () => {
   });
 
   it('invalid_grant on refresh deletes the session and asks to log in again', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer(() =>
       jsonResponse({ error: 'invalid_grant', error_description: 'Token expired' }, 400),
@@ -503,7 +708,9 @@ describe('createTokenProvider', () => {
     expect(error.code).toBe('login_required');
     expect(error.message).toContain('appbuilder login --env staging');
     expect(await store.readSession('staging')).toBeNull();
-    await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(store.accountPath('staging', ACCOUNT_A))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
 
     // No loop: the next call fails fast without another token request.
     expect((await rejectionOf(tokens.getAccessToken())).code).toBe('login_required');
@@ -511,7 +718,7 @@ describe('createTokenProvider', () => {
   });
 
   it('invalid_client on refresh deletes the session, forgets the client id and asks to sign in', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
     await store.writeClientId(ISSUER, 'client-1');
     await store.writeClientId('https://other.test', 'client-other');
 
@@ -528,7 +735,7 @@ describe('createTokenProvider', () => {
   });
 
   it('invalid_client keeps a client id another login registered meanwhile', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
     await store.writeClientId(ISSUER, 'client-1');
 
     const respond = deferred();
@@ -553,7 +760,7 @@ describe('createTokenProvider', () => {
   });
 
   it('an unreadable clients.json after invalid_client still asks to sign in', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_client' }, 401));
     const tokens = provider(server, {
@@ -575,7 +782,7 @@ describe('createTokenProvider', () => {
   });
 
   it('invalid_client keeps the client id when this refresh did not delete the session', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
     await store.writeClientId(ISSUER, 'client-1');
 
     const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_client' }, 401));
@@ -583,10 +790,10 @@ describe('createTokenProvider', () => {
     const tokens = provider(server, {
       store: {
         ...store,
-        deleteSession: async (environment) => {
-          await store.deleteSession(environment);
+        deleteSession: async (environment, account) => {
+          await store.signOut(environment);
 
-          return store.deleteSession(environment);
+          return store.deleteSession(environment, account);
         },
       },
     });
@@ -630,7 +837,7 @@ describe('createTokenProvider', () => {
     async (_name, code, respond, messagePart?: string) => {
       const before = oauthSession({ expiresAt: EXPIRING });
 
-      await store.writeSession(before);
+      await signIn(store, before);
 
       const writeSession = vi.spyOn(store, 'writeSession');
       const deleteSession = vi.spyOn(store, 'deleteSession');
@@ -658,8 +865,8 @@ describe('createTokenProvider', () => {
       refreshToken: 'go-refresh',
     });
 
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
-    await store.writeSession(other);
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, other);
 
     const server = fakeAuthServer(() => jsonResponse({ error: 'invalid_grant' }, 400));
 
@@ -681,7 +888,7 @@ describe('createTokenProvider', () => {
       respond: (params: URLSearchParams) => Response | Promise<Response> = () =>
         jsonResponse(tokenBody(1)),
     ): Promise<{ pending: Promise<string>; release: () => void; server: FakeAuthServer }> => {
-      await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+      await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
       const gate = deferred();
       const server = fakeAuthServer(async (params) => {
@@ -709,7 +916,7 @@ describe('createTokenProvider', () => {
     it("a refresh that completes after logout doesn't restore the session", async () => {
       const { pending, release } = await heldRefresh();
 
-      expect(await createOAuthStore(dir).deleteSession('staging')).toBe(true);
+      expect(await createOAuthStore(dir).signOut('staging')).toBe(true);
       release();
 
       const error = await rejectionOf(pending);
@@ -720,12 +927,18 @@ describe('createTokenProvider', () => {
     });
 
     it.each([
-      ["a refresh that completes after another login doesn't overwrite it", undefined],
-      ['a refresh that gets invalid_grant after another login does not delete it', INVALID_GRANT],
+      [
+        "a refresh that completes after a switch to another account doesn't overwrite it",
+        undefined,
+      ],
+      [
+        'a refresh that gets invalid_grant after a switch to another account does not delete it',
+        INVALID_GRANT,
+      ],
     ])('%s', async (_name, respond) => {
       const { pending, release, server } = await heldRefresh(respond);
 
-      await createOAuthStore(dir).writeSession(LOGIN_B);
+      await signIn(createOAuthStore(dir), LOGIN_B);
       release();
 
       const error = await rejectionOf(pending);
@@ -734,6 +947,54 @@ describe('createTokenProvider', () => {
       expect(error.message).toBe(SIGN_IN_CHANGED);
       expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
       expect(server.tokenRequests()).toHaveLength(1);
+    });
+
+    it("a refresh that completes after a switch saves the old account's new tokens and still aborts", async () => {
+      const { pending, release } = await heldRefresh();
+
+      // Account B was saved earlier; the user switches to it while A's refresh is out.
+      await signIn(createOAuthStore(dir), LOGIN_B);
+      release();
+
+      const error = await rejectionOf(pending);
+
+      expect(error.message).toBe(SIGN_IN_CHANGED);
+      // The pointer is still B, and A's file holds the pair the server just issued, so switching
+      // back to A later works.
+      expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+        ACCOUNT_B,
+      );
+      expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+      expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(
+        oauthSession({
+          accessToken: 'access-1',
+          refreshToken: 'refresh-1',
+          expiresAt: NOW + 3600 * 1000,
+        }),
+      );
+    });
+
+    it('a refresh that completes after a switch and a logout of the old account writes nothing', async () => {
+      const { pending, release } = await heldRefresh();
+
+      await signIn(createOAuthStore(dir), LOGIN_B);
+      await createOAuthStore(dir).removeAccount('staging', ACCOUNT_A);
+      release();
+
+      expect((await rejectionOf(pending)).message).toBe(SIGN_IN_CHANGED);
+      expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+      expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+    });
+
+    it("a refresh that completes after a switch keeps a peer's newer tokens for the old account", async () => {
+      const { pending, release } = await heldRefresh();
+
+      await signIn(createOAuthStore(dir), LOGIN_B);
+      await createOAuthStore(dir).writeSession(ROTATED);
+      release();
+
+      expect((await rejectionOf(pending)).message).toBe(SIGN_IN_CHANGED);
+      expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(ROTATED);
     });
 
     it("a refresh that completes after a peer rotated keeps the peer's tokens", async () => {
@@ -837,8 +1098,8 @@ describe('createTokenProvider', () => {
       expect(await store.readSession('staging')).toStrictEqual(stale('peer2'));
     });
 
-    it('a refresh with no refresh token does not delete a newer login', async () => {
-      await store.writeSession(oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
+    it('a refresh with no refresh token does not delete another account that became current', async () => {
+      await signIn(store, oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
 
       const paused = deferred();
       const resume = deferred();
@@ -865,7 +1126,7 @@ describe('createTokenProvider', () => {
 
       pending.catch(() => undefined);
       await paused.promise;
-      await createOAuthStore(dir).writeSession(LOGIN_B);
+      await signIn(createOAuthStore(dir), LOGIN_B);
       resume.resolve();
 
       const error = await rejectionOf(pending);
@@ -877,7 +1138,7 @@ describe('createTokenProvider', () => {
     });
 
     it('a refresh with no refresh token deletes the unchanged session', async () => {
-      await store.writeSession(oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
+      await signIn(store, oauthSession({ expiresAt: EXPIRING, refreshToken: undefined }));
 
       const server = fakeAuthServer();
       const error = await rejectionOf(provider(server).getAccessToken());
@@ -887,6 +1148,93 @@ describe('createTokenProvider', () => {
       );
       expect(await store.readSession('staging')).toBeNull();
       expect(server.fetch).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a refresh held after its last check', () => {
+    /** A real login to account B on its own fake server, so its tokens differ from the refresh's. */
+    const loginB = (): Promise<OAuthSession> =>
+      login(
+        'staging',
+        loginDeps(
+          fakeAuthServer(() => jsonResponse(tokenBody(50))),
+          fakeBrowser(approve),
+          [],
+          IDENTITY_B,
+        ),
+      );
+
+    /** Starts a refresh of login A through `held`'s store; resolves once it is held. */
+    const refreshUntilHeld = async (
+      method: 'writeSession' | 'deleteSession',
+      respond?: Parameters<typeof fakeAuthServer>[0],
+    ): Promise<{ pending: Promise<string>; release: () => void }> => {
+      await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+      const held = holdingStore(createOAuthStore(dir), method);
+      const pending = provider(fakeAuthServer(respond), { store: held.store }).getAccessToken();
+
+      pending.catch(() => undefined);
+      await held.reached;
+
+      return { pending, release: held.release };
+    };
+
+    it("a refresh that writes after logout doesn't undo it", async () => {
+      const { pending, release } = await refreshUntilHeld('writeSession');
+
+      expect(await createOAuthStore(dir).signOut('staging')).toBe(true);
+      release();
+
+      // The refresh went through and wrote account A's own file, which is saved but not current.
+      await expect(pending).resolves.toBe('access-1');
+      expect(
+        JSON.parse(await readFile(store.accountPath('staging', ACCOUNT_A), 'utf-8')),
+      ).toMatchObject({ ...ACCOUNT_A, accessToken: 'access-1' });
+      // The logout stands.
+      expect(await store.readSession('staging')).toBeNull();
+      expect(await store.listSessions()).toStrictEqual([]);
+    });
+
+    it("a refresh that writes after another account becomes current doesn't replace it", async () => {
+      const { pending, release } = await refreshUntilHeld('writeSession');
+      const b = await loginB();
+
+      release();
+
+      await expect(pending).resolves.toBe('access-1');
+      expect(b).toMatchObject({
+        ...ACCOUNT_B,
+        accessToken: 'access-50',
+        refreshToken: 'refresh-50',
+      });
+      // Current is exactly B, and A's file holds A's own refreshed tokens.
+      expect(await store.readSession('staging')).toStrictEqual(b);
+      expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+        ACCOUNT_B,
+      );
+      expect(await store.readAccount('staging', ACCOUNT_A)).toMatchObject({
+        ...ACCOUNT_A,
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+      });
+      expect(await store.listSessions()).toStrictEqual(['staging']);
+    });
+
+    it("an invalid_grant delete after another account becomes current doesn't remove it", async () => {
+      const { pending, release } = await refreshUntilHeld('deleteSession', () =>
+        jsonResponse({ error: 'invalid_grant' }, 400),
+      );
+      const b = await loginB();
+
+      release();
+
+      expect((await rejectionOf(pending)).message).toContain('is no longer valid');
+      // Only account A's file went.
+      await expect(stat(store.accountPath('staging', ACCOUNT_A))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(await store.readSession('staging')).toStrictEqual(b);
     });
   });
 
@@ -962,7 +1310,7 @@ describe('createTokenProvider', () => {
       'two processes refreshing at once both keep a working session: %s',
       async (_name, secondDelayMs) => {
         for (const first of [0, 1]) {
-          await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+          await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
           const kizen = graceServer({ access: 'access-0', refresh: 'refresh-0' });
           const gates = [deferred(), deferred()];
@@ -1001,10 +1349,40 @@ describe('createTokenProvider', () => {
         }
       },
     );
+
+    it('a delayed write after a peer rotation within the grace window leaves a working session', async () => {
+      await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+      const kizen = graceServer({ access: 'access-0', refresh: 'refresh-0' });
+      const answer = (): FakeAuthServer =>
+        fakeAuthServer((params) => kizen.respond(params.get('refresh_token')));
+      // Process 1 is answered first, passes its re-read, and is held before it writes.
+      const held = holdingStore(createOAuthStore(dir), 'writeSession');
+      const delayed = provider(answer(), { store: held.store }).getAccessToken();
+
+      await held.reached;
+
+      // Process 2 presents the same refresh token inside the grace window and stores its rotation.
+      kizen.advance(GRACE_MS - 1);
+
+      const peer = await provider(answer(), { store: createOAuthStore(dir) }).getAccessToken();
+      const peerStored = await store.readSession('staging');
+
+      // Then process 1's write lands over it.
+      held.release();
+
+      const tokens = [await delayed, peer];
+      const stored = await store.readSession('staging');
+
+      expect(tokens.every((token) => kizen.validAccess(token))).toBe(true);
+      expect(stored).toStrictEqual(peerStored);
+      expect(kizen.validAccess(stored?.accessToken ?? '')).toBe(true);
+      expect(kizen.accepts(stored?.refreshToken)).toBe(true);
+    });
   });
 
   it('a refresh with the session unchanged writes the rotated tokens', async () => {
-    await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer();
 
@@ -1026,9 +1404,9 @@ describe('createTokenProvider', () => {
     ],
     ['a fresh session', {}],
   ] as const)(
-    'refresh does not request or write when a different login replaced the session (%s)',
+    'refresh does not request or write when another account became current (%s)',
     async (_, replacement) => {
-      await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+      await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
       const newLogin = { ...LOGIN_B, ...replacement };
       const server = fakeAuthServer();
@@ -1042,7 +1420,7 @@ describe('createTokenProvider', () => {
             reads += 1;
 
             if (reads === 2) {
-              await createOAuthStore(dir).writeSession(newLogin);
+              await signIn(createOAuthStore(dir), newLogin);
             }
 
             return store.readSession(environment);
@@ -1060,17 +1438,17 @@ describe('createTokenProvider', () => {
     },
   );
 
-  it('rejects the token after another login replaces the session', async () => {
-    await store.writeSession(oauthSession());
+  it('switching to another account aborts a running command with sign-in changed', async () => {
+    await signIn(store, oauthSession());
 
     const server = fakeAuthServer();
     const tokens = provider(server);
 
     await expect(tokens.getAccessToken()).resolves.toBe('access-0');
 
-    const newLogin = oauthSession({ loginId: 'login-b', accessToken: 'access-b' });
+    const newLogin = oauthSession({ ...ACCOUNT_B, accessToken: 'access-b' });
 
-    await store.writeSession(newLogin);
+    await signIn(store, newLogin);
 
     const error = await rejectionOf(tokens.getAccessToken());
 
@@ -1085,8 +1463,111 @@ describe('createTokenProvider', () => {
     await expect(provider(server).getAccessToken()).resolves.toBe('access-b');
   });
 
-  it('keeps working across refresh-token rotation within one login', async () => {
+  it('another user in the same business is another account to the pin', async () => {
+    await signIn(store, oauthSession());
+
+    const tokens = provider(fakeAuthServer());
+
+    await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+    await signIn(store, oauthSession({ userId: 'user-other', accessToken: 'access-other' }));
+
+    expect((await rejectionOf(tokens.getAccessToken())).message).toBe(SIGN_IN_CHANGED);
+  });
+
+  it("re-login to the same account doesn't abort a running command", async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const server = fakeAuthServer((params) =>
+      jsonResponse(tokenBody(params.get('refresh_token') === 'refresh-relogin' ? 8 : 1)),
+    );
+    const tokens = provider(server);
+
+    await expect(tokens.getAccessToken()).resolves.toBe('access-1');
+
+    // Signing in again to account A, maybe with a new app registration, replaces its tokens.
+    const relogin = oauthSession({
+      clientId: 'client-2',
+      accessToken: 'access-relogin',
+      refreshToken: 'refresh-relogin',
+    });
+
+    await signIn(store, relogin);
+
+    // The command keeps going, on the new sign-in's tokens.
+    await expect(tokens.getAccessToken()).resolves.toBe('access-relogin');
+    await expect(tokens.refreshAccessToken('access-relogin')).resolves.toBe('access-8');
+    expect(server.tokenRequests().at(-1)?.get('client_id')).toBe('client-2');
+    expect(await store.readSession('staging')).toMatchObject({
+      ...ACCOUNT_A,
+      clientId: 'client-2',
+      accessToken: 'access-8',
+      refreshToken: 'refresh-8',
+    });
+  });
+
+  it("a held refresh after a re-login to the same account keeps the re-login's tokens", async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const gate = deferred();
+    const server = fakeAuthServer(async () => {
+      await gate.promise;
+
+      return jsonResponse(tokenBody(1));
+    });
+    const pending = provider(server).getAccessToken();
+    const relogin = oauthSession({
+      accessToken: 'access-relogin',
+      refreshToken: 'refresh-relogin',
+    });
+
+    await vi.waitFor(() => {
+      expect(server.tokenRequests()).toHaveLength(1);
+    });
+    await signIn(createOAuthStore(dir), relogin);
+    gate.resolve();
+
+    // Not "sign-in changed": the command gets the token it was issued, and the file keeps the
+    // re-login's tokens, like a peer's rotation.
+    await expect(pending).resolves.toBe('access-1');
+    expect(await store.readSession('staging')).toStrictEqual(relogin);
+  });
+
+  it('a refresh of a non-current saved account never changes the pointer', async () => {
+    // A is saved and expiring; B is current.
     await store.writeSession(oauthSession({ expiresAt: EXPIRING }));
+    await signIn(store, LOGIN_B);
+
+    const server = fakeAuthServer();
+    const setCurrent = vi.spyOn(store, 'setCurrent');
+    const tokens = provider(server, { account: ACCOUNT_A });
+
+    await expect(tokens.getAccessToken()).resolves.toBe('access-1');
+    // A refused refresh token too: the account's file goes, the pointer stays.
+    await expect(tokens.refreshAccessToken('access-1')).resolves.toBe('access-2');
+
+    expect(setCurrent).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+      ACCOUNT_B,
+    );
+    expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+    expect(await store.readAccount('staging', ACCOUNT_A)).toMatchObject({
+      accessToken: 'access-2',
+      refreshToken: 'refresh-2',
+    });
+
+    const refused = provider(
+      fakeAuthServer(() => jsonResponse({ error: 'invalid_grant' }, 400)),
+      { account: ACCOUNT_A },
+    );
+
+    expect((await rejectionOf(refused.refreshAccessToken('access-2'))).code).toBe('login_required');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+    expect(setCurrent).not.toHaveBeenCalled();
+    expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+  });
+
+  it('keeps working across refresh-token rotation within one login', async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
 
     const server = fakeAuthServer();
     const tokens = provider(server);
@@ -1094,13 +1575,13 @@ describe('createTokenProvider', () => {
     // This process rotates the refresh token.
     await expect(tokens.getAccessToken()).resolves.toBe('access-1');
     expect(await store.readSession('staging')).toMatchObject({
-      loginId: 'login-a',
+      ...ACCOUNT_A,
       accessToken: 'access-1',
       refreshToken: 'refresh-1',
     });
 
     // Another process rotates it again within the same login.
-    await store.writeSession(ROTATED);
+    await signIn(store, ROTATED);
     await expect(tokens.getAccessToken()).resolves.toBe('access-rotated');
 
     // And a 401 makes this process rotate once more.
@@ -1110,19 +1591,15 @@ describe('createTokenProvider', () => {
       'refresh-rotated',
     ]);
     expect(await store.readSession('staging')).toMatchObject({
-      loginId: 'login-a',
+      ...ACCOUNT_A,
       accessToken: 'access-2',
       refreshToken: 'refresh-2',
     });
   });
 
-  it('session without loginId reads as unreadable and asks to log in', async () => {
-    const withoutLoginId: Partial<OAuthSession> = oauthSession();
-
-    delete withoutLoginId.loginId;
-
+  it('a whole session in the pointer file (an earlier build) reads as unreadable and asks to log in', async () => {
     await mkdir(store.dir, { recursive: true });
-    await writeFile(store.sessionPath('staging'), JSON.stringify(withoutLoginId));
+    await writeFile(store.sessionPath('staging'), JSON.stringify(oauthSession()));
 
     const server = fakeAuthServer();
     const error = await rejectionOf(provider(server).getAccessToken());
@@ -1133,7 +1610,7 @@ describe('createTokenProvider', () => {
     expect(server.fetch).not.toHaveBeenCalled();
   });
 
-  it('concurrent first reads pin one login', async () => {
+  it('concurrent first reads pin one account', async () => {
     const reads = [deferred<OAuthSession>(), deferred<OAuthSession>()];
     let index = 0;
     const readSession = vi.fn(() => {
@@ -1151,28 +1628,28 @@ describe('createTokenProvider', () => {
 
     expect(readSession).toHaveBeenCalledTimes(2);
 
-    // The second call's read lands first, with login-a; the first call's read
-    // then sees login-b. Whichever lands first is the pin; the other must fail.
-    reads[1]?.resolve(oauthSession({ loginId: 'login-a', accessToken: 'access-a' }));
+    // The second call's read lands first, with account A; the first call's read
+    // then sees account B. Whichever lands first is the pin; the other must fail.
+    reads[1]?.resolve(oauthSession({ accessToken: 'access-a' }));
     await expect(second).resolves.toBe('access-a');
-    reads[0]?.resolve(oauthSession({ loginId: 'login-b', accessToken: 'access-b' }));
+    reads[0]?.resolve(oauthSession({ ...ACCOUNT_B, accessToken: 'access-b' }));
     expect((await rejectionOf(first)).code).toBe('login_required');
 
-    // The pin is login-a: it keeps serving login-a and refuses login-b.
-    await store.writeSession(oauthSession({ loginId: 'login-a', accessToken: 'access-a2' }));
+    // The pin is account A: it keeps serving A and refuses B.
+    await signIn(store, oauthSession({ accessToken: 'access-a2' }));
     await expect(tokens.getAccessToken()).resolves.toBe('access-a2');
-    await store.writeSession(oauthSession({ loginId: 'login-b', accessToken: 'access-b2' }));
+    await signIn(store, oauthSession({ ...ACCOUNT_B, accessToken: 'access-b2' }));
     expect((await rejectionOf(tokens.getAccessToken())).code).toBe('login_required');
     expect(server.fetch).not.toHaveBeenCalled();
   });
 
   it('a logout mid-command still asks to sign in', async () => {
-    await store.writeSession(oauthSession());
+    await signIn(store, oauthSession());
 
     const tokens = provider(fakeAuthServer());
 
     await expect(tokens.getAccessToken()).resolves.toBe('access-0');
-    await store.deleteSession('staging');
+    await store.signOut('staging');
 
     const error = await rejectionOf(tokens.getAccessToken());
 
@@ -1214,7 +1691,8 @@ describe('resolveSessionEnvironment', () => {
     await expect(resolveSessionEnvironment(undefined, sessions())).resolves.toStrictEqual({
       ok: false,
       problem: 'not_signed_in',
-      message: "You're not signed in. Run `appbuilder login --env go` (or another --env).",
+      message:
+        "You're not signed in. Run `appbuilder login` (add `--env <env>` to sign in to an environment other than go).",
     });
   });
 
@@ -1233,7 +1711,8 @@ describe('createDefaultTokenProvider', () => {
   it('refreshes by the real clock through the global fetch', async () => {
     // Expired by the real clock, but more than the refresh leeway away from epoch 0,
     // so a provider wired to any other clock would hand back the stored token.
-    await store.writeSession(
+    await signIn(
+      store,
       oauthSession({
         accessToken: 'stored-access',
         refreshToken: 'stored-refresh',

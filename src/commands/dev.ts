@@ -39,7 +39,10 @@ export function devCommand(program: Command): void {
     .command('dev')
     .description('Start the plugin viewer dev server')
     .option('-p, --port <port>', 'port to listen on', '3121')
-    .option('-c, --credentials <path>', 'path to a credentials JSON file')
+    .option(
+      '-c, --credentials <path>',
+      'path to an API-key credentials JSON file (dev still uses API keys; sign-in support is planned)',
+    )
     .option('-d, --debug', 'Enable CDP lifecycle logs in the TUI')
     .option('-v, --verbose', 'Log every CDP event and handled error (implies --debug)')
     .option('--no-viewer', "Don't auto-launch the viewer on startup (press [v] to launch manually)")

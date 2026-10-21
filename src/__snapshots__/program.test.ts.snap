@@ -23,8 +23,8 @@ Commands:
   icons                    List all valid icon names accepted by toolbar items,
                            pages, and adornments
   block                    Work with plugin content blocks
-  login [options]          Sign in to Kizen in the browser and store the session
-                           on this machine
+  login [options]          Sign in to Kizen in the browser, or switch to a saved
+                           account, and store the session on this machine
   logout [options]         Remove the stored session from this machine
   whoami [options]         Show the user and business of the stored session
   auth-header [options]    Print an Authorization header for the stored session

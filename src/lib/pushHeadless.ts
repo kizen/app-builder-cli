@@ -57,9 +57,16 @@ import {
   type PushMapKey,
   type TargetMatch,
 } from './pushBlock.js';
+import {
+  notSignedInWithApiKeyHint,
+  pinnedProfileNotice,
+  selectAuth,
+  type AuthFlags,
+} from './authSelection.js';
 import { createDefaultTokenProvider, resolveSessionEnvironment } from './oauthSession.js';
 import { createOAuthStore, type OAuthStore } from './oauthStore.js';
 import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
+import { quoteArg } from './shellArg.js';
 
 export type PushErrorCode =
   | 'needs_choice'
@@ -77,7 +84,7 @@ export type PushErrorCode =
   | 'api_error'
   | 'local_error';
 
-export type ChoiceKind = 'profile' | 'block' | 'dashboard' | 'target';
+export type ChoiceKind = 'environment' | 'block' | 'dashboard' | 'target';
 
 export interface PushChoice {
   value: string;
@@ -127,7 +134,7 @@ export interface TargetsCommandOptions {
   env?: string;
 }
 
-/** The stored `appbuilder login` sessions, for `--oauth`. */
+/** The stored `appbuilder login` sessions, which commands use unless -c or --profile is passed. */
 export interface OAuthPushDeps {
   listSessions: () => Promise<Environment[]>;
   /** The identity and the client that resolved it, so later requests are pinned to that login. */
@@ -140,7 +147,7 @@ export interface PushDeps {
   listLoadableCredentialProfiles: () => Promise<CredentialProfile[]>;
   loadConfig: (outputDir: string) => Promise<AppBuilderConfig>;
   packageBlocks: (dir: string) => Promise<PackagedBlocks>;
-  /** The API-key client; `--oauth` gets its client from `oauth.connect`. */
+  /** The API-key client for -c / --profile; the sign-in session's client comes from `oauth.connect`. */
   createClient: (credentials: Credentials) => KizenClient;
   readPushMap: (dir: string) => Promise<PushMapEntry[]>;
   writePushMap: (dir: string, entries: readonly PushMapEntry[]) => Promise<void>;
@@ -196,7 +203,7 @@ export function createDefaultPushDeps(cwd: string): PushDeps {
     setExitCode: (code) => {
       process.exitCode = code;
     },
-    // Constructing the store does no IO; an API-key push never touches it.
+    // Constructing the store does no IO; a -c / --profile push never touches it.
     oauth: createOAuthPushDeps(createOAuthStore()),
   };
 }
@@ -240,6 +247,8 @@ export interface ResolvedCredentials {
   credentials: PushAccount;
   /** The client every request of the command goes through. */
   client: KizenClient;
+  /** One-line notices to show before continuing, such as an ignored profile pin. */
+  notices: string[];
 }
 
 async function loadCredentialFile(
@@ -281,24 +290,64 @@ async function loadCredentialFile(
     );
   }
 
-  return success({ credentials, client: deps.createClient(credentials) });
+  return success({ credentials, client: deps.createClient(credentials), notices: [] });
 }
 
-async function resolveOAuthCredentials(
-  options: { credentials?: string; profile?: string; env?: string },
-  deps: PushDeps,
-): Promise<Step<ResolvedCredentials>> {
-  if (options.credentials !== undefined || options.profile !== undefined) {
-    return failure('usage_error', "--oauth can't be combined with -c or --profile.");
+async function resolveProfile(name: string, deps: PushDeps): Promise<Step<ResolvedCredentials>> {
+  const profiles = await deps.listLoadableCredentialProfiles();
+  const profile = profiles.find((candidate) => candidate.name === name);
+
+  if (!profile) {
+    const names = profiles.map((candidate) => candidate.name);
+
+    return failure(
+      'credentials_invalid',
+      names.length === 0
+        ? `No loadable credential profile named "${name}". No profiles are loadable; create ${GLOBAL_CREDENTIALS_PATH} or pass -c <path>.`
+        : `No loadable credential profile named "${name}". Loadable profiles: ${names.join(', ')}`,
+    );
   }
 
-  const resolved = await resolveSessionEnvironment(options.env, deps.oauth.listSessions);
+  return loadCredentialFile(profile.path, deps);
+}
+
+/** A `.kizenapp/config.json` profile pin no longer opts into API keys; say so. */
+async function pinnedProfileNotices(deps: PushDeps): Promise<string[]> {
+  const { activeCredentialProfile } = await deps.loadConfig(join(deps.cwd, '.kizenapp'));
+
+  return activeCredentialProfile === undefined || activeCredentialProfile === ''
+    ? []
+    : [pinnedProfileNotice(activeCredentialProfile)];
+}
+
+async function resolveSessionCredentials(
+  env: string | undefined,
+  deps: PushDeps,
+): Promise<Step<ResolvedCredentials>> {
+  // Kept so the environment choices come from the same read that found several sessions.
+  let sessions: Environment[] = [];
+  const resolved = await resolveSessionEnvironment(env, async () => {
+    sessions = await deps.oauth.listSessions();
+
+    return sessions;
+  });
 
   if (!resolved.ok) {
-    return failure(
-      resolved.problem === 'not_signed_in' ? 'credentials_invalid' : 'usage_error',
-      resolved.message,
-    );
+    switch (resolved.problem) {
+      case 'not_signed_in':
+        return failure('credentials_invalid', notSignedInWithApiKeyHint(resolved.message));
+      case 'several_sessions':
+        return failure('needs_choice', resolved.message, {
+          choice: 'environment',
+          choices: sessions.map((environment) => ({
+            value: environment,
+            label: environment,
+            args: ['--env', environment],
+          })),
+        });
+      case 'unknown_environment':
+        return failure('usage_error', resolved.message);
+    }
   }
 
   const { environment } = resolved;
@@ -315,86 +364,33 @@ async function resolveOAuthCredentials(
   return success({
     credentials: { environment, businessId: connected.identity.businessId },
     client: connected.client,
+    notices: await pinnedProfileNotices(deps),
   });
 }
 
+/**
+ * The `appbuilder login` session by default (--env picks its environment); an API key
+ * only for -c or --profile, which never read the sessions.
+ */
 export async function resolveCredentials(
-  options: { credentials?: string; profile?: string; oauth?: boolean; env?: string },
+  options: AuthFlags,
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
-  if (options.oauth === true) {
-    return resolveOAuthCredentials(options, deps);
+  const selected = selectAuth(options);
+
+  if (!selected.ok) {
+    return failure('usage_error', selected.message);
   }
 
-  if (options.env !== undefined) {
-    return failure('usage_error', '--env only applies with --oauth.');
+  const { selection } = selected;
+
+  if (selection.kind === 'oauth') {
+    return resolveSessionCredentials(selection.env, deps);
   }
 
-  if (options.credentials !== undefined) {
-    return loadCredentialFile(options.credentials, deps);
-  }
-
-  const profiles = await deps.listLoadableCredentialProfiles();
-  const names = profiles.map((profile) => profile.name);
-
-  if (options.profile !== undefined) {
-    const profile = profiles.find((candidate) => candidate.name === options.profile);
-
-    if (!profile) {
-      return failure(
-        'credentials_invalid',
-        names.length === 0
-          ? `No loadable credential profile named "${options.profile}". No profiles are loadable; create ${GLOBAL_CREDENTIALS_PATH} or pass -c <path>.`
-          : `No loadable credential profile named "${options.profile}". Loadable profiles: ${names.join(', ')}`,
-      );
-    }
-
-    return loadCredentialFile(profile.path, deps);
-  }
-
-  const config = await deps.loadConfig(join(deps.cwd, '.kizenapp'));
-
-  if (config.credentialMode === 'local') {
-    return failure(
-      'credentials_invalid',
-      "This plugin is set to use local browser-only credentials the CLI can't read. Pass -c <path> or --profile <name>.",
-    );
-  }
-
-  const active =
-    config.activeCredentialProfile === undefined
-      ? undefined
-      : profiles.find((candidate) => candidate.name === config.activeCredentialProfile);
-
-  if (active) {
-    return loadCredentialFile(active.path, deps);
-  }
-
-  const [only] = profiles;
-
-  if (profiles.length === 1 && only) {
-    return loadCredentialFile(only.path, deps);
-  }
-
-  if (profiles.length === 0) {
-    return failure(
-      'credentials_invalid',
-      `No credentials found. Create ${GLOBAL_CREDENTIALS_PATH} or pass -c <path>.`,
-    );
-  }
-
-  return failure(
-    'needs_choice',
-    `Several credential profiles are available; pass --profile <name>: ${names.join(', ')}`,
-    {
-      choice: 'profile',
-      choices: profiles.map((profile) => ({
-        value: profile.name,
-        label: profile.isDefault ? `${profile.name} (default)` : profile.name,
-        args: ['--profile', profile.name],
-      })),
-    },
-  );
+  return selection.credentials === undefined
+    ? resolveProfile(selection.profile, deps)
+    : loadCredentialFile(selection.credentials, deps);
 }
 
 export interface ResolvedBlock {
@@ -1145,8 +1141,6 @@ export function formatSummaryLines(summary: PushSummary): string[] {
 const formatIssueWarning = (issue: ValidationIssue): string =>
   `${issue.path === undefined ? '' : `${issue.path}: `}${issue.message} (${issue.rule})`;
 
-const quoteArg = (arg: string): string => (/^[\w./:@=-]+$/.test(arg) ? arg : JSON.stringify(arg));
-
 type ChoiceArgs = (choice: PushChoice, kind: ChoiceKind | undefined) => string[];
 
 function formatFailureText(result: PushFailure, command: string, choiceArgs: ChoiceArgs): string {
@@ -1199,21 +1193,23 @@ function writeResult(output: Output, result: unknown, text: string, jsonText = t
   }
 }
 
-const credentialArgs = (options: {
-  credentials?: string;
-  profile?: string;
-  oauth?: boolean;
-  env?: string;
-}): string[] => {
-  if (options.oauth === true) {
-    return options.env === undefined ? ['--oauth'] : ['--oauth', '--env', options.env];
-  }
-
+// The sign-in session is the default, so follow-up commands never need --oauth.
+const credentialArgs = (options: AuthFlags): string[] => {
   if (options.credentials !== undefined) {
     return ['-c', options.credentials];
   }
 
-  return options.profile === undefined ? [] : ['--profile', options.profile];
+  if (options.profile !== undefined) {
+    return ['--profile', options.profile];
+  }
+
+  return options.env === undefined ? [] : ['--env', options.env];
+};
+
+const writeNotices = (deps: PushDeps, notices: readonly string[]): void => {
+  for (const notice of notices) {
+    deps.writeStderr(`${notice}\n`);
+  }
 };
 
 async function claudeSkillWarnings(deps: PushDeps): Promise<string[]> {
@@ -1233,7 +1229,7 @@ export async function runPushHeadless(
   const command = 'appbuilder block push';
   let blockArgs = apiName === undefined ? [] : [apiName];
   const choiceArgs: ChoiceArgs = (choice, kind) => {
-    if (kind === 'profile') {
+    if (kind === 'environment') {
       return [...blockArgs, ...choice.args];
     }
 
@@ -1257,7 +1253,10 @@ export async function runPushHeadless(
       return;
     }
 
-    const { credentials, client } = credentialStep.value;
+    const { credentials, client, notices } = credentialStep.value;
+
+    writeNotices(deps, notices);
+
     const blockStep = await resolveBlock(apiName, deps);
 
     if (!blockStep.ok) {
@@ -1483,7 +1482,10 @@ export async function runTargetsHeadless(
       return;
     }
 
-    const { credentials, client } = credentialStep.value;
+    const { credentials, client, notices } = credentialStep.value;
+
+    writeNotices(deps, notices);
+
     const targetsStep = await listTargets(
       client,
       credentials,
