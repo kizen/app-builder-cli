@@ -19,7 +19,7 @@
  * the account signed out.
  */
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readdir, readFile, rename, rm, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ENVIRONMENTS, GLOBAL_CREDENTIALS_DIR, type Environment } from './credentials.js';
 import { ifExists, isRecord, nonEmptyString } from './guards.js';
@@ -115,8 +115,10 @@ export interface OAuthStore {
 const CLIENTS_FILE = 'clients.json';
 
 /**
- * A `<env>.json.<hex>.signout` file is a pointer a logout moved aside and crashed before removing.
- * It's deleted once older than this, so a logout in progress keeps its own.
+ * A `<env>.json.<ms>-<hex>.signout` file is a pointer a logout moved aside and crashed before
+ * removing. `<ms>` is when that logout moved it (epoch milliseconds), so its age is measured from
+ * the logout, not from the pointer's mtime, which the rename keeps. It's deleted once older than
+ * this, so a logout in progress keeps its own.
  */
 export const SIGNOUT_MAX_AGE_MS = 10 * 60_000;
 
@@ -283,19 +285,19 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     });
 
   /**
-   * Best effort, on login, switch and logout: deletes `<env>.json.<hex>.signout` pointers a crash
-   * left mid-logout once they're old enough. Only names matching that fixed pattern reach `join`.
+   * Best effort, on login, switch and logout: deletes `<env>.json.<ms>-<hex>.signout` pointers a
+   * crash left mid-logout once they're old enough, by the time in their name (when the logout
+   * moved them aside). Only names matching that fixed pattern reach `join`.
    */
   const cleanUp = async (environment: Environment): Promise<void> => {
     try {
-      const signout = new RegExp(`^${environment}\\.json\\.[0-9a-f]{12}\\.signout$`);
+      const signout = new RegExp(`^${environment}\\.json\\.([0-9]{1,16})-[0-9a-f]{12}\\.signout$`);
 
-      for (const name of (await listNames()).filter((name) => signout.test(name))) {
-        const path = join(dir, name);
-        const stats = await ifExists(stat(path));
+      for (const name of await listNames()) {
+        const movedAt = signout.exec(name)?.[1];
 
-        if (stats !== undefined && Date.now() - stats.mtimeMs > SIGNOUT_MAX_AGE_MS) {
-          await ifExists(unlink(path));
+        if (movedAt !== undefined && Date.now() - Number(movedAt) > SIGNOUT_MAX_AGE_MS) {
+          await ifExists(unlink(join(dir, name)));
         }
       }
     } catch {
@@ -390,7 +392,8 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     environment: Environment,
   ): Promise<{ account: OAuthAccount | undefined } | undefined> => {
     const pointerPath = sessionPath(environment);
-    const moved = `${pointerPath}.${randomBytes(6).toString('hex')}.signout`;
+    // The time goes in the name: cleanUp ages it from this logout, not from the pointer's mtime.
+    const moved = `${pointerPath}.${String(Date.now())}-${randomBytes(6).toString('hex')}.signout`;
 
     if ((await ifExists(rename(pointerPath, moved).then(() => true))) !== true) {
       return undefined;

@@ -25,22 +25,38 @@ import {
 
 /**
  * When set, the next `readFile` of a path it matches completes the read, then waits on `gate`
- * before returning: a pause inside a store call, between its read and what it does next.
+ * before returning: a pause inside a store call, between its read and what it does next. With
+ * `before`, it waits before reading instead, so the pause falls just ahead of the read.
  */
 const hooks = vi.hoisted(() => ({
   pauseRead: undefined as
-    | { matches: (path: string) => boolean; reached: () => void; gate: Promise<void> }
+    | {
+        matches: (path: string) => boolean;
+        reached: () => void;
+        gate: Promise<void>;
+        before?: boolean;
+      }
     | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const fs = await importOriginal<typeof FsPromisesModule>();
   const readFile = async (...args: Parameters<typeof fs.readFile>): Promise<string | Buffer> => {
-    const result = await fs.readFile(...args);
     const pause = hooks.pauseRead;
+    const paused = pause !== undefined && typeof args[0] === 'string' && pause.matches(args[0]);
 
-    if (pause !== undefined && typeof args[0] === 'string' && pause.matches(args[0])) {
+    if (paused) {
       hooks.pauseRead = undefined;
+    }
+
+    if (paused && pause.before === true) {
+      pause.reached();
+      await pause.gate;
+    }
+
+    const result = await fs.readFile(...args);
+
+    if (paused && pause.before !== true) {
       pause.reached();
       await pause.gate;
     }
@@ -193,7 +209,7 @@ describe('oauth store', () => {
     // Not account files: a temp file, a moved-aside pointer, the client cache.
     await writeFile(join(store.dir, `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`), '{}');
     await writeFile(
-      join(store.dir, 'staging.json.0123456789ab.signout'),
+      join(store.dir, 'staging.json.1700000000000-0123456789ab.signout'),
       JSON.stringify(ACCOUNT_B),
     );
     await store.writeClientId(ISSUER, 'client-1');
@@ -503,6 +519,44 @@ describe('oauth store', () => {
     });
   });
 
+  it('a clean-up that runs during a logout spares its moved-aside pointer, however old the pointer was', async () => {
+    const base = join(root, 'logout-cleanup-race');
+    const store = createOAuthStore(base);
+    const reached = deferred();
+    const gate = deferred();
+    // Seconds, for utimes: a minute past the max age.
+    const old = (Date.now() - SIGNOUT_MAX_AGE_MS - 60_000) / 1000;
+
+    await store.writeSession(sessionB());
+    await signIn(store, oauthSession());
+    // The pointer was written long ago; moving it aside keeps that mtime.
+    await utimes(store.sessionPath('staging'), old, old);
+
+    // Pause logout after it has moved the pointer aside, before it reads the moved copy.
+    hooks.pauseRead = {
+      matches: (path) => path.endsWith('.signout'),
+      reached: () => {
+        reached.resolve();
+      },
+      gate: gate.promise,
+      before: true,
+    };
+
+    const signingOut = store.signOut('staging');
+
+    await reached.promise;
+    // Another terminal switches to B meanwhile, which cleans up leftover sign-outs.
+    await createOAuthStore(base).setCurrent('staging', ACCOUNT_B);
+    gate.resolve();
+
+    // A's file is removed with its tokens, not left behind by a logout that reports success.
+    expect(await signingOut).toBe(true);
+    await expect(stat(store.accountPath('staging', ACCOUNT_A))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(await store.readSession('staging')).toStrictEqual(sessionB());
+  });
+
   it('a switch that lands during logout --business of the current account signs out and never restores the pointer', async () => {
     const base = join(root, 'remove-race');
     const store = createOAuthStore(base);
@@ -582,15 +636,17 @@ describe('oauth store', () => {
 
   it('clean-up removes old leftover sign-outs but keeps every saved account, however old', async () => {
     const store: OAuthStore = createOAuthStore(join(root, 'clean-up'));
-    // Seconds, for utimes: a minute past the max age, and a minute short of it.
-    const old = (Date.now() - SIGNOUT_MAX_AGE_MS - 60_000) / 1000;
-    const recent = (Date.now() - SIGNOUT_MAX_AGE_MS + 60_000) / 1000;
+    // Milliseconds: a minute past the max age, and a minute short of it.
+    const oldMs = Date.now() - SIGNOUT_MAX_AGE_MS - 60_000;
+    const recentMs = Date.now() - SIGNOUT_MAX_AGE_MS + 60_000;
+    // Seconds, for utimes.
+    const old = oldMs / 1000;
     const tmpFile = join(store.dir, `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`);
-    // Pointers a crash left between signOut's rename and its cleanup: old, recent, and old in
-    // another environment.
-    const oldSignout = join(store.dir, 'staging.json.0123456789ab.signout');
-    const recentSignout = join(store.dir, 'staging.json.ba9876543210.signout');
-    const goSignout = join(store.dir, 'go.json.0123456789ab.signout');
+    // Pointers a crash left between signOut's rename and its cleanup, aged by the time in their
+    // name: old, recent, and old in another environment.
+    const oldSignout = join(store.dir, `staging.json.${String(oldMs)}-0123456789ab.signout`);
+    const recentSignout = join(store.dir, `staging.json.${String(recentMs)}-ba9876543210.signout`);
+    const goSignout = join(store.dir, `go.json.${String(oldMs)}-0123456789ab.signout`);
     const setAge = async (path: string, seconds: number): Promise<void> => {
       await utimes(path, seconds, seconds);
     };
@@ -606,13 +662,10 @@ describe('oauth store', () => {
     await store.writeClientId(ISSUER, 'client-1');
     await setAge(join(store.dir, 'clients.json'), old);
 
-    for (const [file, age] of [
-      [oldSignout, old],
-      [recentSignout, recent],
-      [goSignout, old],
-    ] as const) {
+    // Every one with an old mtime, so only the name decides.
+    for (const file of [oldSignout, recentSignout, goSignout]) {
       await writeFile(file, JSON.stringify(ACCOUNT_B));
-      await setAge(file, age);
+      await setAge(file, old);
     }
 
     await store.writeSession(oauthSession());
@@ -622,23 +675,31 @@ describe('oauth store', () => {
     expect((await readdir(store.dir)).sort()).toStrictEqual(
       [
         'clients.json',
-        'go.json.0123456789ab.signout',
+        `go.json.${String(oldMs)}-0123456789ab.signout`,
         `go.${accountKey(ACCOUNT_A)}.json`,
         `staging.${accountKey(ACCOUNT_A)}.json`,
         `staging.${accountKey(ACCOUNT_B)}.json`,
         `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`,
         'staging.json',
-        'staging.json.ba9876543210.signout',
+        `staging.json.${String(recentMs)}-ba9876543210.signout`,
       ].sort(),
     );
 
-    // Logout cleans up too: the current account goes with the pointer, account B stays saved.
-    await setAge(recentSignout, old);
-    expect(await store.signOut('staging')).toBe(true);
+    // Logout cleans up too, two minutes on, when the recent one is old: the current account goes
+    // with the pointer, account B stays saved.
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 120_000);
+
+    try {
+      expect(await store.signOut('staging')).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+
     expect((await readdir(store.dir)).sort()).toStrictEqual(
       [
         'clients.json',
-        'go.json.0123456789ab.signout',
+        `go.json.${String(oldMs)}-0123456789ab.signout`,
         `go.${accountKey(ACCOUNT_A)}.json`,
         `staging.${accountKey(ACCOUNT_B)}.json`,
         `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`,
