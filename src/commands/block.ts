@@ -84,10 +84,6 @@ export function blockCommand(program: Command): void {
     .option('--force', 'overwrite even if the block was edited in Kizen since the last push')
     .option('--forget', 'clear the remembered target for this block first')
     .option('--json', 'print a JSON result to stdout (always headless)')
-    .option(
-      '--oauth',
-      'use the `appbuilder login` session (the default; kept for existing scripts)',
-    )
     .option('--env <env>', 'environment of the `appbuilder login` session to use')
     .action(async (apiName: string | undefined, options: PushCommandOptions) => {
       try {
@@ -127,10 +123,6 @@ export function blockCommand(program: Command): void {
     )
     .option('--object <id>', 'list the chart groups of this custom object')
     .option('--json', 'print a JSON result to stdout')
-    .option(
-      '--oauth',
-      'use the `appbuilder login` session (the default; kept for existing scripts)',
-    )
     .option('--env <env>', 'environment of the `appbuilder login` session to use')
     .action(async (options: TargetsCommandOptions) => {
       try {

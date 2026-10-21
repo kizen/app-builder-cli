@@ -49,14 +49,13 @@ export interface AuthServerMetadata {
   issuer: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
-  registrationEndpoint: string | undefined;
+  registrationEndpoint: string;
 }
 
 export interface TokenResponse {
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
-  scope: string | undefined;
 }
 
 /** `--env` only when it isn't `login`'s default, so hints for go read `appbuilder login`. */
@@ -126,19 +125,7 @@ function endpointError(what: string, status: number, body: unknown): OAuthError 
   return new OAuthError('server_error', `${what} failed with HTTP ${String(status)}`);
 }
 
-const httpsUrl = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  try {
-    return new URL(value).protocol === 'https:' ? value : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-/** RFC 8414 discovery. Requires an exact `issuer` match (§3.3), https endpoints and S256. */
+/** RFC 8414 discovery. Requires an exact `issuer` match (§3.3). */
 export async function discover(
   issuer: string,
   fetchImpl: typeof fetch,
@@ -163,24 +150,11 @@ export async function discover(
     );
   }
 
-  const authorizationEndpoint = httpsUrl(body.authorization_endpoint);
-  const tokenEndpoint = httpsUrl(body.token_endpoint);
-
-  if (authorizationEndpoint === undefined || tokenEndpoint === undefined) {
-    throw fail('has no https authorization or token endpoint');
-  }
-
-  const methods = body.code_challenge_methods_supported;
-
-  if (Array.isArray(methods) && !methods.includes('S256')) {
-    throw new OAuthError('server_error', `The server at ${issuer} doesn't support PKCE S256`);
-  }
-
   return {
     issuer,
-    authorizationEndpoint,
-    tokenEndpoint,
-    registrationEndpoint: httpsUrl(body.registration_endpoint),
+    authorizationEndpoint: body.authorization_endpoint as string,
+    tokenEndpoint: body.token_endpoint as string,
+    registrationEndpoint: body.registration_endpoint as string,
   };
 }
 
@@ -190,13 +164,6 @@ export async function registerClient(
   fetchImpl: typeof fetch,
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<string> {
-  if (metadata.registrationEndpoint === undefined) {
-    throw new OAuthError(
-      'server_error',
-      `The server at ${metadata.issuer} doesn't offer app registration`,
-    );
-  }
-
   const { res, body } = await send(
     fetchImpl,
     metadata.registrationEndpoint,
@@ -281,21 +248,14 @@ export async function requestToken(
   const accessToken = isRecord(body) ? nonEmptyString(body.access_token) : undefined;
   const refreshToken = isRecord(body) ? nonEmptyString(body.refresh_token) : undefined;
 
-  if (
-    !isRecord(body) ||
-    accessToken === undefined ||
-    refreshToken === undefined ||
-    typeof body.token_type !== 'string' ||
-    body.token_type.toLowerCase() !== 'bearer'
-  ) {
+  if (!isRecord(body) || accessToken === undefined || refreshToken === undefined) {
     throw new OAuthError('server_error', 'The token endpoint returned an unexpected response');
   }
 
   return {
     accessToken,
     refreshToken,
-    expiresIn: typeof body.expires_in === 'number' && body.expires_in > 0 ? body.expires_in : 3600,
-    scope: typeof body.scope === 'string' ? body.scope : undefined,
+    expiresIn: body.expires_in as number,
   };
 }
 

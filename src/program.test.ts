@@ -104,7 +104,6 @@ const BLOCK_PUSH_FLAGS = [
   '--force',
   '--forget',
   '--json',
-  '--oauth',
   '--env <env>',
 ];
 
@@ -113,7 +112,6 @@ const BLOCK_TARGETS_FLAGS = [
   '--profile <name>',
   '--object <id>',
   '--json',
-  '--oauth',
   '--env <env>',
 ];
 
@@ -337,7 +335,6 @@ describe('block command', () => {
       'force',
       'forget',
       'json',
-      'oauth',
       'env',
     ]);
     expect(attributeNames('targets')).toStrictEqual([
@@ -345,7 +342,6 @@ describe('block command', () => {
       'profile',
       'object',
       'json',
-      'oauth',
       'env',
     ]);
   });

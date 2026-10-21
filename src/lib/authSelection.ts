@@ -9,8 +9,6 @@ import { quoteArg } from './shellArg.js';
 export interface AuthFlags {
   credentials?: string;
   profile?: string;
-  /** Kept for existing scripts; the sign-in session is already the default. */
-  oauth?: boolean;
   env?: string;
 }
 
@@ -30,10 +28,6 @@ const API_KEY_FLAGS_HINT =
 
 export function selectAuth(flags: AuthFlags): AuthSelectionResult {
   const apiKey = flags.credentials !== undefined || flags.profile !== undefined;
-
-  if (apiKey && flags.oauth === true) {
-    return { ok: false, message: "--oauth can't be combined with -c or --profile." };
-  }
 
   if (apiKey && flags.env !== undefined) {
     return {

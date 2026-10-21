@@ -121,22 +121,7 @@ p { margin: 0; font-size: 15px; line-height: 1.5; color: var(--text-secondary); 
   .trim()
   .replace(/\n\s*/g, '');
 
-const HTML_ESCAPES: Record<string, string> = {
-  '&': '&amp;',
-  '<': '&lt;',
-  '>': '&gt;',
-  '"': '&quot;',
-  "'": '&#39;',
-};
-
-/** Escapes text for an HTML text node or a quoted attribute value. */
-const escapeHtml = (text: string): string =>
-  text.replace(/[&<>"']/g, (char) => HTML_ESCAPES[char] ?? char);
-
-/**
- * The full callback page. `heading` and `body` are escaped, so a caller can't inject markup
- * even if it someday passes text that came from the request.
- */
+/** The full callback page. */
 export function renderCallbackPage(kind: CallbackPageKind, heading: string, body: string): string {
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
@@ -146,7 +131,7 @@ export function renderCallbackPage(kind: CallbackPageKind, heading: string, body
     `<body><main>${WORDMARK_SVG}` +
     `<section class="card ${kind}" data-status="${kind}">` +
     `<div class="status">${statusIcon(kind)}</div>` +
-    `<h1>${escapeHtml(heading)}</h1><p>${escapeHtml(body)}</p>` +
+    `<h1>${heading}</h1><p>${body}</p>` +
     '</section></main></body></html>'
   );
 }

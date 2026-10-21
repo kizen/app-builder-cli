@@ -30,11 +30,6 @@ describe('selectAuth', () => {
       { ok: true, selection: { kind: 'api-key', credentials: '/tmp/c.json' } },
     ],
     [
-      '--oauth with -c is a usage error',
-      { oauth: true, credentials: '/tmp/c.json' },
-      { ok: false, message: "--oauth can't be combined with -c or --profile." },
-    ],
-    [
       '--env with --profile is a usage error',
       { env: 'staging', profile: 'Demo' },
       {

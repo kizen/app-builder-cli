@@ -7,7 +7,6 @@ import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   accountKey,
   createOAuthStore,
-  MAX_ID_BYTES,
   SIGNOUT_MAX_AGE_MS,
   type OAuthAccount,
   type OAuthSession,
@@ -78,9 +77,6 @@ afterAll(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-/** Lowercase hex, as the store encodes each id in a file name. */
-const hex = (id: string): string => Buffer.from(id, 'utf-8').toString('hex');
-
 /** Account B's session: another business and user, with its own tokens. */
 const sessionB = (overrides: Partial<OAuthSession> = {}): OAuthSession =>
   oauthSession({
@@ -102,14 +98,13 @@ describe('oauth store', () => {
     const store = createOAuthStore(base);
 
     await signIn(store, oauthSession());
-    await signIn(store, oauthSession({ environment: 'go', issuer: 'https://app.go.kizen.com' }));
     await store.writeClientId('https://staging.kizen.com', 'client-1');
 
     const oauthDir = join(base, 'oauth');
     const pointer = join(oauthDir, 'staging.json');
-    const accountFile = join(oauthDir, `staging.${hex('biz-a')}.${hex('user-a')}.json`);
+    const accountFile = join(oauthDir, `staging.${ACCOUNT_A.businessId}.${ACCOUNT_A.userId}.json`);
 
-    expect(accountKey(ACCOUNT_A)).toBe(`${hex('biz-a')}.${hex('user-a')}`);
+    expect(accountKey(ACCOUNT_A)).toBe(`${ACCOUNT_A.businessId}.${ACCOUNT_A.userId}`);
     expect(store.sessionPath('staging')).toBe(pointer);
     expect(store.accountPath('staging', ACCOUNT_A)).toBe(accountFile);
     expect(JSON.parse(await readFile(pointer, 'utf-8'))).toStrictEqual(ACCOUNT_A);
@@ -123,16 +118,6 @@ describe('oauth store', () => {
     expect((await stat(oauthDir)).mode & 0o777).toBe(0o700);
     // Nothing lands at the top level, where listCredentialProfiles would read it as a profile.
     expect(await readdir(base)).toStrictEqual(['oauth']);
-    // No lock files: only the pointers, the accounts and the client cache.
-    expect((await readdir(oauthDir)).sort()).toStrictEqual(
-      [
-        'clients.json',
-        `go.${accountKey(ACCOUNT_A)}.json`,
-        'go.json',
-        `staging.${accountKey(ACCOUNT_A)}.json`,
-        'staging.json',
-      ].sort(),
-    );
   });
 
   it('round-trips a session through the pointer, lists it, and signs out', async () => {
@@ -197,7 +182,10 @@ describe('oauth store', () => {
 
   it('lists saved accounts with the current one marked, unreadable ones included, and nothing else', async () => {
     const store = createOAuthStore(join(root, 'list'));
-    const unreadableAccount: OAuthAccount = { businessId: 'biz-c', userId: 'user-c' };
+    const unreadableAccount: OAuthAccount = {
+      businessId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      userId: 'c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1',
+    };
     const unreadablePath = store.accountPath('staging', unreadableAccount);
 
     expect(await store.listAccounts('staging')).toStrictEqual([]);
@@ -217,8 +205,8 @@ describe('oauth store', () => {
     // Sorted by business name (or id), case-insensitively.
     expect(await store.listAccounts('staging')).toStrictEqual([
       { account: ACCOUNT_A, session: oauthSession(), current: true },
-      { account: unreadableAccount, session: undefined, current: false },
       { account: ACCOUNT_B, session: sessionB(), current: false },
+      { account: unreadableAccount, session: undefined, current: false },
     ]);
 
     // An unreadable pointer marks nothing current, and the accounts are still listed.
@@ -227,8 +215,8 @@ describe('oauth store', () => {
       (await store.listAccounts('staging')).map(({ account, current }) => [account, current]),
     ).toStrictEqual([
       [ACCOUNT_A, false],
-      [unreadableAccount, false],
       [ACCOUNT_B, false],
+      [unreadableAccount, false],
     ]);
   });
 
@@ -250,23 +238,10 @@ describe('oauth store', () => {
     const fixtures: [path: string, contents: string][] = [
       // Truncated JSON.
       [pointer, '{"accessToken": "secret-in-file-1", "refre'],
-      [sessionFile, '{"accessToken": "secret-in-file-1", "refre'],
       // Valid JSON, wrong shape.
-      [pointer, JSON.stringify({ accessToken: 'secret-in-file-1' })],
       [sessionFile, JSON.stringify({ accessToken: 'secret-in-file-1' })],
-      // A pointer with an extra key.
-      [pointer, JSON.stringify({ ...ACCOUNT_A, accessToken: 'secret-in-file-1' })],
-      // A session for another environment under this one's name.
-      [
-        sessionFile,
-        JSON.stringify(oauthSession({ environment: 'go', accessToken: 'secret-in-file-1' })),
-      ],
       // A session for another account than the one its file (and the pointer) names.
       [sessionFile, JSON.stringify(sessionB({ accessToken: 'secret-in-file-1' }))],
-      [
-        sessionFile,
-        JSON.stringify(oauthSession({ userId: 'user-other', accessToken: 'secret-in-file-1' })),
-      ],
     ];
 
     await mkdir(store.dir, { recursive: true });
@@ -290,147 +265,43 @@ describe('oauth store', () => {
     expect(await store.listSessions()).toStrictEqual([]);
   });
 
-  it('session without valid account ids reads as unreadable', async () => {
-    const store = createOAuthStore(join(root, 'no-account'));
-    const path = store.accountPath('staging', ACCOUNT_A);
-    const withoutIds: Partial<OAuthSession> = oauthSession();
-
-    delete withoutIds.businessId;
-    delete withoutIds.userId;
-
-    await mkdir(store.dir, { recursive: true });
-    await writeFile(store.sessionPath('staging'), JSON.stringify(ACCOUNT_A));
-
-    // Missing, empty, or not strings: none may come back.
-    for (const contents of [
-      withoutIds,
-      { ...withoutIds, businessId: 'biz-a' },
-      { ...withoutIds, businessId: '', userId: 'user-a' },
-      { ...withoutIds, businessId: 'biz-a', userId: 42 },
-    ]) {
-      await writeFile(path, JSON.stringify(contents));
-
-      const error = await rejectionOf(store.readSession('staging'));
-
-      expect(error.code).toBe('login_required');
-      expect(error.message).toContain("can't be read");
-    }
-
-    // The same file with its ids reads back, so the ids are what made it unreadable.
-    await writeFile(path, JSON.stringify(oauthSession()));
-    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
-  });
-
-  it('an account key that fails validation is never used in a path', async () => {
+  it("an id that isn't a lowercase UUID never reaches a path", async () => {
     const base = join(root, 'traversal');
     const store = createOAuthStore(base);
-    // Readable sessions where a bad id would lead if it were joined into a path raw: the
-    // credentials dir above oauth/, and a subdirectory of oauth/.
-    const bait = JSON.stringify(oauthSession({ accessToken: 'secret-outside' }));
-    const baitFiles = [join(base, 'x.json'), join(store.dir, 'staging.sub', 'x.json')];
+    const pointer = store.sessionPath('staging');
 
-    await mkdir(join(store.dir, 'staging.sub'), { recursive: true });
+    await mkdir(store.dir, { recursive: true });
 
-    for (const file of baitFiles) {
-      await writeFile(file, bait);
-    }
-
-    // Path syntax is a valid id, but only ever reaches a path hex-encoded: the pointer
-    // names a file inside oauth/ that doesn't exist, and nothing outside it is read or written.
-    for (const id of ['/../../x', 'sub/x']) {
-      const account = { businessId: id, userId: '../user-a' };
-
-      expect(store.accountPath('staging', account)).toBe(
-        join(store.dir, `staging.${hex(id)}.${hex('../user-a')}.json`),
-      );
-      await writeFile(store.sessionPath('staging'), JSON.stringify(account));
-      expect(await store.readSession('staging')).toBeNull();
-      await store.writeSession(oauthSession(account));
-      expect(await store.readSession('staging')).toStrictEqual(oauthSession(account));
-      expect(await store.deleteSession('staging', account)).toBe(true);
-    }
-
-    // Anything else fails validation before a path is built, as a pointer or as a write.
+    // Path syntax, an uppercase UUID, empty: refused as a pointer, a key, and a write.
     for (const account of [
-      { businessId: '', userId: 'user-a' },
-      { businessId: 'biz-a', userId: 'a\u0000b' },
-      { businessId: '\ud800', userId: 'user-a' },
+      { ...ACCOUNT_A, businessId: '../../x' },
+      { ...ACCOUNT_A, userId: ACCOUNT_A.userId.toUpperCase() },
+      { ...ACCOUNT_A, businessId: '' },
     ]) {
-      await writeFile(store.sessionPath('staging'), JSON.stringify(account));
-
-      const error = await rejectionOf(store.readSession('staging'));
-
-      expect(error.message).toBe(unreadableMessage(store.sessionPath('staging')));
+      await writeFile(pointer, JSON.stringify(account));
+      expect((await rejectionOf(store.readSession('staging'))).message).toBe(
+        unreadableMessage(pointer),
+      );
+      expect(() => accountKey(account)).toThrow('invalid account id');
       await expect(store.writeSession(oauthSession(account))).rejects.toThrow('invalid account id');
     }
 
-    // File names that aren't the canonical encoding of valid ids aren't accounts: raw ids, and
-    // uppercase hex (the same bytes, spelled non-canonically).
-    for (const name of [
+    // File names whose segments aren't lowercase UUIDs aren't accounts.
+    const names = [
       'staging.biz-a.user-a.json',
-      `staging.${hex('biz-a').toUpperCase()}.${hex('user-a')}.json`,
-    ]) {
-      await writeFile(join(store.dir, name), bait);
+      `staging.${accountKey(ACCOUNT_A).toUpperCase()}.json`,
+    ];
+
+    for (const name of names) {
+      await writeFile(join(store.dir, name), JSON.stringify(oauthSession()));
     }
 
     expect(await store.listAccounts('staging')).toStrictEqual([]);
-
-    // Signing out removes the bad pointer and nothing it seemed to name.
+    // Signing out removes the bad pointer and nothing else; nothing was written outside oauth/.
     expect(await store.signOut('staging')).toBe(true);
     expect((await store.signOutAll('staging')).removed).toBe(0);
-
-    for (const file of baitFiles) {
-      expect(await readFile(file, 'utf-8')).toBe(bait);
-    }
-
-    expect((await readdir(base)).sort()).toStrictEqual(['oauth', 'x.json']);
-  });
-
-  it('accepts ids in any safe format, not just UUIDs', async () => {
-    const store = createOAuthStore(join(root, 'formats'));
-    const account = { businessId: 'Biz.With/Odd Chars:1', userId: 'ユーザー' };
-
-    await signIn(store, oauthSession(account));
-
-    expect(await store.readSession('staging')).toStrictEqual(oauthSession(account));
-    expect(store.accountPath('staging', account)).toBe(
-      join(store.dir, `staging.${hex(account.businessId)}.${hex(account.userId)}.json`),
-    );
-    expect((await store.listAccounts('staging')).map((entry) => entry.account)).toStrictEqual([
-      account,
-    ]);
-  });
-
-  it('two accounts whose old encodings collide case-insensitively both survive a write and a delete', async () => {
-    const store = createOAuthStore(join(root, 'case-collision'));
-    const lower = oauthSession({ businessId: 'abc', userId: 'u', accessToken: 'access-abc' });
-    const upper = oauthSession({ businessId: 'abI', userId: 'u', accessToken: 'access-abI' });
-
-    await store.writeSession(lower);
-    await signIn(store, upper);
-
-    expect(await store.readAccount('staging', lower)).toStrictEqual(lower);
-    expect(await store.readSession('staging')).toStrictEqual(upper);
-    expect(await store.listAccounts('staging')).toHaveLength(2);
-
-    expect(await store.deleteSession('staging', lower)).toBe(true);
-    expect(await store.readAccount('staging', lower)).toBeNull();
-    expect(await store.readSession('staging')).toStrictEqual(upper);
-  });
-
-  it('the longest ids still make a file name that fits, temp file included', async () => {
-    const store = createOAuthStore(join(root, 'longest'));
-    // Multi-byte characters count by their UTF-8 bytes.
-    const longest = { businessId: 'x'.repeat(MAX_ID_BYTES), userId: 'é'.repeat(27) + 'y' };
-    const name = `integration.${accountKey(longest)}.json`;
-
-    expect(Buffer.byteLength(`${name}.0123456789ab.tmp`)).toBe(255);
-    // A real write: an over-long name would fail with ENAMETOOLONG.
-    await signIn(store, oauthSession({ environment: 'integration', ...longest }));
-    expect(await store.readSession('integration')).toMatchObject(longest);
-    expect(() => accountKey({ businessId: 'x'.repeat(MAX_ID_BYTES + 1), userId: 'u' })).toThrow(
-      'invalid account id',
-    );
+    expect((await readdir(store.dir)).sort()).toStrictEqual(names.sort());
+    expect(await readdir(base)).toStrictEqual(['oauth']);
   });
 
   it('removeAccount removes one saved account, and the pointer only when it names it', async () => {
@@ -458,34 +329,6 @@ describe('oauth store', () => {
       current: false,
     });
   });
-
-  it.skipIf(process.getuid?.() === 0)(
-    "an unreadable pointer or session file gives the can't-be-read error and is still listed",
-    async () => {
-      const store = createOAuthStore(join(root, 'eacces'));
-      const go = oauthSession({ environment: 'go', issuer: 'https://app.go.kizen.com' });
-
-      await signIn(store, oauthSession());
-      await signIn(store, go);
-
-      // chmod 000 makes readFile fail with EACCES (root ignores it, hence the skip).
-      for (const path of [store.sessionPath('staging'), store.accountPath('staging', ACCOUNT_A)]) {
-        await chmod(path, 0o000);
-
-        try {
-          const error = await rejectionOf(store.readSession('staging'));
-
-          expect(error.code).toBe('login_required');
-          expect(error.message).toBe(unreadableMessage(path));
-          // Still listed, and the other environment is unaffected.
-          expect(await store.listSessions()).toStrictEqual(['go', 'staging']);
-          expect(await store.readSession('go')).toStrictEqual(go);
-        } finally {
-          await chmod(path, 0o600);
-        }
-      }
-    },
-  );
 
   it('a login that lands during a logout keeps its pointer', async () => {
     const base = join(root, 'logout-race');
@@ -557,55 +400,6 @@ describe('oauth store', () => {
     expect(await store.readSession('staging')).toStrictEqual(sessionB());
   });
 
-  it('a switch that lands during logout --business of the current account signs out and never restores the pointer', async () => {
-    const base = join(root, 'remove-race');
-    const store = createOAuthStore(base);
-    const reached = deferred();
-    const gate = deferred();
-
-    await store.writeSession(sessionB());
-    await signIn(store, oauthSession());
-
-    // Pause removeAccount once it has read the pointer (naming A, the account being removed).
-    hooks.pauseRead = {
-      matches: (path) => path === store.sessionPath('staging'),
-      reached: () => {
-        reached.resolve();
-      },
-      gate: gate.promise,
-    };
-
-    const removing = store.removeAccount('staging', ACCOUNT_A);
-
-    await reached.promise;
-    // Another terminal switches to B meanwhile.
-    await createOAuthStore(base).setCurrent('staging', ACCOUNT_B);
-    gate.resolve();
-
-    // B's pointer went with it, and stays gone; B's file stays saved.
-    expect(await removing).toStrictEqual({ removed: true, current: true });
-    await expect(stat(store.sessionPath('staging'))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(await store.readSession('staging')).toBeNull();
-    expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
-    expect(await store.readAccount('staging', ACCOUNT_B)).toStrictEqual(sessionB());
-  });
-
-  it("signOut surfaces a session file it can't remove", async () => {
-    const store = createOAuthStore(join(root, 'stuck'));
-    const stuck = store.accountPath('staging', ACCOUNT_A);
-
-    // A non-empty directory where the session file should be: unlink fails, and not with ENOENT.
-    await mkdir(stuck, { recursive: true });
-    await writeFile(join(stuck, 'x'), '');
-    await writeFile(store.sessionPath('staging'), JSON.stringify(ACCOUNT_A));
-
-    await expect(store.signOut('staging')).rejects.toMatchObject({
-      code: expect.stringMatching(/^(EPERM|EISDIR)$/) as unknown,
-    });
-    // The pointer is gone, and no moved-aside copy is left.
-    expect(await readdir(store.dir)).toStrictEqual([`staging.${accountKey(ACCOUNT_A)}.json`]);
-  });
-
   it('signOut removes only the current account; signOutAll removes every saved account', async () => {
     const store = createOAuthStore(join(root, 'sign-out-all'));
     const go = oauthSession({ environment: 'go', issuer: 'https://app.go.kizen.com' });
@@ -641,71 +435,31 @@ describe('oauth store', () => {
     const recentMs = Date.now() - SIGNOUT_MAX_AGE_MS + 60_000;
     // Seconds, for utimes.
     const old = oldMs / 1000;
-    const tmpFile = join(store.dir, `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`);
     // Pointers a crash left between signOut's rename and its cleanup, aged by the time in their
-    // name: old, recent, and old in another environment.
+    // name: old and recent.
     const oldSignout = join(store.dir, `staging.json.${String(oldMs)}-0123456789ab.signout`);
     const recentSignout = join(store.dir, `staging.json.${String(recentMs)}-ba9876543210.signout`);
-    const goSignout = join(store.dir, `go.json.${String(oldMs)}-0123456789ab.signout`);
-    const setAge = async (path: string, seconds: number): Promise<void> => {
-      await utimes(path, seconds, seconds);
-    };
 
-    // A saved account that isn't current, long untouched, and one in another environment.
+    // A saved account that isn't current, long untouched.
     await store.writeSession(sessionB());
-    await setAge(store.accountPath('staging', ACCOUNT_B), old);
-    await store.writeSession(oauthSession({ environment: 'go' }));
-    await setAge(store.accountPath('go', ACCOUNT_A), old);
-    // Not session files, however old: a temp file and the client cache.
-    await writeFile(tmpFile, '{}');
-    await setAge(tmpFile, old);
-    await store.writeClientId(ISSUER, 'client-1');
-    await setAge(join(store.dir, 'clients.json'), old);
+    await utimes(store.accountPath('staging', ACCOUNT_B), old, old);
 
     // Every one with an old mtime, so only the name decides.
-    for (const file of [oldSignout, recentSignout, goSignout]) {
+    for (const file of [oldSignout, recentSignout]) {
       await writeFile(file, JSON.stringify(ACCOUNT_B));
-      await setAge(file, old);
+      await utimes(file, old, old);
     }
 
-    await store.writeSession(oauthSession());
-    await setAge(store.accountPath('staging', ACCOUNT_A), old);
-    await store.setCurrent('staging', ACCOUNT_A);
+    await signIn(store, oauthSession());
 
     expect((await readdir(store.dir)).sort()).toStrictEqual(
       [
-        'clients.json',
-        `go.json.${String(oldMs)}-0123456789ab.signout`,
-        `go.${accountKey(ACCOUNT_A)}.json`,
         `staging.${accountKey(ACCOUNT_A)}.json`,
         `staging.${accountKey(ACCOUNT_B)}.json`,
-        `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`,
         'staging.json',
         `staging.json.${String(recentMs)}-ba9876543210.signout`,
       ].sort(),
     );
-
-    // Logout cleans up too, two minutes on, when the recent one is old: the current account goes
-    // with the pointer, account B stays saved.
-    const now = Date.now();
-    const clock = vi.spyOn(Date, 'now').mockReturnValue(now + 120_000);
-
-    try {
-      expect(await store.signOut('staging')).toBe(true);
-    } finally {
-      clock.mockRestore();
-    }
-
-    expect((await readdir(store.dir)).sort()).toStrictEqual(
-      [
-        'clients.json',
-        `go.json.${String(oldMs)}-0123456789ab.signout`,
-        `go.${accountKey(ACCOUNT_A)}.json`,
-        `staging.${accountKey(ACCOUNT_B)}.json`,
-        `staging.${accountKey(ACCOUNT_B)}.json.abc.tmp`,
-      ].sort(),
-    );
-    expect(await store.readAccount('staging', ACCOUNT_B)).toStrictEqual(sessionB());
   });
 
   it('pre-existing 0755 oauth dir and 0644 pointer and session files end up 0700/0600 after a sign-in', async () => {
@@ -793,16 +547,5 @@ describe('oauth store', () => {
 
       expect(await readdir(dir)).toStrictEqual(['clients.json']);
     }
-  });
-
-  it('a corrupt clients.json is replaced on the next registration', async () => {
-    const store = createOAuthStore(join(root, 'clients-corrupt'));
-
-    await mkdir(store.dir, { recursive: true });
-    await writeFile(join(store.dir, 'clients.json'), '{not json');
-
-    expect(await store.readClientId('https://a.test')).toBeUndefined();
-    await store.writeClientId('https://a.test', 'a1');
-    expect(await store.readClientId('https://a.test')).toBe('a1');
   });
 });

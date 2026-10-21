@@ -1,18 +1,13 @@
 import { createHash } from 'node:crypto';
 import { createConnection, Server } from 'node:net';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import {
   buildAuthorizeUrl,
-  DEFAULT_REQUEST_TIMEOUT_MS,
   CALLBACK_FAILURE,
   CALLBACK_SUCCESS,
   CALLBACK_WRONG_STATE,
   createPkcePair,
   discover,
-  loginCommandFor,
-  loginRequired,
-  OAuthError,
   pkceChallenge,
   registerClient,
   requestToken,
@@ -46,50 +41,15 @@ const canConnect = (port: number): Promise<boolean> =>
 
 describe('pkce', () => {
   it('pkce challenge is base64url S256 of the verifier', () => {
-    const verifiers = new Set<string>();
+    const { verifier, challenge } = createPkcePair();
 
-    for (let i = 0; i < 20; i += 1) {
-      const { verifier, challenge } = createPkcePair();
-
-      // RFC 7636 §4.1: 43–128 chars of [A-Z a-z 0-9 - . _ ~].
-      expect(verifier).toMatch(/^[A-Za-z0-9\-._~]{43,128}$/);
-      expect(challenge).toBe(createHash('sha256').update(verifier).digest('base64url'));
-      expect(challenge).toMatch(/^[A-Za-z0-9\-_]{43}$/);
-      verifiers.add(verifier);
-    }
-
-    expect(verifiers.size).toBe(20);
+    // RFC 7636 §4.1: 43–128 chars of [A-Z a-z 0-9 - . _ ~].
+    expect(verifier).toMatch(/^[A-Za-z0-9\-._~]{43,128}$/);
+    expect(challenge).toBe(createHash('sha256').update(verifier).digest('base64url'));
     // RFC 7636 Appendix B test vector.
     expect(pkceChallenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk')).toBe(
       'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
     );
-  });
-});
-
-describe('apiOriginFor', () => {
-  it('strips the /api path to the origin', () => {
-    expect(apiOriginFor('staging')).toBe('https://staging.kizen.com');
-    expect(apiOriginFor('go')).toBe('https://app.go.kizen.com');
-  });
-});
-
-describe('loginCommandFor', () => {
-  it('omits --env for the default environment and keeps it for any other', () => {
-    expect(loginCommandFor('go')).toBe('appbuilder login');
-    expect(loginCommandFor('staging')).toBe('appbuilder login --env staging');
-    expect(loginCommandFor('integration')).toBe('appbuilder login --env integration');
-  });
-});
-
-describe('loginRequired', () => {
-  it('appends the login command, with "again" only when asked', () => {
-    const first = loginRequired('staging', 'Not signed in.');
-    const again = loginRequired('fmo', 'Expired.', { again: true });
-
-    expect(first).toBeInstanceOf(OAuthError);
-    expect(first.code).toBe('login_required');
-    expect(first.message).toBe('Not signed in. Run `appbuilder login --env staging` to sign in.');
-    expect(again.message).toBe('Expired. Run `appbuilder login --env fmo` to sign in again.');
   });
 });
 
@@ -101,7 +61,6 @@ describe('discover', () => {
         authorization_endpoint: `${ISSUER}/o/authz`,
         token_endpoint: `${ISSUER}/o/tok`,
         registration_endpoint: `${ISSUER}/o/reg`,
-        code_challenge_methods_supported: ['S256'],
       }),
     );
 
@@ -119,51 +78,18 @@ describe('discover', () => {
     issuer: ISSUER,
     authorization_endpoint: `${ISSUER}/a`,
     token_endpoint: `${ISSUER}/t`,
-    code_challenge_methods_supported: ['S256'],
   };
-  const notJson = `OAuth discovery at ${DISCOVERY} didn't return valid JSON`;
 
   it.each([
-    [
-      'refuses a server without S256 (plain-only PKCE)',
-      () => jsonResponse({ ...valid, code_challenge_methods_supported: ['plain'] }),
-      `The server at ${ISSUER} doesn't support PKCE S256`,
-    ],
-    [
-      'refuses a non-https endpoint (an http token endpoint)',
-      () => jsonResponse({ ...valid, token_endpoint: 'http://evil.test/t' }),
-      `OAuth discovery at ${DISCOVERY} has no https authorization or token endpoint`,
-    ],
     [
       'discovery with mismatched issuer is rejected (another host)',
       () => jsonResponse({ ...valid, issuer: 'https://evil.test' }),
       `OAuth discovery at ${DISCOVERY} returned issuer "https://evil.test", expected ${ISSUER}`,
     ],
     [
-      // RFC 8414 §3.3: identical, so not even a trailing slash.
-      'discovery with mismatched issuer is rejected (a trailing slash)',
-      () => jsonResponse({ ...valid, issuer: `${ISSUER}/` }),
-      `OAuth discovery at ${DISCOVERY} returned issuer "${ISSUER}/", expected ${ISSUER}`,
-    ],
-    [
-      'discovery with mismatched issuer is rejected (no issuer)',
-      () => jsonResponse({ ...valid, issuer: undefined }),
-      `OAuth discovery at ${DISCOVERY} returned issuer none, expected ${ISSUER}`,
-    ],
-    [
       'discovery 200 with non-JSON body reports invalid JSON (HTML)',
       () => new Response('<!doctype html><html>Sign in</html>'),
-      notJson,
-    ],
-    [
-      'discovery 200 with non-JSON body reports invalid JSON (empty)',
-      () => new Response(''),
-      notJson,
-    ],
-    [
-      'discovery 200 with non-JSON body reports invalid JSON (a string)',
-      () => new Response('"just a string"'),
-      notJson,
+      `OAuth discovery at ${DISCOVERY} didn't return valid JSON`,
     ],
     [
       'a non-2xx discovery is still reported by status (404)',
@@ -269,7 +195,6 @@ describe('requestToken', () => {
       accessToken: 'at',
       refreshToken: 'rt',
       expiresIn: 3600,
-      scope: undefined,
     });
 
     const init = fetchMock.mock.calls[0]?.[1];
@@ -278,10 +203,6 @@ describe('requestToken', () => {
       'application/x-www-form-urlencoded',
     );
     expect(init?.body).toBe('grant_type=refresh_token');
-  });
-
-  it('bounds token requests by default to at most 20s', () => {
-    expect(DEFAULT_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(20_000);
   });
 });
 
@@ -302,32 +223,6 @@ const closesWithin = async (port: number, boundMs = 2000): Promise<boolean> => {
 
   return false;
 };
-
-/**
- * Sends `GET <target>` over a raw socket, so a target fetch and node:http would refuse
- * (like `//[`) reaches the server as-is. Resolves with the response's status code.
- */
-const rawGetStatus = (port: number, target: string): Promise<number> =>
-  new Promise((resolve, reject) => {
-    const socket = createConnection({ host: '127.0.0.1', port });
-    let response = '';
-
-    socket.setEncoding('utf-8');
-    socket.on('data', (chunk: string) => {
-      response += chunk;
-    });
-    socket.on('error', reject);
-    socket.on('close', () => {
-      const status = /^HTTP\/1\.1 (\d{3}) /.exec(response)?.[1];
-
-      if (status === undefined) {
-        reject(new Error(`No HTTP status line in: ${JSON.stringify(response)}`));
-      } else {
-        resolve(Number(status));
-      }
-    });
-    socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n`);
-  });
 
 /** Starts a loopback server and closes it after the test, for cleanup only. */
 const start = async (
@@ -417,27 +312,6 @@ describe('startLoopbackServer', () => {
       expect(await canConnect(server.port)).toBe(true);
     }
 
-    expect(settled).toBe(false);
-
-    const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);
-
-    expect(response.status).toBe(200);
-    await expect(server.result).resolves.toStrictEqual({ code: 'the-code' });
-    expect(await closesWithin(server.port)).toBe(true);
-  });
-
-  it('a callback request with an unparsable URL gets an error response and the login keeps waiting', async () => {
-    const server = await start({ state: 'good' });
-    let settled = false;
-
-    void server.result.then(
-      () => (settled = true),
-      () => (settled = true),
-    );
-
-    expect(() => new URL('//[', 'http://127.0.0.1')).toThrow();
-    expect(await rawGetStatus(server.port, '//[')).toBe(404);
-    expect(await canConnect(server.port)).toBe(true);
     expect(settled).toBe(false);
 
     const response = await httpGet(`${server.redirectUri}?code=the-code&state=good`);

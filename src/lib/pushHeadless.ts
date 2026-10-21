@@ -121,7 +121,6 @@ export interface PushCommandOptions {
   force?: boolean;
   forget?: boolean;
   json?: boolean;
-  oauth?: boolean;
   env?: string;
 }
 
@@ -130,7 +129,6 @@ export interface TargetsCommandOptions {
   profile?: string;
   object?: string;
   json?: boolean;
-  oauth?: boolean;
   env?: string;
 }
 
@@ -1193,7 +1191,6 @@ function writeResult(output: Output, result: unknown, text: string, jsonText = t
   }
 }
 
-// The sign-in session is the default, so follow-up commands never need --oauth.
 const credentialArgs = (options: AuthFlags): string[] => {
   if (options.credentials !== undefined) {
     return ['-c', options.credentials];

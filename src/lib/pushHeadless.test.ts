@@ -49,7 +49,6 @@ import {
   type ResolvedBlock,
   type ResolvedTarget,
 } from './pushHeadless.js';
-import { pinnedProfileNotice } from './authSelection.js';
 import { createPushFlow } from '../ui/PushUI.js';
 import { isClaudeSkillStale } from './setupClaude.js';
 import { makePlugin, routablePage } from '../test/fixtures.js';
@@ -2164,7 +2163,7 @@ describe('runTargetsHeadless', () => {
   });
 });
 
-describe('--oauth', () => {
+describe('sign-in session credentials', () => {
   /** A temp OAuth store holding one staging session, removed after `run`. */
   const withStore = async (
     run: (store: ReturnType<typeof createOAuthStore>, session: OAuthSession) => Promise<void>,
@@ -2178,7 +2177,6 @@ describe('--oauth', () => {
         accessToken: 'access-a',
         refreshToken: 'refresh-a',
         expiresAt: Date.now() + 3600 * 1000,
-        scope: undefined,
       });
 
       await signIn(store, session);
@@ -2188,56 +2186,13 @@ describe('--oauth', () => {
     }
   };
 
-  it('resolves the session identity and client for --env, without reading API-key profiles', async () => {
-    const fake = makeClient();
-    const oauth = oauthDeps(['go', 'staging'], fake);
-    const { deps } = makeHarness({ deps: { oauth } });
-    const step = await resolveCredentials({ oauth: true, env: 'staging' }, deps);
-
-    expect(step).toStrictEqual({
-      ok: true,
-      value: {
-        credentials: { environment: 'staging', businessId: 'oauth-biz' },
-        client: fake.client,
-        notices: [],
-      },
-    });
-    expect(oauth.connect).toHaveBeenCalledWith('staging');
-    expect(oauth.listSessions).not.toHaveBeenCalled();
-    expect(deps.createClient).not.toHaveBeenCalled();
-    expect(deps.listLoadableCredentialProfiles).not.toHaveBeenCalled();
-    expect(deps.loadCredentialsDetailed).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    [['integration'] as Environment[], { ok: true }],
-    [[] as Environment[], { ok: false, code: 'credentials_invalid' }],
-    [
-      ['go', 'staging'] as Environment[],
-      { ok: false, code: 'needs_choice', choice: 'environment' },
-    ],
-  ])('without --env, signed in to %j resolves to %j', async (sessions, expected) => {
-    const oauth = oauthDeps(sessions);
-    const step = await resolveCredentials({ oauth: true }, makeHarness({ deps: { oauth } }).deps);
-
-    expect(step).toMatchObject(expected);
-
-    if (step.ok) {
-      expect(step.value.credentials.environment).toBe('integration');
-    }
-  });
-
-  it.each([
-    [{ oauth: true, profile: 'staging' }, "can't be combined"],
-    [{ oauth: true, credentials: '/tmp/c.json' }, "can't be combined"],
-    [{ oauth: true, env: 'prod' }, 'Unknown --env "prod"'],
-  ])('refuses %j as a usage error', async (options, message) => {
+  it('refuses an unknown --env as a usage error', async () => {
     const oauth = oauthDeps(['staging']);
     const { deps } = makeHarness({ deps: { oauth } });
-    const step = await resolveCredentials(options, deps);
+    const step = await resolveCredentials({ env: 'prod' }, deps);
 
     expect(step).toMatchObject({ ok: false, code: 'usage_error' });
-    expect(!step.ok && step.message).toContain(message);
+    expect(!step.ok && step.message).toContain('Unknown --env "prod"');
     expect(oauth.connect).not.toHaveBeenCalled();
   });
 
@@ -2251,7 +2206,7 @@ describe('--oauth', () => {
       }),
     );
 
-    const step = await resolveCredentials({ oauth: true }, makeHarness({ deps: { oauth } }).deps);
+    const step = await resolveCredentials({}, makeHarness({ deps: { oauth } }).deps);
 
     expect(step).toMatchObject({
       ok: false,
@@ -2316,7 +2271,7 @@ describe('--oauth', () => {
 
       await runPushHeadless(
         BLOCK,
-        { json: true, oauth: true, env: 'staging', dashboard: 'D1', create: true, yes: true },
+        { json: true, env: 'staging', dashboard: 'D1', create: true, yes: true },
         harness.deps,
       );
 
@@ -2334,49 +2289,6 @@ describe('--oauth', () => {
       expect(harness.deps.writePushMap).not.toHaveBeenCalled();
       expect(harness.pushMap.entries).toStrictEqual([]);
       expect(await store.readSession('staging')).toStrictEqual(loginB);
-    });
-  });
-
-  it('targets with --oauth fetches /auth/bootstrap once', async () => {
-    await withStore(async (store) => {
-      const base = BASE_URLS.staging;
-      const fetchMock = vi.fn<typeof fetch>((input) => {
-        const url = input as string;
-
-        if (url === `${base}/auth/bootstrap`) {
-          return Promise.resolve(
-            jsonResponse({
-              team: { user: 'oauth-user' },
-              business: { id: 'oauth-biz', name: 'Acme', client_object: { id: 'contacts-1' } },
-            }),
-          );
-        }
-
-        if (url.startsWith(`${base}/dashboards/mine?`)) {
-          return Promise.resolve(jsonResponse({ results: [] }));
-        }
-
-        if (url === `${base}/custom-objects?page_size=200`) {
-          return Promise.resolve(jsonResponse({ results: [], next: null }));
-        }
-
-        return Promise.resolve(new Response('not found', { status: 404 }));
-      });
-      const harness = makeHarness({
-        deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
-      });
-
-      await runTargetsHeadless({ json: true, oauth: true, env: 'staging' }, harness.deps);
-
-      expect(harness.json()).toMatchObject({
-        ok: true,
-        environment: 'staging',
-        businessId: 'oauth-biz',
-        customObjects: [{ id: 'contacts-1', objectName: 'Contacts', fetchUrl: 'client' }],
-      });
-      expect(
-        fetchMock.mock.calls.filter(([input]) => input === `${base}/auth/bootstrap`),
-      ).toHaveLength(1);
     });
   });
 });
@@ -2437,25 +2349,6 @@ describe('the sign-in session is the default', () => {
   };
 
   describe('runTargetsHeadless', () => {
-    it('signed in to one env with several API-key profiles and no flags uses the session without asking', async () => {
-      const fake = targetsFake();
-      const oauth = oauthDeps(['staging'], fake);
-      const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
-
-      // `appbuilder block targets`, exactly as the user ran it.
-      await runTargetsHeadless({}, harness.deps);
-
-      const out = harness.stdout.join('');
-
-      expect(oauth.connect).toHaveBeenCalledWith('staging');
-      expectNoApiKeyReads(harness.deps);
-      expect(harness.exitCodes).toStrictEqual([]);
-      expect(harness.stderr).toStrictEqual([]);
-      expect(out).toContain('Environment: staging');
-      expect(out).toContain('Business: oauth-biz');
-      expect(out).toMatch(/Sales\s+D1\s+3\s+Owner/);
-    });
-
     it('a pinned activeCredentialProfile is ignored with a stderr notice and --json stdout stays valid JSON', async () => {
       const fake = targetsFake();
       const oauth = oauthDeps(['staging'], fake);
@@ -2537,22 +2430,7 @@ describe('the sign-in session is the default', () => {
       expect(harness.stderr).toStrictEqual([]);
     });
 
-    it('--profile still rejects an unknown profile, listing the loadable ones, when signed in', async () => {
-      const oauth = oauthDeps(['staging']);
-      const harness = makeHarness({ profiles: SEVERAL_PROFILES, deps: { oauth } });
-
-      await runTargetsHeadless({ json: true, profile: 'prod' }, harness.deps);
-
-      expect(harness.json()).toStrictEqual({
-        ok: false,
-        code: 'credentials_invalid',
-        message:
-          'No loadable credential profile named "prod". Loadable profiles: credentials, Demo, staging',
-      });
-      expectNoSessionReads(oauth);
-    });
-
-    it('--env selects that session without --oauth', async () => {
+    it('--env selects that session', async () => {
       const fake = targetsFake();
       const oauth = oauthDeps(['go', 'staging'], fake);
       const harness = makeHarness({ fake, profiles: SEVERAL_PROFILES, deps: { oauth } });
@@ -2597,7 +2475,6 @@ describe('the sign-in session is the default', () => {
       expect(err).toContain('go  →  appbuilder block targets --env go --object O1');
       expect(err).toContain('staging  →  appbuilder block targets --env staging --object O1');
       expect(err).not.toContain('--profile');
-      expect(err).not.toContain('--oauth');
     });
 
     it('needs_choice choice args re-run successfully', async () => {
@@ -2657,25 +2534,7 @@ describe('the sign-in session is the default', () => {
       expectNoApiKeyReads(harness.deps);
     });
 
-    it('re-pushes to the remembered dashlet with zero flags through the session', async () => {
-      const fake = makeClient({
-        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
-      });
-      const oauth = oauthDeps(['staging'], fake, { ...IDENTITY, businessId: 'biz' });
-      const harness = await push(makeHarness({ fake, pushMap: [makeEntry()], deps: { oauth } }), {
-        json: true,
-        yes: true,
-      });
-
-      expect(harness.json()).toMatchObject({
-        ok: true,
-        action: 'updated',
-        resolvedBy: 'remembered',
-      });
-      expectNoApiKeyReads(harness.deps);
-    });
-
-    describe('follow-up commands carry the credential flags given, and never --oauth', () => {
+    describe('follow-up commands carry the credential flags given', () => {
       const severalBlocks = [
         makePlugin(PLUGIN, [makeBlock(), makeBlock({ api_name: 'table', name: 'Table' })]),
       ];
@@ -2688,7 +2547,6 @@ describe('the sign-in session is the default', () => {
       it.each<[string, PushCommandOptions, string]>([
         ['the default session', {}, ''],
         ['--env', { env: 'staging' }, ' --env staging'],
-        ['--oauth --env', { oauth: true, env: 'staging' }, ' --env staging'],
         ['--profile', { profile: 'credentials' }, ' --profile credentials'],
         ['-c', { credentials: '/tmp/c.json' }, ' -c /tmp/c.json'],
       ])('with %s', async (_label, flags, credentialArgs) => {
@@ -2716,10 +2574,6 @@ describe('the sign-in session is the default', () => {
         expect(lines[2]).toContain(
           `Create a new block  →  appbuilder block push ${BLOCK}${credentialArgs} --dashboard D1 --create\n`,
         );
-
-        for (const line of lines) {
-          expect(line).not.toContain('--oauth');
-        }
       });
     });
   });
@@ -2793,25 +2647,6 @@ describe('the sign-in session is the default', () => {
         environment: 'staging',
         businessId: 'oauth-biz',
       });
-      expectNoApiKeyReads(harness.deps);
-    });
-
-    it('shows the pinned-profile notice and keeps using the session', async () => {
-      const fake = makeClient();
-      const harness = makeHarness({
-        fake,
-        profiles: SEVERAL_PROFILES,
-        config: { activeCredentialProfile: 'Demo' },
-        deps: { oauth: oauthDeps(['staging'], fake) },
-      });
-      const { flow, phase, state } = startFlow(harness);
-
-      flow.start({});
-
-      await vi.waitFor(() => {
-        expect(phase()?.type).toBe('surface-select');
-      });
-      expect(state.session.credentialNotices).toStrictEqual([pinnedProfileNotice('Demo')]);
       expectNoApiKeyReads(harness.deps);
     });
   });

@@ -28,19 +28,4 @@ describe('renderCallbackPage', () => {
       expect(html).not.toMatch(/<script|<link|<img|@import|url\((?!#)/i);
     }
   });
-
-  it('escapes heading and body so they cannot inject markup', () => {
-    const html = renderCallbackPage(
-      'error',
-      '<img src=x onerror=alert(1)>',
-      'a & b "c" \'d\' </p><script>x</script>',
-    );
-
-    expect(html).not.toContain('<img');
-    expect(html).not.toContain('<script');
-    expect(html).toContain('<h1>&lt;img src=x onerror=alert(1)&gt;</h1>');
-    expect(html).toContain(
-      '<p>a &amp; b &quot;c&quot; &#39;d&#39; &lt;/p&gt;&lt;script&gt;x&lt;/script&gt;</p>',
-    );
-  });
 });

@@ -24,7 +24,6 @@ import {
 import type { KizenIdentity } from './kizenClient.js';
 import {
   sameAccount,
-  validAccount,
   type OAuthAccount,
   type OAuthSession,
   type OAuthStore,
@@ -90,7 +89,7 @@ const labelsOf = (
   email: identity.email,
 });
 
-/** `base` with newly issued `tokens`; a scope the response leaves out keeps `base`'s. */
+/** `base` with newly issued `tokens`. */
 const withTokens = (
   base: Omit<OAuthSession, 'accessToken' | 'refreshToken' | 'expiresAt'>,
   tokens: TokenResponse,
@@ -100,7 +99,6 @@ const withTokens = (
   accessToken: tokens.accessToken,
   refreshToken: tokens.refreshToken,
   expiresAt: now + tokens.expiresIn * 1000,
-  scope: tokens.scope ?? base.scope,
 });
 
 /**
@@ -158,8 +156,7 @@ async function authorizeOnce(
 /**
  * A stale cached client_id never blocks more than one attempt. The server must not redirect for
  * an unknown client_id (RFC 6749 §4.1.2.1), so the CLI only sees a timeout: a timeout with a
- * cached client drops the cache without retrying (it may be a user who walked away). An
- * `invalid_client` that reaches the CLI re-registers once and runs the browser flow again.
+ * cached client drops the cache without retrying (it may be a user who walked away).
  */
 export interface LoginOptions {
   /**
@@ -181,56 +178,34 @@ export async function login(
 ): Promise<OAuthSession> {
   const intro = urlIntro(environment, options.interactive ?? true);
   const metadata = await discover(apiOriginFor(environment), deps.fetch);
-  const register = async (): Promise<string> => {
-    const clientId = await registerClient(metadata, deps.fetch);
-
-    await deps.store.writeClientId(metadata.issuer, clientId);
-
-    return clientId;
-  };
-
   const cached = await deps.store.readClientId(metadata.issuer);
-  let clientId = cached ?? (await register());
+  const clientId = cached ?? (await registerClient(metadata, deps.fetch));
+
+  if (cached === undefined) {
+    await deps.store.writeClientId(metadata.issuer, clientId);
+  }
+
   let tokens: TokenResponse;
 
   try {
     tokens = await authorizeOnce(metadata, clientId, deps, intro);
   } catch (err) {
-    if (
-      !(
-        err instanceof OAuthError &&
-        (err.code === 'timeout' || err.code === 'invalid_client') &&
-        cached !== undefined
-      )
-    ) {
+    if (!(err instanceof OAuthError && err.code === 'timeout' && cached !== undefined)) {
       throw err;
     }
 
     await deps.store.forgetClientId(metadata.issuer);
 
-    if (err.code === 'timeout') {
-      throw new OAuthError(
-        'timeout',
-        `${err.message}. If the browser showed an error instead of a consent page, the saved app registration was stale; it has been cleared. Run \`${loginCommandFor(environment)}\` again.`,
-      );
-    }
-
-    deps.print('The saved app registration was rejected; registering again.');
-    clientId = await register();
-    tokens = await authorizeOnce(metadata, clientId, deps, intro);
+    throw new OAuthError(
+      'timeout',
+      `${err.message}. If the browser showed an error instead of a consent page, the saved app registration was stale; it has been cleared. Run \`${loginCommandFor(environment)}\` again.`,
+    );
   }
 
   // The account keys the session file, so nothing is saved until Kizen says whose tokens these
   // are. A failure here leaves the previous sign-in, if any, as it was.
   const identity = await deps.identify(issuedTokenProvider(environment, tokens.accessToken));
-  const account = validAccount(identity);
-
-  if (account === undefined) {
-    throw new OAuthError(
-      'invalid_identity',
-      `Kizen returned an account id this CLI can't save, so the ${environment} sign-in wasn't saved.`,
-    );
-  }
+  const account = { businessId: identity.businessId, userId: identity.userId };
 
   const session = withTokens(
     {
@@ -240,7 +215,6 @@ export async function login(
       issuer: metadata.issuer,
       clientId,
       tokenEndpoint: metadata.tokenEndpoint,
-      scope: undefined,
     },
     tokens,
     deps.now(),
@@ -289,10 +263,8 @@ export async function switchAccount(
   account: OAuthAccount,
   deps: SwitchDeps,
 ): Promise<OAuthSession | undefined> {
-  let identity: KizenIdentity;
-
   try {
-    identity = await deps.identify(deps.provider);
+    await deps.identify(deps.provider);
   } catch (err) {
     // Transient failures never delete, so a missing file means the sign-in was refused (or
     // removed by a logout --all meanwhile): either way only the browser can sign it in again.
@@ -306,13 +278,6 @@ export async function switchAccount(
     }
 
     throw err;
-  }
-
-  if (!sameAccount(identity, account)) {
-    throw new OAuthError(
-      'invalid_identity',
-      `The saved ${environment} sign-in belongs to another account than it was saved as, so it wasn't switched to.`,
-    );
   }
 
   await deps.store.setCurrent(environment, account);
@@ -443,7 +408,7 @@ export function createTokenProvider(
 
         // A peer spent this refresh token first: use what it stored.
         if (rotated) {
-          return fresh(stored) || deadline !== undefined || until <= deps.now()
+          return fresh(stored) || deadline !== undefined
             ? stored.accessToken
             : doRefresh(stored.accessToken, until);
         }

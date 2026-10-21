@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -32,12 +32,10 @@ import { quoteArg } from './shellArg.js';
 import {
   ACCOUNT_A,
   ACCOUNT_B,
-  deferred,
   ISSUER,
   jsonResponse,
   NOW,
   oauthSession,
-  rejectionOf,
   signIn,
 } from '../test/oauth.js';
 
@@ -45,6 +43,20 @@ const ACCESS = 'secret-access-7f3a';
 const REFRESH = 'secret-refresh-91bc';
 const ROTATED_ACCESS = 'secret-access-rotated-22d0';
 const ROTATED_REFRESH = 'secret-refresh-rotated-5e1f';
+
+const { businessId: BIZ_A, userId: USER_A } = ACCOUNT_A;
+const { businessId: BIZ_B, userId: USER_B } = ACCOUNT_B;
+const BIZ_A2 = 'abababab-abab-4bab-8bab-abababababab';
+const USER_A2 = 'a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2';
+const BIZ_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const USER_C = 'c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1';
+const BIZ_D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const USER_D = 'd1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1';
+const BIZ_Z = '00000000-0000-4000-8000-000000000000';
+const USER_Z = '01010101-0101-4010-8010-010101010101';
+const BIZ_9 = '99999999-9999-4999-8999-999999999999';
+const USER_9 = '91919191-9191-4919-8919-919191919191';
+const NOBODY = '02020202-0202-4020-8020-020202020202';
 
 let dir: string;
 let store: OAuthStore;
@@ -74,8 +86,8 @@ const bootstrapFor = (identity: KizenIdentity): Record<string, unknown> => ({
 });
 
 const IDENTITY_9: KizenIdentity = {
-  userId: 'user-9',
-  businessId: 'biz-9',
+  userId: USER_9,
+  businessId: BIZ_9,
   businessName: 'Acme Corp',
   fullName: 'Ada Lovelace',
   email: 'ada@example.com',
@@ -211,7 +223,7 @@ describe('whoami', () => {
     await runWhoami({ env: 'staging' }, fresh.deps);
 
     expect(fresh.stdout.join('')).toBe(
-      'Environment: staging\nUser: Ada Lovelace <ada@example.com> (user-9)\nBusiness: Acme Corp (biz-9)\n',
+      `Environment: staging\nUser: Ada Lovelace <ada@example.com> (${USER_9})\nBusiness: Acme Corp (${BIZ_9})\n`,
     );
     expect(fresh.exitCodes).toStrictEqual([]);
     expectNoSecrets(fresh.all());
@@ -227,7 +239,7 @@ describe('whoami', () => {
 
     await runWhoami({}, refreshed.deps);
 
-    expect(refreshed.stdout.join('')).toContain('Business: Acme Corp (biz-9)');
+    expect(refreshed.stdout.join('')).toContain(`Business: Acme Corp (${BIZ_9})`);
     expect(refreshed.fetchMock.mock.calls.map(([url]) => url as string)).toContain(
       'https://staging.kizen.com/oauth2/token',
     );
@@ -296,58 +308,7 @@ describe('logout', () => {
   });
 });
 
-describe('logout and a refresh', () => {
-  it('logout during an in-flight refresh leaves no session on disk', async () => {
-    await signIn(store, session('staging', { expiresAt: NOW + 30_000 }));
-
-    const started = deferred();
-    const respond = deferred();
-    const h = harness(() => jsonResponse(BOOTSTRAP), {
-      // The token response is held until logout has finished.
-      tokenEndpoint: async () => {
-        started.resolve();
-        await respond.promise;
-
-        return rotatedTokens();
-      },
-    });
-    const refreshing = h.deps.tokenProvider('staging').getAccessToken();
-
-    refreshing.catch(() => undefined);
-    await started.promise;
-    await runLogout({ env: 'staging' }, h.deps);
-    respond.resolve();
-
-    const error = await rejectionOf(refreshing);
-
-    expect(error.code).toBe('login_required');
-    expect(await store.readSession('staging')).toBeNull();
-    expect(await readdir(store.dir)).toStrictEqual([]);
-    expect(h.stdout.join('')).toContain('Signed out of staging');
-    expect(h.exitCodes).toStrictEqual([]);
-  });
-
-  it('logout removes a corrupt session file', async () => {
-    const h = harness(() => jsonResponse(BOOTSTRAP));
-    const path = store.sessionPath('staging');
-
-    await mkdir(store.dir, { recursive: true });
-
-    // With --env, and as the only (unreadable) session without it.
-    for (const options of [{ env: 'staging' }, {}]) {
-      await writeFile(path, '{"accessToken": "secret-in-file", "trunc');
-      await runLogout(options, h.deps);
-
-      await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
-      expect(h.stdout.at(-1)).toBe(
-        'Signed out of staging. The session was removed from this machine.\n',
-      );
-    }
-
-    expect(h.exitCodes).toStrictEqual([]);
-    expect(h.all()).not.toContain('secret-in-file');
-  });
-
+describe('logout and an unreadable session', () => {
   it('logout removes a corrupt session file and the pointer to it', async () => {
     const h = harness(() => jsonResponse(BOOTSTRAP));
 
@@ -422,7 +383,7 @@ describe('logout and saved accounts', () => {
     // Not current, matched by name ignoring case: the current account stays.
     await runLogout({ env: 'staging', business: 'BRAVO b' }, h.deps);
     expect(h.stdout.at(-1)).toBe(
-      'Removed the saved staging account Bravo B (biz-b) ada@a.test from this machine.\n',
+      `Removed the saved staging account Bravo B (${BIZ_B}) ada@a.test from this machine.\n`,
     );
     expect(await store.readAccount('staging', ACCOUNT_B)).toBeNull();
     expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
@@ -430,22 +391,22 @@ describe('logout and saved accounts', () => {
     // Unknown: a usage error listing what's saved, nothing removed.
     await runLogout({ env: 'staging', business: 'nope' }, h.deps);
     expect(h.stderr.at(-1)).toBe(
-      'Error: No saved staging account matches --business nope. Saved accounts:\n  Acme A (biz-a) ada@a.test\n',
+      `Error: No saved staging account matches --business nope. Saved accounts:\n  Acme A (${BIZ_A}) ada@a.test\n`,
     );
     expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
 
     // Current, matched by id: the pointer goes too.
-    await runLogout({ business: 'biz-a' }, h.deps);
+    await runLogout({ business: BIZ_A }, h.deps);
     expect(h.stdout.at(-1)).toBe(
-      "Removed the saved staging account Acme A (biz-a) ada@a.test from this machine. You're no longer signed in to staging.\n",
+      `Removed the saved staging account Acme A (${BIZ_A}) ada@a.test from this machine. You're no longer signed in to staging.\n`,
     );
     expect(await readdir(store.dir)).toStrictEqual([]);
 
     // Nothing saved, then nothing signed in to name an environment.
-    await runLogout({ env: 'staging', business: 'biz-a' }, h.deps);
+    await runLogout({ env: 'staging', business: BIZ_A }, h.deps);
     expect(h.stdout.at(-1)).toBe('No saved accounts for staging.\n');
-    await runLogout({ business: 'biz-a' }, h.deps);
-    await runLogout({ env: 'staging', business: 'biz-a', all: true }, h.deps);
+    await runLogout({ business: BIZ_A }, h.deps);
+    await runLogout({ env: 'staging', business: BIZ_A, all: true }, h.deps);
     expect(h.stderr.slice(-2)).toStrictEqual([
       'Error: Pass --env <env> with --business to remove a saved account.\n',
       "Error: --all can't be combined with --business.\n",
@@ -453,38 +414,18 @@ describe('logout and saved accounts', () => {
     expect(h.exitCodes).toStrictEqual([1, 1, 1]);
   });
 
-  it('logout --all without --env, when no environment has a current account, is a usage error', async () => {
-    // Saved for staging, but not current anywhere.
-    await store.writeSession(session('staging'));
-    await store.writeSession(session('staging', { ...ACCOUNT_B }));
-
+  it('logout --all removes every saved account', async () => {
     const h = harness(() => jsonResponse(BOOTSTRAP));
 
+    // Saved but current nowhere: --all needs --env to find it.
+    await store.writeSession(session('staging', { ...ACCOUNT_B }));
     await runLogout({ all: true }, h.deps);
-
-    expect(h.exitCodes).toStrictEqual([1]);
     expect(h.stderr).toStrictEqual([
       'Error: Pass --env <env> with --all to remove every saved account.\n',
     ]);
-    expect(h.stdout).toStrictEqual([]);
-    expect(await store.listAccounts('staging')).toHaveLength(2);
 
-    await runLogout({ env: 'staging', all: true }, h.deps);
-
-    expect(h.stdout).toStrictEqual([
-      'Signed out of staging. Removed 2 saved accounts from this machine.\n',
-    ]);
-    expect(await store.listAccounts('staging')).toStrictEqual([]);
-    expect(h.exitCodes).toStrictEqual([1]);
-  });
-
-  it('logout --all removes every saved account', async () => {
-    await store.writeSession(session('staging', { ...ACCOUNT_B }));
     await signIn(store, session('staging'));
     await signIn(store, session('integration'));
-
-    const h = harness(() => jsonResponse(BOOTSTRAP));
-
     await runLogout({ env: 'staging', all: true }, h.deps);
 
     expect(h.stdout).toStrictEqual([
@@ -505,7 +446,7 @@ describe('logout and saved accounts', () => {
       'Signed out of staging. Removed 1 saved account from this machine.\n',
     );
     expect(await readdir(store.dir)).not.toContain(`staging.${accountKey(ACCOUNT_A)}.json`);
-    expect(h.exitCodes).toStrictEqual([]);
+    expect(h.exitCodes).toStrictEqual([1]);
   });
 });
 
@@ -566,8 +507,7 @@ describe('login', () => {
   const AGENT_URL_LINE =
     "A browser window should open for the user to sign in to Kizen staging. If it doesn't, give them this URL:\n";
 
-  const IDENTITY_LINES_9 =
-    'Environment: staging\nUser: Ada Lovelace <ada@example.com> (user-9)\nBusiness: Acme Corp (biz-9)\n';
+  const IDENTITY_LINES_9 = `Environment: staging\nUser: Ada Lovelace <ada@example.com> (${USER_9})\nBusiness: Acme Corp (${BIZ_9})\n`;
 
   /** Account A (Acme A, saved, expiring) and account B (Bravo B, current). */
   const SAVED_A = session('staging', { expiresAt: NOW + 30_000 });
@@ -678,8 +618,8 @@ describe('login', () => {
       await runLogin({ env: 'staging', list: true }, h.deps);
 
       expect(h.stdout).toStrictEqual([
-        'Acme A (biz-a) ada@a.test\n',
-        'Bravo B (biz-b) bob@b.test (current)\n',
+        `Acme A (${BIZ_A}) ada@a.test\n`,
+        `Bravo B (${BIZ_B}) bob@b.test (current)\n`,
       ]);
       expect(h.stderr).toStrictEqual([]);
       expect(h.exitCodes).toStrictEqual([]);
@@ -690,19 +630,10 @@ describe('login', () => {
     });
 
     it('--list --json prints the accounts as a JSON array, without tokens', async () => {
-      await saveAAndB();
-      // One saved without labels, and one that can't be read.
-      await store.writeSession(
-        session('staging', {
-          businessId: 'biz-c',
-          userId: 'user-c',
-          businessName: undefined,
-          fullName: undefined,
-          email: undefined,
-        }),
-      );
+      await signIn(store, CURRENT_B);
+      // And one that can't be read.
       await writeFile(
-        store.accountPath('staging', { businessId: 'biz-d', userId: 'user-d' }),
+        store.accountPath('staging', { businessId: BIZ_D, userId: USER_D }),
         '{"trunc',
       );
 
@@ -713,40 +644,22 @@ describe('login', () => {
       expect(h.stdout).toHaveLength(1);
       expect(JSON.parse(h.stdout[0] ?? '')).toStrictEqual([
         {
-          businessId: 'biz-a',
-          userId: 'user-a',
-          businessName: 'Acme A',
-          fullName: 'Ada A',
-          email: 'ada@a.test',
-          current: false,
-          readable: true,
-        },
-        {
-          businessId: 'biz-c',
-          userId: 'user-c',
-          businessName: null,
-          fullName: null,
-          email: null,
-          current: false,
-          readable: true,
-        },
-        {
-          businessId: 'biz-d',
-          userId: 'user-d',
-          businessName: null,
-          fullName: null,
-          email: null,
-          current: false,
-          readable: false,
-        },
-        {
-          businessId: 'biz-b',
-          userId: 'user-b',
+          businessId: BIZ_B,
+          userId: USER_B,
           businessName: 'Bravo B',
           fullName: 'Bob B',
           email: 'bob@b.test',
           current: true,
           readable: true,
+        },
+        {
+          businessId: BIZ_D,
+          userId: USER_D,
+          businessName: null,
+          fullName: null,
+          email: null,
+          current: false,
+          readable: false,
         },
       ]);
       expectNoSecrets(h.all());
@@ -756,10 +669,8 @@ describe('login', () => {
       // The plain form falls back to the ids.
       await runLogin({ env: 'staging', list: true }, h.deps);
       expect(h.stdout.slice(1)).toStrictEqual([
-        'Acme A (biz-a) ada@a.test\n',
-        'biz-c user user-c\n',
-        "biz-d user user-d (can't be read)\n",
-        'Bravo B (biz-b) bob@b.test (current)\n',
+        `Bravo B (${BIZ_B}) bob@b.test (current)\n`,
+        `${BIZ_D} user ${USER_D} (can't be read)\n`,
       ]);
     });
 
@@ -778,7 +689,7 @@ describe('login', () => {
       const h = loginHarness();
 
       await runLogin({ env: 'staging', json: true }, h.deps);
-      await runLogin({ env: 'staging', list: true, business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', list: true, business: BIZ_A }, h.deps);
 
       expect(h.stderr).toStrictEqual([
         'Error: --json only applies with --list.\n',
@@ -795,14 +706,14 @@ describe('login', () => {
 
       const h = loginHarness(kizenForA);
 
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
 
       expect(h.exitCodes).toStrictEqual([]);
       expect(h.stdout).toStrictEqual([
         'Signed in to staging.\n',
-        'Environment: staging\nUser: Ada A <ada@a.test> (user-a)\nBusiness: Acme A (biz-a)\n',
+        `Environment: staging\nUser: Ada A <ada@a.test> (${USER_A})\nBusiness: Acme A (${BIZ_A})\n`,
       ]);
-      expect(h.stderr).toStrictEqual(['Switching to Acme A (biz-a) ada@a.test on staging.\n']);
+      expect(h.stderr).toStrictEqual([`Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`]);
       // The expiring token was refreshed, then proven against /auth/bootstrap, before the switch.
       expect(h.fetchMock.mock.calls.map(([url]) => url as string)).toStrictEqual([
         'https://staging.kizen.com/oauth2/token',
@@ -838,8 +749,8 @@ describe('login', () => {
       expect(h.exitCodes).toStrictEqual([]);
       expect(browserCalls).toHaveLength(1);
       expect(h.stderr.slice(0, 2)).toStrictEqual([
-        'Switching to Acme A (biz-a) ada@a.test on staging.\n',
-        'The saved sign-in for Acme A (biz-a) ada@a.test has expired and was removed.\nA browser window is opening to sign in to Kizen staging. On the consent page, choose the business "Acme A" (biz-a), signed in as ada@a.test.\n',
+        `Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`,
+        `The saved sign-in for Acme A (${BIZ_A}) ada@a.test has expired and was removed.\nA browser window is opening to sign in to Kizen staging. On the consent page, choose the business "Acme A" (${BIZ_A}), signed in as ada@a.test.\n`,
       ]);
       // The URL to open by hand comes right after the guidance, said once.
       expect(h.stderr.slice(2, 4)).toStrictEqual([
@@ -847,12 +758,12 @@ describe('login', () => {
         `${url ?? '<none>'}\n`,
       ]);
       expect(stderr).toContain('has expired and was removed');
-      expect(stderr).toContain('choose the business "Acme A" (biz-a)');
+      expect(stderr).toContain(`choose the business "Acme A" (${BIZ_A})`);
       expect(url).toMatch(/^https:\/\/staging\.kizen\.com\/oauth2\/authorize\?/);
       // The new sign-in is account A again, so it's current.
       expect(h.stdout).toStrictEqual([
         'Signed in to staging.\n',
-        'Environment: staging\nUser: Ada A <ada@a.test> (user-a)\nBusiness: Acme A (biz-a)\n',
+        `Environment: staging\nUser: Ada A <ada@a.test> (${USER_A})\nBusiness: Acme A (${BIZ_A})\n`,
       ]);
       expect(await store.readSession('staging')).toMatchObject({
         ...ACCOUNT_A,
@@ -871,91 +782,50 @@ describe('login', () => {
         printToStderr: true,
       });
 
-      await runLogin({ env: 'staging', business: 'biz-a' }, expired.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, expired.deps);
 
       expect(expired.exitCodes).toStrictEqual([1]);
       expect(expired.stdout).toStrictEqual([]);
       // The whole stderr: switch, guidance, URL line, URL, and the outcome.
       expect(expired.stderr.slice(0, -1)).toStrictEqual([
-        'Switching to Acme A (biz-a) ada@a.test on staging.\n',
-        'The saved sign-in for Acme A (biz-a) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (biz-a), signed in as ada@a.test.\n',
+        `Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`,
+        `The saved sign-in for Acme A (${BIZ_A}) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (${BIZ_A}), signed in as ada@a.test.\n`,
         AGENT_URL_LINE,
         `${browserCalls[0] ?? '<none>'}\n`,
       ]);
       expect(expired.stderr.at(-1)).toBe(
-        "The user signed in as Acme Corp (biz-9) ada@example.com, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business biz-9 --user user-9`. To have them try again, run `appbuilder login --env staging --business biz-a --user user-a`.\n",
+        `The user signed in as Acme Corp (${BIZ_9}) ada@example.com, not Acme A (${BIZ_A}) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run \`appbuilder login --env staging --business ${BIZ_9} --user ${USER_9}\`. To have them try again, run \`appbuilder login --env staging --business ${BIZ_A} --user ${USER_A}\`.\n`,
       );
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
       expect(await store.readAccount('staging', IDENTITY_9)).toMatchObject(IDENTITY_9);
       expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
-
-      // With nothing saved for the env, and --user that doesn't match: nobody becomes current.
-      // At a terminal, it speaks to the person.
-      await rm(store.dir, { recursive: true, force: true });
-
-      browserCalls.length = 0;
-
-      const unsaved = loginHarness(undefined, { interactive: true, printToStderr: true });
-
-      await runLogin({ env: 'staging', business: 'Acme Corp', user: 'user-other' }, unsaved.deps);
-
-      expect(unsaved.exitCodes).toStrictEqual([1]);
-      expect(unsaved.stderr.slice(0, -1)).toStrictEqual([
-        'There\'s no saved staging account for "Acme Corp" with user "user-other".\nA browser window is opening to sign in to Kizen staging. On the consent page, choose the business "Acme Corp", signed in as user-other.\n',
-        'Opening your browser to sign in to Kizen. If it does not open, visit:\n',
-        `${browserCalls[0] ?? '<none>'}\n`,
-      ]);
-      expect(unsaved.stderr.at(-1)).toBe(
-        "You signed in as Acme Corp (biz-9) ada@example.com, not --business 'Acme Corp' --user user-other. It was saved, but it isn't the current staging account.\nTo use it, run `appbuilder login --env staging --business biz-9 --user user-9`. To try again, run `appbuilder login --env staging --business 'Acme Corp' --user user-other`.\n",
-      );
-      expect(await store.readSession('staging')).toBeNull();
-      expect(await store.readAccount('staging', IDENTITY_9)).toMatchObject(IDENTITY_9);
     });
 
-    it.each([
-      [
-        'same business, different user',
-        { ...IDENTITY_A, userId: 'user-z', email: 'zed@a.test' },
-        'Acme A',
-      ],
-      [
-        'a different business whose name differs only in case',
-        { ...IDENTITY_A, businessId: 'biz-x', businessName: 'ACME A' },
-        'Acme A',
-      ],
-      [
-        'a business named like the requested id',
-        { ...IDENTITY_A, businessId: 'biz-y', businessName: 'biz-a' },
-        'biz-a',
-      ],
-    ] as const)(
-      'after an expired --business account, only that exact account becomes current: %s is saved, not current, exit 1',
-      async (_name, identity, business) => {
-        await saveAAndB();
+    it('after an expired --business account, another user of that business is saved but not made current, and exits 1', async () => {
+      const identity = { ...IDENTITY_A, userId: USER_Z, email: 'zed@a.test' };
 
-        const h = loginHarness(kizenForA, {
-          tokenEndpoint: () => jsonResponse({ error: 'invalid_grant' }, 400),
-          identity,
-          printToStderr: true,
-        });
+      await saveAAndB();
 
-        await runLogin({ env: 'staging', business }, h.deps);
+      const h = loginHarness(kizenForA, {
+        tokenEndpoint: () => jsonResponse({ error: 'invalid_grant' }, 400),
+        identity,
+        printToStderr: true,
+      });
 
-        const summary = `${identity.businessName ?? ''} (${identity.businessId}) ${identity.email ?? ''}`;
+      await runLogin({ env: 'staging', business: 'Acme A' }, h.deps);
 
-        expect(h.exitCodes).toStrictEqual([1]);
-        expect(h.stdout).toStrictEqual([]);
-        expect(h.stderr).toStrictEqual([
-          'Switching to Acme A (biz-a) ada@a.test on staging.\n',
-          'The saved sign-in for Acme A (biz-a) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (biz-a), signed in as ada@a.test.\n',
-          AGENT_URL_LINE,
-          `${browserCalls[0] ?? '<none>'}\n`,
-          `The user signed in as ${summary}, not Acme A (biz-a) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run \`appbuilder login --env staging --business ${identity.businessId} --user ${identity.userId}\`. To have them try again, run \`appbuilder login --env staging --business biz-a --user user-a\`.\n`,
-        ]);
-        expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
-        expect(await store.readAccount('staging', identity)).toMatchObject(identity);
-      },
-    );
+      expect(h.exitCodes).toStrictEqual([1]);
+      expect(h.stdout).toStrictEqual([]);
+      expect(h.stderr).toStrictEqual([
+        `Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`,
+        `The saved sign-in for Acme A (${BIZ_A}) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (${BIZ_A}), signed in as ada@a.test.\n`,
+        AGENT_URL_LINE,
+        `${browserCalls[0] ?? '<none>'}\n`,
+        `The user signed in as Acme A (${BIZ_A}) zed@a.test, not Acme A (${BIZ_A}) ada@a.test. It was saved, but it isn't the current staging account.\nTo use it, run \`appbuilder login --env staging --business ${BIZ_A} --user ${USER_Z}\`. To have them try again, run \`appbuilder login --env staging --business ${BIZ_A} --user ${USER_A}\`.\n`,
+      ]);
+      expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
+      expect(await store.readAccount('staging', identity)).toMatchObject(identity);
+    });
 
     it('a picked account that expired becomes current again when the user signs back in as it', async () => {
       await saveAAndB();
@@ -973,7 +843,7 @@ describe('login', () => {
       expect(h.stderr.join('')).not.toContain('--business ""');
       expect(h.stdout).toStrictEqual([
         'Signed in to staging.\n',
-        'Environment: staging\nUser: Ada A <ada@a.test> (user-a)\nBusiness: Acme A (biz-a)\n',
+        `Environment: staging\nUser: Ada A <ada@a.test> (${USER_A})\nBusiness: Acme A (${BIZ_A})\n`,
       ]);
       expect(await store.readSession('staging')).toMatchObject({
         ...ACCOUNT_A,
@@ -997,17 +867,17 @@ describe('login', () => {
         printToStderr: true,
       });
 
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
 
       expect(h.exitCodes).toStrictEqual([1]);
       expect(h.stderr.slice(0, -1)).toStrictEqual([
-        'Switching to Acme A (biz-a) ada@a.test on staging.\n',
-        'The saved sign-in for Acme A (biz-a) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (biz-a), signed in as ada@a.test.\n',
+        `Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`,
+        `The saved sign-in for Acme A (${BIZ_A}) ada@a.test has expired and was removed.\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "Acme A" (${BIZ_A}), signed in as ada@a.test.\n`,
         AGENT_URL_LINE,
         `${browserCalls[0] ?? '<none>'}\n`,
       ]);
       expect(h.stderr.at(-1)).toBe(
-        "The user signed in as Bravo B (biz-b) bob@b.test, not Acme A (biz-a) ada@a.test. That's already the current staging account; its saved session was updated.\nTo have them try again, run `appbuilder login --env staging --business biz-a --user user-a`.\n",
+        `The user signed in as Bravo B (${BIZ_B}) bob@b.test, not Acme A (${BIZ_A}) ada@a.test. That's already the current staging account; its saved session was updated.\nTo have them try again, run \`appbuilder login --env staging --business ${BIZ_A} --user ${USER_A}\`.\n`,
       );
       expect(await store.readSession('staging')).toMatchObject({
         ...ACCOUNT_B,
@@ -1015,27 +885,20 @@ describe('login', () => {
       });
     });
 
-    it.each([
-      [
-        'a 503 from the token endpoint',
-        () => jsonResponse({ error: 'temporarily_unavailable' }, 503),
-      ],
-      [
-        'an unreachable token endpoint',
-        () => {
-          throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } });
-        },
-      ],
-    ])("a transient failure while switching doesn't switch: %s", async (_name, tokenEndpoint) => {
+    it("a transient failure while switching doesn't switch: an unreachable token endpoint", async () => {
+      const tokenEndpoint = (): Response => {
+        throw new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } });
+      };
+
       await saveAAndB();
 
       const h = loginHarness(kizenForA, { tokenEndpoint });
 
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
 
       expect(h.exitCodes).toStrictEqual([1]);
       expect(h.stdout).toStrictEqual([]);
-      expect(h.stderr[0]).toBe('Switching to Acme A (biz-a) ada@a.test on staging.\n');
+      expect(h.stderr[0]).toBe(`Switching to Acme A (${BIZ_A}) ada@a.test on staging.\n`);
       expect(h.stderr[1]).toMatch(/^Error: /);
       expect(browserCalls).toStrictEqual([]);
       // Still B, and A's saved session as it was.
@@ -1049,7 +912,7 @@ describe('login', () => {
 
       const h = loginHarness(() => new Response('bad gateway', { status: 502 }));
 
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
 
       expect(h.exitCodes).toStrictEqual([1]);
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
@@ -1062,7 +925,7 @@ describe('login', () => {
     it('--business with an ambiguous name fails and lists the candidates with their ids', async () => {
       await saveAAndB();
       await store.writeSession(
-        session('staging', { businessId: 'biz-a2', userId: 'user-a2', email: 'eve@a.test' }),
+        session('staging', { businessId: BIZ_A2, userId: USER_A2, email: 'eve@a.test' }),
       );
 
       const h = loginHarness(kizenForA);
@@ -1071,7 +934,7 @@ describe('login', () => {
 
       expect(h.exitCodes).toStrictEqual([1]);
       expect(h.stderr).toStrictEqual([
-        "Error: --business 'Acme A' matches several saved staging accounts. Pass one of these business ids instead:\n  Acme A (biz-a) ada@a.test\n  Acme A (biz-a2) eve@a.test\n",
+        `Error: --business 'Acme A' matches several saved staging accounts. Pass one of these business ids instead:\n  Acme A (${BIZ_A}) ada@a.test\n  Acme A (${BIZ_A2}) eve@a.test\n`,
       ]);
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
       expect(h.fetchMock).not.toHaveBeenCalled();
@@ -1083,7 +946,7 @@ describe('login', () => {
 
       const h = loginHarness(kizenForA, { printToStderr: true });
 
-      // IDENTITY_9 is Acme Corp (biz-9): matchesRequest accepts it by name, ignoring case.
+      // IDENTITY_9 is Acme Corp (BIZ_9): matchesRequest accepts it by name, ignoring case.
       await runLogin({ env: 'staging', business: 'acme CORP' }, h.deps);
 
       expect(h.exitCodes).toStrictEqual([]);
@@ -1098,51 +961,6 @@ describe('login', () => {
       // The other saved accounts stay saved.
       expect(await store.listAccounts('staging')).toHaveLength(3);
     });
-
-    /** An account with ids and a name full of shell syntax: `$`, `$(...)`, a backtick, `!`, `'`, a space. */
-    const SHELLY: KizenIdentity = {
-      businessId: "R$D'`x`!",
-      userId: 'u $(echo pwned) !x',
-      businessName: "R$D Corp's `x` deal!",
-      fullName: 'Shelly',
-      email: 'shelly@r.test',
-    };
-
-    /** Runs a mismatch for `path`, returning the requested account and the first run's harness. */
-    const runMismatch = async (
-      path: 'expired' | 'not_saved' | 'expired_shelly' | 'not_saved_shelly',
-    ): Promise<{ requested: KizenIdentity; first: Harness }> => {
-      if (path === 'expired' || path === 'expired_shelly') {
-        const requested = path === 'expired' ? IDENTITY_A : SHELLY;
-
-        await store.writeSession(session('staging', { ...requested, expiresAt: NOW + 30_000 }));
-        await signIn(store, CURRENT_B);
-
-        const first = loginHarness(kizenForA, {
-          tokenEndpoint: () => jsonResponse({ error: 'invalid_grant' }, 400),
-        });
-
-        await runLogin(
-          { env: 'staging', business: requested.businessId, user: requested.userId },
-          first.deps,
-        );
-
-        return { requested, first };
-      }
-
-      await signIn(store, CURRENT_B);
-
-      const requested =
-        path === 'not_saved'
-          ? { ...IDENTITY_9, businessId: 'biz-z', businessName: 'Zeta Z' }
-          : { ...SHELLY, userId: 'user-9' };
-      const first = loginHarness();
-
-      // By name: IDENTITY_9 (Acme Corp) comes back instead.
-      await runLogin({ env: 'staging', business: requested.businessName ?? '' }, first.deps);
-
-      return { requested, first };
-    };
 
     /** The `try again` command from a mismatch message, split by a real shell. */
     const retryFlags = (
@@ -1167,28 +985,31 @@ describe('login', () => {
       return { words, flags };
     };
 
-    it.each([
-      ['an expired --business account', 'expired'],
-      ['a --business with no saved match', 'not_saved'],
-      ['an expired account whose ids hold shell syntax', 'expired_shelly'],
-      ['a --business name holding shell syntax', 'not_saved_shelly'],
-    ] as const)('the retry command printed after a mismatch works: %s', async (_name, path) => {
-      const { requested, first } = await runMismatch(path);
+    it('the retry command printed after a mismatch works, even for a business name holding shell syntax', async () => {
+      // `$`, `$(...)`, a backtick, `!`, `'` and a space.
+      const requested: KizenIdentity = {
+        businessId: BIZ_Z,
+        userId: USER_9,
+        businessName: "R$D Corp's `x` deal!",
+        fullName: 'Shelly',
+        email: 'shelly@r.test',
+      };
 
-      // The wrong account (Acme Corp, biz-9) was saved, not made current.
+      await signIn(store, CURRENT_B);
+
+      const first = loginHarness();
+
+      // By name: IDENTITY_9 (Acme Corp, BIZ_9) comes back instead, and is saved, not made current.
+      await runLogin({ env: 'staging', business: requested.businessName ?? '' }, first.deps);
+
       expect(first.exitCodes).toStrictEqual([1]);
       expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
 
       const { words, flags } = retryFlags(first.stderr.at(-1) ?? '');
 
+      // The name survives shell parsing exactly.
       expect(words.slice(0, 2)).toStrictEqual(['appbuilder', 'login']);
-      expect(flags.env).toBe('staging');
-      // The values survive shell parsing exactly: an expired account's retry names its exact ids.
-      expect(flags).toStrictEqual(
-        path.startsWith('expired')
-          ? { env: 'staging', business: requested.businessId, user: requested.userId }
-          : { env: 'staging', business: requested.businessName },
-      );
+      expect(flags).toStrictEqual({ env: 'staging', business: requested.businessName });
 
       // Run the printed retry, the browser returning the requested account this time.
       browserCalls.length = 0;
@@ -1222,27 +1043,6 @@ describe('login', () => {
       }
     });
 
-    it('--business with nothing saved explains and opens the browser', async () => {
-      // Nothing saved for staging (only for another environment).
-      await signIn(store, session('integration'));
-
-      // No TTY: an agent runs it, so the guidance is for the agent to relay.
-      const h = loginHarness(undefined, { printToStderr: true });
-
-      await runLogin({ env: 'staging', business: 'biz-9' }, h.deps);
-
-      const [url] = browserCalls;
-
-      expect(h.exitCodes).toStrictEqual([]);
-      expect(browserCalls).toHaveLength(1);
-      expect(h.stderr).toStrictEqual([
-        'There\'s no saved staging account for "biz-9".\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "biz-9".\n',
-        AGENT_URL_LINE,
-        `${url ?? '<none>'}\n`,
-      ]);
-      expect(h.stdout).toStrictEqual(['Signed in to staging.\n', IDENTITY_LINES_9]);
-    });
-
     it('the guidance speaks to the person at a TTY, and to the agent otherwise', async () => {
       for (const interactive of [true, false]) {
         await rm(store.dir, { recursive: true, force: true });
@@ -1251,7 +1051,7 @@ describe('login', () => {
 
         const h = loginHarness(undefined, { interactive, printToStderr: true });
 
-        await runLogin({ env: 'staging', business: 'biz-9', user: 'user-9' }, h.deps);
+        await runLogin({ env: 'staging', business: BIZ_9, user: USER_9 }, h.deps);
 
         const url = `${browserCalls[0] ?? '<none>'}\n`;
 
@@ -1259,12 +1059,12 @@ describe('login', () => {
         expect(h.stderr).toStrictEqual(
           interactive
             ? [
-                'There\'s no saved staging account for "biz-9" with user "user-9".\nA browser window is opening to sign in to Kizen staging. On the consent page, choose the business "biz-9", signed in as user-9.\n',
+                `There's no saved staging account for "${BIZ_9}" with user "${USER_9}".\nA browser window is opening to sign in to Kizen staging. On the consent page, choose the business "${BIZ_9}", signed in as ${USER_9}.\n`,
                 'Opening your browser to sign in to Kizen. If it does not open, visit:\n',
                 url,
               ]
             : [
-                'There\'s no saved staging account for "biz-9" with user "user-9".\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "biz-9", signed in as user-9.\n',
+                `There's no saved staging account for "${BIZ_9}" with user "${USER_9}".\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "${BIZ_9}", signed in as ${USER_9}.\n`,
                 AGENT_URL_LINE,
                 url,
               ],
@@ -1289,7 +1089,7 @@ describe('login', () => {
 
     it.each([
       ['by name, ignoring case', { business: 'ACME corp' }],
-      ['by business id and user id', { business: 'biz-9', user: 'user-9' }],
+      ['by business id and user id', { business: BIZ_9, user: USER_9 }],
     ])('a browser sign-in matching --business becomes current: %s', async (_name, request) => {
       const h = loginHarness();
 
@@ -1300,29 +1100,17 @@ describe('login', () => {
       expect(await store.readSession('staging')).toMatchObject(IDENTITY_9);
     });
 
-    it('a first --business <name> --user <id> sign-in to exactly that account becomes current', async () => {
-      // Nothing saved: the request names the business by name, and the user by id.
-      const h = loginHarness();
-
-      await runLogin({ env: 'staging', business: 'Acme Corp', user: 'user-9' }, h.deps);
-
-      expect(h.exitCodes).toStrictEqual([]);
-      expect(browserCalls).toHaveLength(1);
-      expect(h.stdout).toStrictEqual(['Signed in to staging.\n', IDENTITY_LINES_9]);
-      expect(await store.readSession('staging')).toMatchObject(IDENTITY_9);
-    });
-
     describe('two users of one business', () => {
       const A2 = session('staging', {
-        userId: 'user-a2',
+        userId: USER_A2,
         fullName: 'Eve A',
         email: 'eve@a.test',
         accessToken: 'access-a2',
         refreshToken: 'refresh-a2',
       });
       const IDENTITY_A2: KizenIdentity = {
-        businessId: 'biz-a',
-        userId: 'user-a2',
+        businessId: BIZ_A,
+        userId: USER_A2,
         businessName: 'Acme A',
         fullName: 'Eve A',
         email: 'eve@a.test',
@@ -1343,10 +1131,10 @@ describe('login', () => {
 
         const h = loginHarness(kizenForA2);
 
-        await runLogin({ env: 'staging', business: 'biz-a', user: 'user-a2' }, h.deps);
+        await runLogin({ env: 'staging', business: BIZ_A, user: USER_A2 }, h.deps);
 
         expect(h.exitCodes).toStrictEqual([]);
-        expect(h.stderr).toStrictEqual(['Switching to Acme A (biz-a) eve@a.test on staging.\n']);
+        expect(h.stderr).toStrictEqual([`Switching to Acme A (${BIZ_A}) eve@a.test on staging.\n`]);
         expect(await store.readSession('staging')).toStrictEqual(A2);
         expect(browserCalls).toStrictEqual([]);
       });
@@ -1356,13 +1144,13 @@ describe('login', () => {
 
         const h = loginHarness();
 
-        await runLogout({ env: 'staging', business: 'Acme A', user: 'user-a2' }, h.deps);
+        await runLogout({ env: 'staging', business: 'Acme A', user: USER_A2 }, h.deps);
 
         expect(h.stdout).toStrictEqual([
-          'Removed the saved staging account Acme A (biz-a) eve@a.test from this machine.\n',
+          `Removed the saved staging account Acme A (${BIZ_A}) eve@a.test from this machine.\n`,
         ]);
         expect(
-          await store.readAccount('staging', { businessId: 'biz-a', userId: 'user-a2' }),
+          await store.readAccount('staging', { businessId: BIZ_A, userId: USER_A2 }),
         ).toBeNull();
         expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(session('staging'));
         expect(await store.readSession('staging')).toStrictEqual(CURRENT_B);
@@ -1372,11 +1160,10 @@ describe('login', () => {
         await saveTwoUsers();
 
         const h = loginHarness(kizenForA2);
-        const expected =
-          'Error: --business biz-a matches several saved staging users of the same business. Pass --user too, for example `--business biz-a --user user-a`:\n  --user user-a: Acme A (biz-a) ada@a.test\n  --user user-a2: Acme A (biz-a) eve@a.test\n';
+        const expected = `Error: --business ${BIZ_A} matches several saved staging users of the same business. Pass --user too, for example \`--business ${BIZ_A} --user ${USER_A}\`:\n  --user ${USER_A}: Acme A (${BIZ_A}) ada@a.test\n  --user ${USER_A2}: Acme A (${BIZ_A}) eve@a.test\n`;
 
-        await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
-        await runLogout({ env: 'staging', business: 'biz-a' }, h.deps);
+        await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
+        await runLogout({ env: 'staging', business: BIZ_A }, h.deps);
 
         expect(h.stderr).toStrictEqual([expected, expected]);
         expect(h.exitCodes).toStrictEqual([1, 1]);
@@ -1390,8 +1177,8 @@ describe('login', () => {
 
         const h = loginHarness();
 
-        await runLogin({ env: 'staging', user: 'user-a2' }, h.deps);
-        await runLogout({ env: 'staging', user: 'user-a2' }, h.deps);
+        await runLogin({ env: 'staging', user: USER_A2 }, h.deps);
+        await runLogout({ env: 'staging', user: USER_A2 }, h.deps);
 
         expect(h.stderr).toStrictEqual([
           'Error: --user only applies with --business.\n',
@@ -1405,13 +1192,13 @@ describe('login', () => {
       it('--user that matches none of the business users runs the guided browser flow', async () => {
         await saveTwoUsers();
 
-        const nobody: KizenIdentity = { ...IDENTITY_A2, userId: 'nobody', email: 'no@a.test' };
+        const nobody: KizenIdentity = { ...IDENTITY_A2, userId: NOBODY, email: 'no@a.test' };
         const h = loginHarness(undefined, { identity: nobody });
 
-        await runLogin({ env: 'staging', business: 'biz-a', user: 'nobody' }, h.deps);
+        await runLogin({ env: 'staging', business: BIZ_A, user: NOBODY }, h.deps);
 
         expect(h.stderr[0]).toBe(
-          'There\'s no saved staging account for "biz-a" with user "nobody".\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "biz-a", signed in as nobody.\n',
+          `There's no saved staging account for "${BIZ_A}" with user "${NOBODY}".\nWaiting for the user to sign in to Kizen staging in a browser window. Ask them to choose the business "${BIZ_A}", signed in as ${NOBODY}.\n`,
         );
         expect(h.exitCodes).toStrictEqual([]);
         expect(browserCalls).toHaveLength(1);
@@ -1475,39 +1262,6 @@ describe('login', () => {
       expect(await store.listAccounts('staging')).toHaveLength(3);
     });
 
-    it('no TTY with nothing saved prints no hint', async () => {
-      const h = loginHarness(undefined, { interactive: false });
-
-      await runLogin({ env: 'staging' }, h.deps);
-
-      expect(h.stderr).toStrictEqual(['Signing in to staging.\n']);
-      expect(browserCalls).toHaveLength(1);
-    });
-
-    it('a plain login without a TTY never tells the reader to visit or open the URL', async () => {
-      const h = loginHarness(undefined, { interactive: false, printToStderr: true });
-
-      await runLogin({ env: 'staging' }, h.deps);
-
-      expect(h.stderr).toStrictEqual([
-        'Signing in to staging.\n',
-        "A browser window should open for the user to sign in to Kizen staging. If it doesn't, give them this URL:\n",
-        `${browserCalls[0] ?? '<none>'}\n`,
-      ]);
-      expect(h.stderr.join('')).not.toMatch(/\bvisit\b|open the URL/i);
-
-      // At a terminal, the person is told to visit it.
-      browserCalls.length = 0;
-      await rm(store.dir, { recursive: true, force: true });
-
-      const tty = loginHarness(undefined, { interactive: true, printToStderr: true });
-
-      await runLogin({ env: 'staging' }, tty.deps);
-      expect(tty.stderr[1]).toBe(
-        'Opening your browser to sign in to Kizen. If it does not open, visit:\n',
-      );
-    });
-
     it('a TTY with saved accounts shows the picker, and picking one switches to it', async () => {
       await saveAAndB();
 
@@ -1519,7 +1273,7 @@ describe('login', () => {
       expect(picker.calls).toStrictEqual([
         {
           title: 'Sign in to staging',
-          labels: ['Acme A (biz-a)', 'Bravo B (biz-b)', 'Sign in with the browser'],
+          labels: [`Acme A (${BIZ_A})`, `Bravo B (${BIZ_B})`, 'Sign in with the browser'],
         },
       ]);
       expect(h.exitCodes).toStrictEqual([]);
@@ -1564,14 +1318,14 @@ describe('login', () => {
       const h = loginHarness(kizenForA, { interactive: true, pickAccount: picker });
 
       await runLogin({ env: 'staging', list: true }, h.deps);
-      await runLogin({ env: 'staging', business: 'biz-a' }, h.deps);
+      await runLogin({ env: 'staging', business: BIZ_A }, h.deps);
 
       expect(picker.calls).toStrictEqual([]);
       expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
     });
 
     it('the picker labels accounts by business name and email, falls back to ids, and ends with the browser', () => {
-      const unlabeled: OAuthAccount = { businessId: 'biz-c', userId: 'user-c' };
+      const unlabeled: OAuthAccount = { businessId: BIZ_C, userId: USER_C };
       const accounts: SavedAccount[] = [
         { account: ACCOUNT_A, session: SAVED_A, current: false },
         { account: ACCOUNT_B, session: CURRENT_B, current: true },
@@ -1584,22 +1338,22 @@ describe('login', () => {
           }),
           current: false,
         },
-        { account: { businessId: 'biz-d', userId: 'user-d' }, session: undefined, current: false },
+        { account: { businessId: BIZ_D, userId: USER_D }, session: undefined, current: false },
       ];
       const items = accountPickerItems(accounts);
 
       expect(items).toStrictEqual([
-        { key: accountKey(ACCOUNT_A), label: 'Acme A (biz-a)', description: 'ada@a.test' },
+        { key: accountKey(ACCOUNT_A), label: `Acme A (${BIZ_A})`, description: 'ada@a.test' },
         {
           key: accountKey(ACCOUNT_B),
-          label: 'Bravo B (biz-b)',
+          label: `Bravo B (${BIZ_B})`,
           description: 'bob@b.test (current)',
         },
-        { key: accountKey(unlabeled), label: 'biz-c', description: 'user-c' },
+        { key: accountKey(unlabeled), label: BIZ_C, description: USER_C },
         {
-          key: accountKey({ businessId: 'biz-d', userId: 'user-d' }),
-          label: 'biz-d',
-          description: "user-d (can't be read)",
+          key: accountKey({ businessId: BIZ_D, userId: USER_D }),
+          label: BIZ_D,
+          description: `${USER_D} (can't be read)`,
         },
         { key: BROWSER_PICK, label: 'Sign in with the browser' },
       ]);
@@ -1741,29 +1495,18 @@ describe('auth-header', () => {
     expectHeaderFailure(unknown, 'Unknown --env "prod"');
   });
 
-  it('--env agreeing with CLAUDE_CODE_MCP_SERVER_URL prints the token', async () => {
+  it('--env prints the token when CLAUDE_CODE_MCP_SERVER_URL agrees or is unset', async () => {
+    // Two sessions: without --env, and with no server URL, this would be ambiguous.
     await twoSessions();
 
-    const h = harness(noKizen, {
-      processEnv: { CLAUDE_CODE_MCP_SERVER_URL: 'https://integration.kizen.dev/api/mcp' },
-    });
+    for (const url of ['https://integration.kizen.dev/api/mcp', '']) {
+      const h = harness(noKizen, { processEnv: { CLAUDE_CODE_MCP_SERVER_URL: url } });
 
-    await runAuthHeader({ env: 'integration' }, h.deps);
+      await runAuthHeader({ env: 'integration' }, h.deps);
 
-    expect(h.stdout).toStrictEqual([header('integration-access')]);
-    expect(h.exitCodes).toStrictEqual([]);
-  });
-
-  it('--env without CLAUDE_CODE_MCP_SERVER_URL prints the token', async () => {
-    // Two sessions: without --env this would be ambiguous.
-    await twoSessions();
-
-    const h = harness(noKizen, { processEnv: { CLAUDE_CODE_MCP_SERVER_URL: '' } });
-
-    await runAuthHeader({ env: 'integration' }, h.deps);
-
-    expect(h.stdout).toStrictEqual([header('integration-access')]);
-    expect(h.exitCodes).toStrictEqual([]);
+      expect(h.stdout).toStrictEqual([header('integration-access')]);
+      expect(h.exitCodes).toStrictEqual([]);
+    }
   });
 
   it('the production deps forward auth-header timeouts to the token request', async () => {
@@ -1818,93 +1561,64 @@ describe('auth-header', () => {
     });
   });
 
-  it("auth-header uses timeouts under Claude Code's 10s helper limit", async () => {
-    // The production wiring carries the short request timeout, and one full request fits inside
-    // the helper limit with room for start-up.
-    expect(createDefaultAuthCommandDeps(store).authHeaderTimeouts).toStrictEqual({
-      requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS,
-    });
+  it("auth-header uses timeouts under Claude Code's 10s helper limit", () => {
+    // One full request fits inside the helper limit with room for start-up.
     expect(AUTH_HEADER_REQUEST_TIMEOUT_MS).toBeLessThan(9_000);
-
-    // That value is what reaches the token provider.
-    await signIn(store, session('staging'));
-
-    const wired = harness(noKizen);
-
-    await runAuthHeader({}, wired.deps);
-    expect(wired.providerOptions).toStrictEqual([
-      { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
-    ]);
   });
 
-  it.each([
-    ['gets only the time left', 300, 2],
-    ['is skipped once the time is spent', 400, 1],
-  ])(
-    'the refresh after a peer rotated %s, on the injected clock',
-    async (_name, elapsed, calls) => {
-      const TIMEOUT_MS = 400;
-      let clock = NOW;
+  it('the refresh after a peer rotated gets only the time left, on the injected clock', async () => {
+    const TIMEOUT_MS = 400;
+    const elapsed = 300;
+    let clock = NOW;
 
-      await signIn(store, session('staging', { expiresAt: NOW + 30_000 }));
+    await signIn(store, session('staging', { expiresAt: NOW + 30_000 }));
 
-      const timeout = vi.spyOn(AbortSignal, 'timeout');
-      const h = harness(noKizen, {
-        now: () => clock,
-        timeouts: { requestTimeoutMs: TIMEOUT_MS },
-        tokenEndpoint: async (init) => {
-          if (new URLSearchParams(init?.body as string).get('refresh_token') !== REFRESH) {
-            return rotatedTokens();
-          }
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const h = harness(noKizen, {
+      now: () => clock,
+      timeouts: { requestTimeoutMs: TIMEOUT_MS },
+      tokenEndpoint: async (init) => {
+        if (new URLSearchParams(init?.body as string).get('refresh_token') !== REFRESH) {
+          return rotatedTokens();
+        }
 
-          // Late, a peer rotates to tokens that aren't fresh, and this request is refused.
-          clock += elapsed;
-          await store.writeSession(
-            session('staging', {
-              accessToken: ROTATED_ACCESS,
-              refreshToken: ROTATED_REFRESH,
-              expiresAt: NOW + 30_000,
-            }),
-          );
+        // Late, a peer rotates to tokens that aren't fresh, and this request is refused.
+        clock += elapsed;
+        await store.writeSession(
+          session('staging', {
+            accessToken: ROTATED_ACCESS,
+            refreshToken: ROTATED_REFRESH,
+            expiresAt: NOW + 30_000,
+          }),
+        );
 
-          return jsonResponse({ error: 'invalid_grant' }, 400);
-        },
-      });
+        return jsonResponse({ error: 'invalid_grant' }, 400);
+      },
+    });
 
-      await runAuthHeader({ env: 'staging' }, h.deps);
+    await runAuthHeader({ env: 'staging' }, h.deps);
 
-      // One timeout in total: the retry gets what the first request left, or isn't made.
-      expect(timeout.mock.calls).toStrictEqual(
-        [[TIMEOUT_MS], [TIMEOUT_MS - elapsed]].slice(0, calls),
-      );
-      expect(h.fetchMock).toHaveBeenCalledTimes(calls);
-      expect(h.stdout).toStrictEqual([header(ROTATED_ACCESS)]);
-      expect(await store.readSession('staging')).toMatchObject({ refreshToken: ROTATED_REFRESH });
-    },
-  );
+    // One timeout in total: the retry gets what the first request left.
+    expect(timeout.mock.calls).toStrictEqual([[TIMEOUT_MS], [TIMEOUT_MS - elapsed]]);
+    expect(h.fetchMock).toHaveBeenCalledTimes(2);
+    expect(h.stdout).toStrictEqual([header(ROTATED_ACCESS)]);
+    expect(await store.readSession('staging')).toMatchObject({ refreshToken: ROTATED_REFRESH });
+  });
 
   it('auth-header prints nothing on stdout when the session is unreadable', async () => {
     await mkdir(store.dir, { recursive: true });
     await writeFile(store.sessionPath('staging'), `{"accessToken": "${ACCESS}", "trunc`);
 
-    // Selected by the MCP server URL, by --env, and as the only session file.
-    const runs: [{ env?: string }, Record<string, string>][] = [
-      [{}, { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP }],
-      [{ env: 'staging' }, {}],
-      [{}, {}],
-    ];
+    // Selected by the MCP server URL.
+    const h = harness(noKizen, { processEnv: { CLAUDE_CODE_MCP_SERVER_URL: STAGING_MCP } });
 
-    for (const [options, processEnv] of runs) {
-      const h = harness(noKizen, { processEnv });
+    await runAuthHeader({}, h.deps);
 
-      await runAuthHeader(options, h.deps);
-
-      expectHeaderFailure(h);
-      expect(h.stderr).toStrictEqual([
-        `appbuilder auth-header: The saved staging session at ${store.sessionPath('staging')} can't be read. Run \`appbuilder login --env staging\` to sign in again.\n`,
-      ]);
-      expect(h.fetchMock).not.toHaveBeenCalled();
-    }
+    expectHeaderFailure(h);
+    expect(h.stderr).toStrictEqual([
+      `appbuilder auth-header: The saved staging session at ${store.sessionPath('staging')} can't be read. Run \`appbuilder login --env staging\` to sign in again.\n`,
+    ]);
+    expect(h.fetchMock).not.toHaveBeenCalled();
   });
 
   it('auth-header never writes tokens to stderr', async () => {

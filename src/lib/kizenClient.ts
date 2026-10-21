@@ -1,4 +1,4 @@
-import { apiOriginFor, BASE_URLS } from '../../shared/lib/kizenUrls.js';
+import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
 import type { Credentials, Environment } from './credentials.js';
 import { errorCause, errorMessage, isRecord, nonEmptyString } from './guards.js';
 import type {
@@ -232,31 +232,10 @@ function tokenError(err: unknown, environment: Environment): KizenApiError {
     : new KizenApiError(kind, message);
 }
 
-/** Throws unless `url` is on `environment`'s API origin, the only origin its Bearer token goes to. */
-export function assertBearerOrigin(url: string, environment: Environment): void {
-  const apiOrigin = apiOriginFor(environment);
-  const { origin } = new URL(url);
-
-  if (origin !== apiOrigin) {
-    throw new Error(
-      `createKizenClient: refusing to send a ${environment} token to ${origin}; it is only sent to ${apiOrigin}.`,
-    );
-  }
-}
-
 export function createKizenClient(options: KizenClientOptions): KizenSessionClient {
   const fetchImpl = options.fetch ?? fetch;
   const environment = options.bearer ? options.bearer.environment : options.credentials.environment;
   const baseUrl = options.baseUrl ?? BASE_URLS[environment];
-
-  // A Bearer token belongs to one environment, so it never goes to another origin.
-  const apiOrigin = apiOriginFor(environment);
-
-  if (options.bearer && new URL(baseUrl).origin !== apiOrigin) {
-    throw new Error(
-      `createKizenClient: baseUrl ${baseUrl} is not on the ${environment} API origin; a ${environment} token is only sent to ${apiOrigin}.`,
-    );
-  }
 
   const hints: StatusHints = options.bearer
     ? { authFailed: bearerAuthFailedHint(environment), forbidden: BEARER_FORBIDDEN_HINT }
@@ -292,11 +271,6 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
   const request = async (method: string, target: string, body?: unknown): Promise<unknown> => {
     const url = /^https?:\/\//.test(target) ? target : `${baseUrl}${target}`;
     const path = url.startsWith(baseUrl) ? url.slice(baseUrl.length) : url;
-
-    // A fallback for resolveNext: checks the URL actually fetched, before any token is read.
-    if (options.bearer) {
-      assertBearerOrigin(url, environment);
-    }
 
     const send = async (authHeaders: Record<string, string>): Promise<Response> => {
       const headers: Record<string, string> = { ...authHeaders, Accept: 'application/json' };
@@ -354,32 +328,18 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     return json;
   };
 
-  // The returned URL itself is checked: a pathname like `//evil.example/x` must
-  // never be re-resolved against the origin, which would move it to that host.
+  // Only the API origin is followed, on the base scheme and port (a proxy may emit http).
   const resolveNext = (next: string): string => {
     const base = new URL(baseUrl);
     const resolved = new URL(next, base.origin);
 
-    if (resolved.hostname !== base.hostname) {
-      throw new KizenApiError(
-        'api_error',
-        `GET /custom-objects pagination pointed at an unexpected location ${resolved.origin}${resolved.pathname}`,
-      );
-    }
-
-    // Same host: keep Kizen's path and query, on the base scheme and port (a proxy may emit http).
     resolved.protocol = base.protocol;
     resolved.port = base.port;
     resolved.username = '';
     resolved.password = '';
     resolved.hash = '';
 
-    const basePath = base.pathname.replace(/\/+$/, '');
-
-    if (
-      resolved.origin !== base.origin ||
-      (resolved.pathname !== basePath && !resolved.pathname.startsWith(`${basePath}/`))
-    ) {
+    if (resolved.origin !== base.origin) {
       throw new KizenApiError(
         'api_error',
         `GET /custom-objects pagination pointed at an unexpected location ${resolved.origin}${resolved.pathname}`,

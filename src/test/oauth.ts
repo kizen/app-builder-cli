@@ -15,8 +15,14 @@ export const ISSUER = 'https://staging.kizen.com';
 export const TOKEN_ENDPOINT = `${ISSUER}/discovered/token`;
 
 /** Two accounts: different businesses, different users. */
-export const ACCOUNT_A: OAuthAccount = { businessId: 'biz-a', userId: 'user-a' };
-export const ACCOUNT_B: OAuthAccount = { businessId: 'biz-b', userId: 'user-b' };
+export const ACCOUNT_A: OAuthAccount = {
+  businessId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  userId: 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1',
+};
+export const ACCOUNT_B: OAuthAccount = {
+  businessId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  userId: 'b1b1b1b1-b1b1-4b1b-8b1b-b1b1b1b1b1b1',
+};
 
 /** A stored staging session for account A, fresh for an hour at `NOW`; override what a test needs. */
 export const oauthSession = (overrides: Partial<OAuthSession> = {}): OAuthSession => ({
@@ -31,7 +37,6 @@ export const oauthSession = (overrides: Partial<OAuthSession> = {}): OAuthSessio
   accessToken: 'access-0',
   refreshToken: 'refresh-0',
   expiresAt: NOW + 3600 * 1000,
-  scope: 'read write offline_access',
   ...overrides,
 });
 

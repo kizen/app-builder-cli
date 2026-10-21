@@ -8,9 +8,8 @@
  *     <env>.<business>.<user>.json  0600  one saved account's session (tokens and labels)
  *     clients.json                  0600  DCR client_id cache, keyed by issuer
  *
- * `<business>` and `<user>` are the account's ids as lowercase hex, so any id Kizen returns makes
- * a safe file name, and distinct ids stay distinct on a case-insensitive filesystem (macOS's
- * default), where a case-sensitive encoding such as base64url would let two accounts share a file. Each account file is a saved account; the pointer picks the current one.
+ * `<business>` and `<user>` are the account's ids, lowercase UUIDs as Kizen issues them. Each
+ * account file is a saved account; the pointer picks the current one.
  *
  * Nothing is locked: every write is an atomic rename. A refresh only ever writes or deletes its
  * own account's file, and only login, a switch and logout move the pointer, so a refresh racing a
@@ -44,7 +43,6 @@ export interface OAuthSession extends OAuthAccount {
   refreshToken: string;
   /** Epoch milliseconds. */
   expiresAt: number;
-  scope: string | undefined;
 }
 
 /** One `<env>.<business>.<user>.json` file. */
@@ -122,39 +120,12 @@ const CLIENTS_FILE = 'clients.json';
  */
 export const SIGNOUT_MAX_AGE_MS = 10 * 60_000;
 
-/**
- * An account id is used only hex-encoded in a file name. Kizen's id formats aren't pinned down,
- * so any non-empty UTF-8 string without control characters is accepted, up to a length that keeps
- * the longest name within the usual 255-byte limit: `integration.` (12) + 2 * (110 hex + 1 dot)
- * + `json` (4) + writeAtomic's `.<12 hex>.tmp` (17) = 255.
- */
-export const MAX_ID_BYTES = 55;
-const ENCODED_ID = /^(?:[0-9a-f]{2}){1,55}$/;
-const CONTROL = /[\u0000-\u001f\u007f]/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-const validId = (value: unknown): value is string =>
-  typeof value === 'string' &&
-  value !== '' &&
-  !CONTROL.test(value) &&
-  Buffer.byteLength(value, 'utf-8') <= MAX_ID_BYTES &&
-  // Lone surrogates don't survive a UTF-8 round trip, so they'd decode to another id.
-  Buffer.from(value, 'utf-8').toString('utf-8') === value;
-
-const encodeId = (id: string): string => Buffer.from(id, 'utf-8').toString('hex');
-
-/** The id a file name segment encodes; undefined unless it's the canonical encoding of a valid id. */
-const decodeId = (segment: string): string | undefined => {
-  if (!ENCODED_ID.test(segment)) {
-    return undefined;
-  }
-
-  const id = Buffer.from(segment, 'hex').toString('utf-8');
-
-  return validId(id) && encodeId(id) === segment ? id : undefined;
-};
+const validId = (value: unknown): value is string => typeof value === 'string' && UUID.test(value);
 
 /** `{ businessId, userId }` if both are valid ids, else undefined. */
-export const validAccount = (raw: unknown): OAuthAccount | undefined =>
+const validAccount = (raw: unknown): OAuthAccount | undefined =>
   isRecord(raw) && validId(raw.businessId) && validId(raw.userId)
     ? { businessId: raw.businessId, userId: raw.userId }
     : undefined;
@@ -168,10 +139,10 @@ export const accountKey = (account: OAuthAccount): string => {
     throw new Error('Refusing a session file name built from an invalid account id.');
   }
 
-  return `${encodeId(account.businessId)}.${encodeId(account.userId)}`;
+  return `${account.businessId}.${account.userId}`;
 };
 
-/** The pointer's account; undefined unless the file is exactly `{ businessId, userId }`. */
+/** The pointer's account; undefined unless the file holds a valid `{ businessId, userId }`. */
 function parsePointer(text: string): OAuthAccount | undefined {
   let raw: unknown;
 
@@ -181,9 +152,7 @@ function parsePointer(text: string): OAuthAccount | undefined {
     return undefined;
   }
 
-  // Exactly these two keys, so a whole session written to the pointer is unreadable rather than
-  // a pointer to a file that was never written.
-  return isRecord(raw) && Object.keys(raw).length === 2 ? validAccount(raw) : undefined;
+  return validAccount(raw);
 }
 
 const optionalString = (value: unknown): string | undefined =>
@@ -218,7 +187,6 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
     accessToken: raw.accessToken,
     refreshToken: raw.refreshToken,
     expiresAt: raw.expiresAt,
-    scope: optionalString(raw.scope),
   };
 }
 
@@ -244,9 +212,9 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
       return undefined;
     }
 
-    const [businessId, userId] = segments.map(decodeId);
+    const [businessId, userId] = segments;
 
-    return businessId === undefined || userId === undefined ? undefined : { businessId, userId };
+    return validAccount({ businessId, userId });
   };
 
   const listNames = async (): Promise<string[]> => (await ifExists(readdir(dir))) ?? [];
@@ -477,8 +445,6 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     async setCurrent(environment, account) {
       const { businessId, userId } = account;
 
-      // accountKey validates both ids before anything is written.
-      accountKey(account);
       await writeAtomic(sessionPath(environment), { businessId, userId });
       await cleanUp(environment);
     },
@@ -503,9 +469,6 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     },
 
     async removeAccount(environment, account) {
-      // Validates the ids before anything is touched.
-      accountKey(account);
-
       let current = false;
       let pointer: OAuthAccount | undefined;
 
