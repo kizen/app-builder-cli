@@ -293,6 +293,10 @@ export const VALID_ICONS = new Set([
   'chevron-up',
   'window-restore',
   'forward',
+  'circle-check',
+  'arrow-progress',
+  'puzzle-piece',
+  'code',
 ]);
 
 export const VALID_ICONS_LIST = [...VALID_ICONS].sort();
