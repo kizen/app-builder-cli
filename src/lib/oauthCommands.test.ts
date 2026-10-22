@@ -1656,4 +1656,124 @@ describe('auth-header', () => {
       expectHeaderFailure(h);
     }
   });
+
+  describe('bound to an account (--business and --user, as kizen runs it)', () => {
+    const bound = { env: 'staging', business: BIZ_A, user: USER_A };
+    const B_ACCESS = 'secret-b-access';
+
+    it("serves that account's token while it is the current one", async () => {
+      await signIn(store, session('staging'));
+
+      const h = harness(noKizen);
+
+      await runAuthHeader(bound, h.deps);
+
+      expect(h.stdout).toStrictEqual([header(ACCESS)]);
+      expect(h.stderr).toStrictEqual([]);
+      expect(h.exitCodes).toStrictEqual([]);
+      // The token comes from that account's own file.
+      expect(h.providerOptions).toStrictEqual([
+        { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS, account: ACCOUNT_A },
+      ]);
+    });
+
+    it('fails closed, naming the mismatch, after a switch to another account', async () => {
+      await signIn(store, session('staging'));
+      // Another terminal switches staging to account B while kizen still holds A's ids.
+      await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
+
+      const h = harness(noKizen);
+
+      await runAuthHeader(bound, h.deps);
+
+      expectHeaderFailure(h);
+      expect(h.stderr).toStrictEqual([
+        `appbuilder auth-header: --business ${BIZ_A} --user ${USER_A} isn't the current staging account (the current account is business ${BIZ_B}, user ${USER_B}), so auth-header won't send its token. Run the command again.\n`,
+      ]);
+      expect(h.all()).not.toContain(B_ACCESS);
+      // It fails before reading (or refreshing) any token.
+      expect(h.providerOptions).toStrictEqual([]);
+      expect(h.fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('fails closed after a switch that lands while the token is being read', async () => {
+      await signIn(store, session('staging'));
+
+      const h = harness(noKizen);
+      const provider = h.deps.tokenProvider;
+
+      h.deps.tokenProvider = (environment, providerOpts) => {
+        const inner = provider(environment, providerOpts);
+
+        return {
+          ...inner,
+          getAccessToken: async () => {
+            const token = await inner.getAccessToken();
+
+            await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
+
+            return token;
+          },
+        };
+      };
+
+      await runAuthHeader(bound, h.deps);
+
+      expectHeaderFailure(h, "isn't the current staging account (the current account is business");
+      expect(h.providerOptions).toHaveLength(1);
+    });
+
+    it('fails closed when nobody is signed in to the environment any more', async () => {
+      await signIn(store, session('staging'));
+      await store.signOut('staging');
+
+      const h = harness(noKizen);
+
+      await runAuthHeader(bound, h.deps);
+
+      expectHeaderFailure(h, 'appbuilder auth-header: ');
+    });
+
+    it('fails closed when the account is saved but not current', async () => {
+      await signIn(store, session('staging'));
+      await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
+
+      // A's file is still saved, so its token could be read: the pointer check is what refuses.
+      expect(await store.readAccount('staging', ACCOUNT_A)).not.toBeNull();
+
+      const h = harness(noKizen);
+
+      await runAuthHeader(bound, h.deps);
+
+      expectHeaderFailure(h, "isn't the current staging account");
+    });
+
+    it.each([[{ business: BIZ_A }], [{ user: USER_A }]])('refuses %j alone', async (partial) => {
+      await signIn(store, session('staging'));
+
+      const h = harness(noKizen);
+
+      await runAuthHeader({ env: 'staging', ...partial }, h.deps);
+
+      expect(h.stderr).toStrictEqual([
+        'appbuilder auth-header: auth-header takes --business and --user together.\n',
+      ]);
+      expectHeaderFailure(h);
+      expect(h.providerOptions).toStrictEqual([]);
+    });
+
+    it('without the flags, serves the current account as before, after a switch too', async () => {
+      await signIn(store, session('staging'));
+      await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
+
+      const h = harness(noKizen);
+
+      await runAuthHeader({ env: 'staging' }, h.deps);
+
+      expect(h.stdout).toStrictEqual([header(B_ACCESS)]);
+      expect(h.providerOptions).toStrictEqual([
+        { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
+      ]);
+    });
+  });
 });

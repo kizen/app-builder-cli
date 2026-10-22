@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
+import { adminCommand } from './commands/admin.js';
 import { authCommands } from './commands/auth.js';
 import { blockCommand } from './commands/block.js';
 import { buildCommand } from './commands/build.js';
@@ -45,6 +46,8 @@ export function createProgram(): Command {
   blockCommand(program);
 
   authCommands(program);
+
+  adminCommand(program);
 
   return program;
 }

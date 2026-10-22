@@ -8,7 +8,13 @@ import {
   isSupportedScriptRuntime,
   scriptRuntimeToApiName,
 } from '@kizenapps/packager';
-import { parseRequirementsFile, resolvePythonBinary } from '../lib/pythonRuntime.js';
+import { parseRequirementsFile } from '../lib/pythonRuntime.js';
+import {
+  CODE_STEP_MIN_PYTHON,
+  findCodeStepPython,
+  meetsMinimum,
+  probePython,
+} from '../lib/pythonProbe.js';
 import {
   type ExecutionResult,
   type HttpRequests,
@@ -216,82 +222,6 @@ if (VENV_PACKAGES.length === 0) {
 
 let venvReady: Promise<string> | null = null;
 
-// The bundled requirements (psycopg 3.3 in particular) require Python >= 3.10,
-// matching the remote code-runner which only ships 3.12 / 3.13 images. A venv
-// built on an older interpreter fails `pip install` with a cryptic
-// "No matching distribution found for psycopg[binary]<4.0,>=3.3".
-const MIN_PYTHON: readonly [number, number] = [3, 10];
-
-function meetsMinimum([major, minor]: [number, number]): boolean {
-  return major > MIN_PYTHON[0] || (major === MIN_PYTHON[0] && minor >= MIN_PYTHON[1]);
-}
-
-function formatVersion(version: readonly [number, number]): string {
-  return `${String(version[0])}.${String(version[1])}`;
-}
-
-// Probe an interpreter for its (major, minor) version. Resolves null if the
-// binary is missing or can't run, so callers can try the next candidate.
-function probePython(bin: string): Promise<[number, number] | null> {
-  return new Promise((resolve) => {
-    const proc = spawn(bin, ['-c', "import sys; print('%d.%d' % sys.version_info[:2])"], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-
-    let out = '';
-
-    proc.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString('utf-8');
-    });
-    proc.on('error', () => {
-      resolve(null);
-    });
-    proc.on('close', (code) => {
-      const match = /(\d+)\.(\d+)/.exec(out);
-
-      if (code !== 0 || !match) {
-        resolve(null);
-
-        return;
-      }
-
-      resolve([Number(match[1]), Number(match[2])]);
-    });
-  });
-}
-
-// Pick a system interpreter new enough to install the bundled requirements.
-// Prefer the exact version the runtime asked for, then fall back to python3.
-// Throws a clear, actionable error when nothing usable is found.
-async function findSystemPython(runtime: string): Promise<string> {
-  const preferred = resolvePythonBinary(runtime);
-  const candidates = preferred === 'python3' ? ['python3'] : [preferred, 'python3'];
-  const tried: string[] = [];
-
-  for (const bin of candidates) {
-    const version = await probePython(bin);
-
-    if (!version) {
-      tried.push(`${bin}: not found`);
-
-      continue;
-    }
-
-    if (meetsMinimum(version)) {
-      return bin;
-    }
-
-    tried.push(`${bin}: ${formatVersion(version)} (too old)`);
-  }
-
-  throw new Error(
-    `No Python >= ${formatVersion(MIN_PYTHON)} found for runtime "${runtime}". ` +
-      `The local runner needs Python ${formatVersion(MIN_PYTHON)}+ to install the bundled ` +
-      `packages (e.g. psycopg 3.3), matching the remote code-runner (3.12 / 3.13). ` +
-      `Tried ${tried.join(', ')}. Install Python 3.12 or 3.13 and retry.`,
-  );
-}
-
 function runCommand(
   bin: string,
   args: string[],
@@ -394,7 +324,7 @@ function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<st
 
         const existing = await probePython(venvPython);
 
-        reusable = existing !== null && meetsMinimum(existing);
+        reusable = existing !== null && meetsMinimum(existing, CODE_STEP_MIN_PYTHON);
       } catch {
         reusable = false;
       }
@@ -406,7 +336,7 @@ function ensureVenv(runtime: string, listener?: VenvInstallListener): Promise<st
           /* ignore */
         });
 
-        const systemPython = await findSystemPython(runtime);
+        const systemPython = await findCodeStepPython(runtime);
 
         await runCommand(systemPython, ['-m', 'venv', VENV_DIR]);
       }

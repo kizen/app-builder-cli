@@ -62,6 +62,13 @@ const AUTH_COMMANDS: AuthCommandSpec[] = [
     description:
       'Print an Authorization header for the stored session as JSON (for a Claude Code MCP headersHelper)',
     env: 'environment to use; must match CLAUDE_CODE_MCP_SERVER_URL when that is set (default: the environment matching it, else the only signed-in one)',
+    options: [
+      [
+        '--business <id>',
+        "with --user, use only this saved account, and fail if it isn't the environment's current one",
+      ],
+      ['--user <userId>', 'with --business, the user id of that account'],
+    ],
     run: runAuthHeader,
   },
 ];

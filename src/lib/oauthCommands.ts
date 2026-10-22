@@ -26,6 +26,7 @@ import {
   accountKey,
   createOAuthStore,
   sameAccount,
+  type OAuthAccount,
   type OAuthSession,
   type OAuthStore,
   type SavedAccount,
@@ -726,14 +727,81 @@ async function headerEnvironment(
   return explicit ?? sessionEnvironment(undefined, deps.store);
 }
 
-/** Claude Code `headersHelper`. Failures print one stderr line and nothing to stdout. */
-export const runAuthHeader: AuthCommand = async (options, deps) => {
+export interface AuthHeaderCommandOptions extends AuthCommandOptions {
+  business?: string;
+  user?: string;
+}
+
+/** The account `--business` and `--user` bind `auth-header` to, if given (both or neither). */
+function boundAccount(options: AuthHeaderCommandOptions): OAuthAccount | undefined {
+  const { business, user } = options;
+
+  if (business === undefined && user === undefined) {
+    return undefined;
+  }
+
+  if (business === undefined || user === undefined) {
+    throw new Error('auth-header takes --business and --user together.');
+  }
+
+  return { businessId: business, userId: user };
+}
+
+/**
+ * The bound account's token. It comes from that account's own file, so it's never another
+ * account's; and the environment's current account must still be that one, so a switch to another
+ * account fails the helper (as it aborts any running command) instead of serving on.
+ */
+async function boundAccountToken(
+  environment: Environment,
+  account: OAuthAccount,
+  deps: AuthCommandDeps,
+): Promise<string> {
+  /** Throws unless `account` is the environment's current account. */
+  const requireCurrent = async (): Promise<void> => {
+    const current = await deps.store.readSession(environment);
+
+    if (current === null || !sameAccount(current, account)) {
+      const now =
+        current === null
+          ? 'nobody is signed in'
+          : `the current account is business ${current.businessId}, user ${current.userId}`;
+
+      throw new Error(
+        `--business ${account.businessId} --user ${account.userId} isn't the current ${environment} account (${now}), so auth-header won't send its token. Run the command again.`,
+      );
+    }
+  };
+
+  // Before the token read, so an account that's no longer current fails without a refresh; and
+  // after it, so a switch during that read fails too.
+  await requireCurrent();
+
+  const { requestTimeoutMs } = deps.authHeaderTimeouts;
+  const token = await deps
+    .tokenProvider(environment, { requestTimeoutMs, account })
+    .getAccessToken();
+
+  await requireCurrent();
+
+  return token;
+}
+
+/**
+ * Claude Code `headersHelper`, and kizen's `KIZEN_AUTH_HELPER` (bound with `--business` and
+ * `--user`). Failures print one stderr line and nothing to stdout.
+ */
+export const runAuthHeader: AuthCommand<AuthHeaderCommandOptions> = async (options, deps) => {
   let line: string;
 
   try {
+    const account = boundAccount(options);
     const environment = await headerEnvironment(options.env, deps);
     const { requestTimeoutMs } = deps.authHeaderTimeouts;
-    const token = await deps.tokenProvider(environment, { requestTimeoutMs }).getAccessToken();
+    const token =
+      account === undefined
+        ? await deps.tokenProvider(environment, { requestTimeoutMs }).getAccessToken()
+        : await boundAccountToken(environment, account, deps);
 
     line = `${JSON.stringify({ Authorization: `Bearer ${token}` })}\n`;
   } catch (error) {

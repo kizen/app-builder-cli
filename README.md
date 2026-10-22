@@ -6,15 +6,15 @@ A local development environment for [Kizen](https://www.kizen.com) plugin apps.
 
 ## Requirements
 
-| Requirement               | Version            | Why                                                                                                                                                                                                                             |
-| ------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Node.js                   | `>=20`             | Enforced by `engines` in `package.json`.                                                                                                                                                                                        |
-| Google Chrome or Chromium | any recent release | The viewer is launched via [`chrome-launcher`](https://github.com/GoogleChrome/chrome-launcher) against a locally installed browser. No browser is bundled.                                                                     |
-| Python                    | 3.12 or 3.13       | Only needed to execute code steps locally. The dev server builds a virtualenv with the interpreter the step's runtime asks for (`python-3-12` / `python-3-13`), matching the runtime images the hosted Kizen code-runner ships. |
+| Requirement               | Version            | Why                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Node.js                   | `>=20`             | Enforced by `engines` in `package.json`.                                                                                                                                                                                                                                                                                                 |
+| Google Chrome or Chromium | any recent release | The viewer is launched via [`chrome-launcher`](https://github.com/GoogleChrome/chrome-launcher) against a locally installed browser. No browser is bundled.                                                                                                                                                                              |
+| Python                    | 3.12 or newer      | Only needed to run code steps locally and for `appbuilder admin`. For code steps, the dev server builds a virtualenv with the interpreter the step's runtime asks for (`python-3-12` / `python-3-13`), matching the runtime images the hosted Kizen code-runner ships. `appbuilder admin` uses the newest Python 3.12 or newer it finds. |
 
 `chrome-launcher` auto-discovers an installed Chrome/Chromium; if yours lives somewhere unusual, set `CHROME_PATH` to the executable and it will be preferred.
 
-Python is resolved lazily — the CLI only looks for an interpreter the first time a plugin actually runs a code step, so you can build UI-only plugins without it.
+Python is resolved lazily — the CLI only looks for an interpreter the first time a plugin actually runs a code step, or the first time you run `appbuilder admin`, so you can build UI-only plugins without it.
 
 ## Installation
 
@@ -384,7 +384,7 @@ Lists where a block can be pushed: the business's dashboards and homepages plus 
 
 The CLI honors `HTTP_PROXY`/`HTTPS_PROXY` and `NO_PROXY` on Node versions that support it (24.14+, or with `NODE_USE_ENV_PROXY=1` set).
 
-`customObjects` is sorted by name and ends with Contacts (`"fetchUrl": "client"`) when the CLI can look up the business's contacts object; Kizen doesn't list Contacts with the other custom objects, so if that lookup fails the row is silently left out. `--object <contacts id>` lists Contacts' chart groups like any other object's.
+`customObjects` is sorted by name and ends with Contacts (`"fetchUrl": "client"`) when the CLI can look up the business's contacts object; Kizen doesn't list Contacts with the other custom objects, so if that lookup fails, Contacts isn't included. `--object <contacts id>` lists Contacts' chart groups like any other object's.
 
 | Flag                       | Default             | Purpose                                                       |
 | -------------------------- | ------------------- | ------------------------------------------------------------- |
@@ -457,7 +457,7 @@ appbuilder login [--env <env>] [--business <id or name> [--user <user id>]]
 appbuilder login [--env <env>] --list [--json]
 appbuilder whoami [--env <env>]
 appbuilder logout [--env <env>] [--all | --business <id or name> [--user <user id>]]
-appbuilder auth-header [--env <env>]
+appbuilder auth-header [--env <env>] [--business <business id> --user <user id>]
 appbuilder block push [api_name] [--env <env>] [flags]
 appbuilder block targets [--env <env>] [flags]
 ```
@@ -483,16 +483,16 @@ When both stdin and stdout are terminals and you pass neither `--business` nor `
 
 `logout` removes the current account's session and leaves the other saved accounts. `logout --business <id or name>` removes one saved account, matched the same way as for `login`; if it's the current account, you're signed out too. `logout --all` removes every saved account for the environment. When no environment has a current account, both `--business` and `--all` need `--env`.
 
-| Command       | `--env` default                                                                | What it does                                                                                                                                           |
-| ------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `login`       | `go`                                                                           | Signs in with the browser, or switches to a saved account, and stores the session                                                                      |
-| `whoami`      | the only environment you're signed in to                                       | Calls `/auth/bootstrap` with the session and prints the user and business. Tokens are never printed.                                                   |
-| `logout`      | the only environment you're signed in to                                       | Deletes the current account's session, one saved account (`--business`), or all of them (`--all`). Local only: the refresh tokens stay valid on Kizen. |
-| `auth-header` | from the MCP server URL ([see below](#using-the-session-from-claude-code-mcp)) | Prints `{"Authorization":"Bearer <access token>"}` for a Claude Code MCP `headersHelper`                                                               |
+| Command       | `--env` default                                                                | What it does                                                                                                                                                                                                                                                                  |
+| ------------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `login`       | `go`                                                                           | Signs in with the browser, or switches to a saved account, and stores the session                                                                                                                                                                                             |
+| `whoami`      | the only environment you're signed in to                                       | Calls `/auth/bootstrap` with the session and prints the user and business. Tokens are never printed.                                                                                                                                                                          |
+| `logout`      | the only environment you're signed in to                                       | Deletes the current account's session, one saved account (`--business`), or all of them (`--all`). Local only: the refresh tokens stay valid on Kizen.                                                                                                                        |
+| `auth-header` | from the MCP server URL ([see below](#using-the-session-from-claude-code-mcp)) | Prints `{"Authorization":"Bearer <access token>"}` for a Claude Code MCP `headersHelper`. With `--business` and `--user` (used together), it serves only that saved account, and fails while another account is current; [`appbuilder admin`](#appbuilder-admin) passes them. |
 
 The production write gate (`--allow-production`) and every other flag of `block push` and `block targets` work the same with a session as with an API key.
 
-Sessions are stored in `~/.kizenappbuilder/oauth/` (directory `0700`, files `0600`), separate from API-key profiles. Each saved account has its own file, `<env>.<business id>.<user id>.json`, and `<env>.json` names the current account. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Each process makes one refresh at a time, and every file is written atomically. Concurrent `appbuilder` processes may each refresh, which is safe because Kizen returns the same token pair when a refresh token is reused within 5 minutes. Before saving, a refresh re-reads the session: it keeps the newer tokens if another process already refreshed or you signed in again to the same account, and it fails with a sign-in error if you signed out or switched to another account meanwhile. If the refresh token is rejected, the CLI keeps the tokens another process already refreshed to; otherwise it deletes that account's file, and the command asks you to run `appbuilder login` again (with `--env <env>` for an environment other than `go`). A refresh only ever writes or deletes its own account's file, and only `login` and `logout` change which account is current, so a refresh that finishes late can't undo a logout or a switch. One that finishes just after you sign out can leave that account saved, though not current; `logout --all` removes it.
+Sessions are stored in `~/.kizenappbuilder/oauth/` (directory `0700`, files `0600`), separate from API-key profiles. Each saved account has its own file, `<env>.<business id>.<user id>.json`, and `<env>.json` names the current account. Access tokens last an hour and refresh automatically: when less than a minute is left, or once after a `401`. Refresh tokens rotate on each use. Each process makes one refresh at a time, and every file is written atomically. Concurrent `appbuilder` processes may each refresh, which is safe because Kizen returns the same token pair when a refresh token is reused within 5 minutes. Before saving, a refresh re-reads the session: it keeps the newer tokens if another process already refreshed or you signed in again to the same account, and it fails with a sign-in error if you signed out or switched to another account meanwhile. If the refresh token is rejected, the CLI keeps the tokens another process already refreshed to; otherwise it deletes that account's file, and the command asks you to run `appbuilder login` again (with `--env <env>` for an environment other than `go`). A refresh only ever writes or deletes its own account's file, and only `login` and `logout` change which account is current, so a refresh that finishes late can't undo a logout or a switch.
 
 A session file that is corrupt or can't be read isn't treated as "not signed in". Commands that use it report the file's path and ask you to run `appbuilder login` (with `--env <env>` for an environment other than `go`). `appbuilder logout --env <env>` signs you out either way. If the session file is the problem, logout removes it. If `<env>.json` is the problem, logout removes that and leaves the saved accounts, and `logout --all` removes those too. `login --list` still lists a saved account whose file can't be read, by its ids.
 
@@ -529,7 +529,24 @@ Claude Code gives the helper 10 seconds, so `auth-header` uses shorter timeouts 
 
 `auth-header` prints a live access token by design: treat its output like a password. The token acts as you, in the one business you chose when signing in, until it expires (up to an hour).
 
-Known limitation: the CLI only refreshes a token when less than a minute is left, so if Kizen revokes a token with more time left, `auth-header` keeps returning it until it expires or you run `appbuilder login` again.
+### `appbuilder admin`
+
+Runs Kizen's admin CLI, `kizen`, signed in with your `appbuilder login` session. You don't install `kizen` yourself: you only need Python 3.12 or newer on `PATH`.
+
+```sh
+appbuilder admin [--env <env>] [--] <kizen args...>
+appbuilder admin init [--force]
+```
+
+`--env` picks the session, and defaults to the only environment you're signed in to. The wrapper's own options (`--env`, `-h`/`--help`) come first and end at the first other argument or at `--`. Everything after that goes to `kizen` verbatim, so `appbuilder admin status --help` shows `kizen`'s help, and `appbuilder admin --help` shows this wrapper's. `init` is the wrapper's own subcommand only as the first argument; `appbuilder admin -- init` passes `init` to `kizen`.
+
+On first use, `appbuilder admin` installs `kizen` into a private virtual environment under `~/.kizenappbuilder/kizen/<version>-<sha>/` and reuses it afterwards without touching the network. `appbuilder admin init` does that ahead of time, and needs no session. It uses the newest of `python3.14`, `python3.13`, `python3.12` and `python3` that is 3.12 or newer, downloads the `kizen` release this CLI version pins (currently 0.3.0) from its GitHub release, checks its sha256, and installs it and its dependencies from PyPI with `pip`. Progress goes to stderr; stdout is `kizen`'s. Each time it makes a new install, it removes installs for other `kizen` versions that have gone unused for 30 days.
+
+If the install is damaged (for example, the Python it was built with was removed), the command says so and changes nothing. `appbuilder admin init --force` deletes the install and installs it again. Don't run it while `appbuilder admin` is running, since a running `kizen` uses that install.
+
+Under app-builder, `kizen` gets your session through `KIZEN_AUTH_HELPER`: it names `appbuilder auth-header --env <env> --business <business id> --user <user id>`, which `kizen` runs when it needs a token, and `KIZEN_BASE_URL`, `KIZEN_BUSINESS_ID` and `KIZEN_USER_ID` identify the session. With `--business` and `--user`, `auth-header` serves only that account, and only while it's the environment's current one. `kizen` keeps the token for the life of its process and runs the helper again only after a `401`. So if you switch accounts with `appbuilder login` while `kizen` runs, its next token fetch (at startup, or after a `401`) fails, and you run the command again. A token it already holds is still its own account's, and stays in use until it expires. The token never appears in `kizen`'s environment or arguments. `KIZEN_PROFILE` and `CLAUDE_CODE_MCP_SERVER_URL` are removed from its environment. Under app-builder, `kizen` refuses `init`, `envs list` and `upgrade` (`upgrade --check` reports that app-builder manages the install). The command exits with `kizen`'s exit code.
+
+To try a local `kizen` build, set `APPBUILDER_KIZEN_WHEEL` to the path of a `kizen_builder-<version>-….whl`. It's installed instead of the pinned release, with no download or hash check.
 
 ## Reference
 
@@ -545,6 +562,8 @@ Four environment variables point the CLI at a different Plugin Wizard (encryptio
 Prod follows the same order minus step 3: `PLUGIN_WIZARD_URL`, then **`PLUGIN_WIZARD_URL_PROD`**, then the default `https://plugin-wizard.kizen.com`. An empty-string value is treated as unset at every level.
 
 **`CLAUDE_CODE_MCP_SERVER_URL`** is set by Claude Code when it runs `appbuilder auth-header`, which uses it to pick the environment (see [Using the session from Claude Code](#using-the-session-from-claude-code-mcp)).
+
+**`APPBUILDER_KIZEN_WHEEL`** is the path of a local `kizen_builder-<version>-….whl` for `appbuilder admin` to install instead of the `kizen` release this CLI version pins, with no download or hash check (see [`appbuilder admin`](#appbuilder-admin)).
 
 ### The `.kizenapp/` directory
 
@@ -577,11 +596,11 @@ How the two navigation targets behave:
 - **`_blank`** (new-tab, relative, same origin) — the engine stores the context, opens the tab, then immediately deletes its own copy, relying on a real browser having already copied `sessionStorage` into the new tab.
 - **External / cross-origin** URLs — context is never attached and is dropped by design; these appear in the log as `ignored (external)`.
 
-**Fidelity limit:** a real `_blank` open gives the new tab its own `sessionStorage` copy. The sandbox has no real second tab, so the "opener" and the simulated destination share one `sessionStorage`; to keep the engine's reader helpers working, the harness snapshots the payload and re-inserts it under the same key immediately after the engine deletes it. Behavior matches a real browser for reading/consuming, but the two "tabs" are not truly isolated.
+**`sessionStorage` in the sandbox:** the "opener" and the simulated destination share one `sessionStorage`. To keep the engine's reader helpers working, the harness snapshots the payload and re-inserts it under the same key immediately after the engine deletes it. Reading and consuming the payload behave as they do in a browser.
 
-**Scope boundary:** navigating to a path that matches one of your plugin's own routable pages activates that page's tab without carrying the URL through, so the page cannot observe its own `session_data_key` via the simulated location. Use the simulated destination page (any non-routable in-app path) to inspect what a destination receives.
+**Your plugin's own pages:** navigating to a path that matches one of your plugin's routable pages activates that page's tab without carrying the URL through, so the page doesn't receive its `session_data_key`. To inspect what a destination receives, use the simulated destination page (any non-routable in-app path).
 
-**Error surfacing:** if `sessionStorage` writes fail (e.g. quota exceeded, storage disabled), the engine navigates without context and reports a message through the same `onError` path every script artifact already uses — it shows in that artifact's result UI and the DevTools console, not as a separate log entry, because on failure the URL carries no key for the harness to detect. Note also that context is serialized with `JSON.stringify` inside the worker script: circular references and `BigInt` values throw there before any navigation happens, while functions, `undefined` values, and symbols are silently dropped.
+**Error surfacing:** if `sessionStorage` writes fail (e.g. quota exceeded, storage disabled), the engine navigates without context and reports a message through the same `onError` path every script artifact already uses — it shows in that artifact's result UI and the DevTools console, not as a separate log entry, because on failure the URL carries no key for the harness to detect. Context is serialized with `JSON.stringify` inside the worker script: circular references and `BigInt` values throw there before any navigation happens, while functions, `undefined` values, and symbols are omitted.
 
 ## Contributing
 
