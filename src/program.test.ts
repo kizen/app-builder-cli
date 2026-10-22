@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Command, Option } from 'commander';
 import { ALL_VALID_ICONS_LIST, CUSTOM_ICON_NAMES } from '../shared/lib/validIcons.js';
+import type * as KizenAdminModule from './lib/kizenAdmin.js';
 import type * as SetupClaudeModule from './lib/setupClaude.js';
 import { mcpServerPlan, runSetupClaude } from './lib/setupClaude.js';
 import { createProgram } from './program.js';
@@ -14,9 +15,66 @@ vi.mock('./lib/setupClaude.js', async (importOriginal) => ({
   runSetupClaude: vi.fn(() => Promise.resolve()),
 }));
 
+/**
+ * `admin` runs the real `runAdmin` (so the wrapper's own parsing is covered), with a fake session,
+ * provisioner and spawn in place of the boundaries.
+ */
+const admin = vi.hoisted(() => ({
+  spawned: [] as string[][],
+  provisioned: 0,
+  helpShown: 0,
+}));
+
+vi.mock('./lib/kizenAdmin.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof KizenAdminModule>();
+  const { EventEmitter } = await import('node:events');
+
+  return {
+    ...actual,
+    runAdmin: vi.fn((args: readonly string[], deps: KizenAdminModule.AdminDeps) =>
+      actual.runAdmin(args, {
+        ...deps,
+        store: {
+          listSessions: () => Promise.resolve(['staging']),
+          readSession: () =>
+            Promise.resolve({
+              businessId: '11111111-1111-4111-8111-111111111111',
+              userId: '22222222-2222-4222-8222-222222222222',
+            } as never),
+        },
+        ensureKizen: () => {
+          admin.provisioned += 1;
+
+          return Promise.resolve({
+            version: '1.2.3',
+            dir: '/venv',
+            python: '/venv/bin/python',
+            kizen: '/venv/bin/kizen',
+            built: false,
+          });
+        },
+        spawn: (command, spawnArgs) => {
+          admin.spawned.push([command, ...spawnArgs]);
+
+          const child = Object.assign(new EventEmitter(), { kill: () => true });
+
+          setImmediate(() => child.emit('close', 0, null));
+
+          return child as never;
+        },
+        outputHelp: () => {
+          admin.helpShown += 1;
+        },
+        writeStderr: () => undefined,
+        setExitCode: () => undefined,
+      }),
+    ),
+  };
+});
+
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The thirteen commands, in the order `createProgram` registers them. */
+/** The fourteen commands, in the order `createProgram` registers them. */
 const COMMAND_NAMES = [
   'create',
   'setup-claude',
@@ -31,6 +89,7 @@ const COMMAND_NAMES = [
   'logout',
   'whoami',
   'auth-header',
+  'admin',
 ];
 
 /** Every command's `--help` blurb, verbatim. */
@@ -50,6 +109,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   whoami: 'Show the user and business of the stored session',
   'auth-header':
     'Print an Authorization header for the stored session as JSON (for a Claude Code MCP headersHelper)',
+  admin: "Run Kizen's admin CLI (kizen) with the signed-in session",
 };
 
 /** The flag strings each command declares, in declaration order. */
@@ -89,7 +149,8 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
   login: ['--env <env>', '--business <id-or-name>', '--user <userId>', '--list', '--json'],
   logout: ['--env <env>', '--all', '--business <id-or-name>', '--user <userId>'],
   whoami: ['--env <env>'],
-  'auth-header': ['--env <env>'],
+  'auth-header': ['--env <env>', '--business <id>', '--user <userId>'],
+  admin: ['--env <env>'],
 };
 
 const BLOCK_PUSH_FLAGS = [
@@ -176,7 +237,7 @@ describe('createProgram', () => {
 });
 
 describe('command wiring', () => {
-  it('registers exactly the thirteen documented commands, in order', () => {
+  it('registers exactly the fourteen documented commands, in order', () => {
     expect(createProgram().commands.map((command) => command.name())).toStrictEqual(COMMAND_NAMES);
   });
 
@@ -433,4 +494,137 @@ describe('setup-claude --mcp helper', () => {
 
     expect(config.headersHelper).toBe(`npx -y ${pkg.name}@${pkg.version} auth-header`);
   });
+});
+
+describe('admin command', () => {
+  afterEach(() => {
+    admin.spawned = [];
+    admin.provisioned = 0;
+    admin.helpShown = 0;
+  });
+
+  const kizenArgs = async (args: string[]): Promise<string[] | undefined> => {
+    await createProgram().parseAsync(['admin', ...args], { from: 'user' });
+
+    const [spawned] = admin.spawned;
+
+    expect(spawned?.slice(0, 2)).toStrictEqual(['/venv/bin/python', '/venv/bin/kizen']);
+
+    return spawned?.slice(2);
+  };
+
+  it.each([
+    [
+      ['status', '--help'],
+      ['status', '--help'],
+    ],
+    [['--version'], ['--version']],
+    [['-V'], ['-V']],
+    [
+      ['--dry-run', 'apply', '-h'],
+      ['--dry-run', 'apply', '-h'],
+    ],
+    [
+      ['--env', 'staging', 'status', '--env', 'go'],
+      ['status', '--env', 'go'],
+    ],
+    [
+      ['--env=staging', 'x', '--', 'y'],
+      ['x', '--', 'y'],
+    ],
+    [['--', '--help'], ['--help']],
+    [['--', '--version'], ['--version']],
+    [
+      ['--', '--', 'a'],
+      ['--', 'a'],
+    ],
+    // (o) kizen's own init, which it refuses under this mode.
+    [['--', 'init'], ['init']],
+  ])('(h) passes %j to kizen as %j', async (args, expected) => {
+    expect(await kizenArgs(args)).toStrictEqual(expected);
+  });
+
+  it('shows the wrapper help for --help before any kizen argument', async () => {
+    await createProgram().parseAsync(['admin', '--help'], { from: 'user' });
+    await createProgram().parseAsync(['admin', '--env', 'staging', '-h'], { from: 'user' });
+
+    expect(admin.helpShown).toBe(2);
+    expect(admin.spawned).toStrictEqual([]);
+    expect(admin.provisioned).toBe(0);
+  });
+
+  it('`help admin` prints the admin help and neither provisions nor runs kizen', () => {
+    const program = createProgram();
+    const command = subcommand(program, 'admin');
+    let out = '';
+
+    command
+      .exitOverride()
+      .configureHelp({ helpWidth: 100 })
+      .configureOutput({
+        writeOut: (text) => {
+          out += text;
+        },
+      });
+
+    expect(() => program.parse(['help', 'admin'], { from: 'user' })).toThrow(
+      expect.objectContaining({ code: 'commander.help' }),
+    );
+    expect(out).toContain('Usage: appbuilder admin [--env <env>] [--] <kizen args...>');
+    expect(out).toContain('--env <env>');
+    expect(admin.provisioned).toBe(0);
+    expect(admin.spawned).toStrictEqual([]);
+  });
+
+  it('runs admin init through the shared provisioner without spawning kizen', async () => {
+    await createProgram().parseAsync(['admin', 'init'], { from: 'user' });
+
+    expect(admin.provisioned).toBe(1);
+    expect(admin.spawned).toStrictEqual([]);
+  });
+
+  it('documents its usage in its help', () => {
+    const command = subcommand(createProgram(), 'admin');
+
+    command.configureHelp({ helpWidth: 100 });
+
+    expect(command.helpInformation()).toContain(
+      'Usage: appbuilder admin [--env <env>] [--] <kizen args...>\n       appbuilder admin init',
+    );
+  });
+});
+
+describe('(r) option parsing of other commands is unchanged', () => {
+  function capture(args: string[]): { out: string; code: string | undefined } {
+    const program = createProgram();
+    let out = '';
+
+    program.exitOverride().configureOutput({
+      writeOut: (text) => {
+        out += text;
+      },
+      writeErr: (text) => {
+        out += text;
+      },
+    });
+
+    try {
+      program.parse(args, { from: 'user' });
+    } catch (error) {
+      return { out, code: (error as { code?: string }).code };
+    }
+
+    return { out, code: undefined };
+  }
+
+  it.each([[['dev', '-V']], [['block', 'push', '--version']], [['-V', 'admin']]])(
+    '%j still prints the version',
+    (args) => {
+      const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')) as {
+        version: string;
+      };
+
+      expect(capture(args)).toStrictEqual({ out: `${pkg.version}\n`, code: 'commander.version' });
+    },
+  );
 });

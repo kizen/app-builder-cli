@@ -37,7 +37,7 @@ Adding a dependency has a licensing consequence worth knowing about before you r
 
 ## Releases
 
-Publishing is automated. Every push to `main` publishes a prerelease to the `next` dist-tag, stamped as `<version>-<short-sha>`; pushing a `v*` tag verifies that `package.json` matches the tag and publishes to `latest`. Don't bump versions by hand in a pull request.
+Publishing is automated. Every push to `main` publishes a prerelease to the `next` dist-tag, stamped as `<version>-<short-sha>`; pushing a `v*` tag verifies that `package.json` matches the tag and publishes to `latest`. A pull request bumps `version` in `package.json` itself, following semver: patch for fixes, minor for new commands or options, major for breaking changes.
 
 ## License
 
