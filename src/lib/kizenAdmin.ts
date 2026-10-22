@@ -163,11 +163,16 @@ export const FORWARDED_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGHUP'
 
 /**
  * Runs `<venv>/bin/python <venv>/bin/kizen <args…>` with inherited stdio, forwarding SIGTERM and
- * SIGHUP to it. SIGINT is swallowed, not forwarded: a terminal's Ctrl-C already reaches kizen
- * through the foreground process group, and a second one would interrupt Python's
- * KeyboardInterrupt cleanup. Swallowing it keeps this process alive to wait for kizen's exit.
- * Resolves with its exit code, or 128 + the signal number when a signal ended it; rejects when it
- * can't start.
+ * SIGHUP to it. SIGINT depends on `interactive` (stdin is a TTY), decided once at start:
+ * - interactive: swallowed, not forwarded. A terminal's Ctrl-C already reaches kizen through the
+ *   foreground process group, and a second one would interrupt Python's KeyboardInterrupt
+ *   cleanup. The listener keeps this process alive to wait for kizen's exit.
+ * - non-interactive: forwarded like SIGTERM, since a caller's `kill -INT` or
+ *   `child.kill('SIGINT')` reaches only this process. The accepted tradeoff: with stdin
+ *   redirected in a foreground terminal, a Ctrl-C reaches kizen twice.
+ *
+ * Resolves with kizen's exit code, or 128 + the signal number when a signal ended it; rejects
+ * when it can't start. Every listener is removed once it settles.
  *
  * The interpreter runs the console script rather than the script running itself: its shebang was
  * written while the venv was still at its temporary build path, which the publish rename leaves
@@ -179,6 +184,7 @@ export function runKizen(
   env: Record<string, string>,
   spawnKizen: SpawnKizen,
   signals: SignalTarget,
+  interactive: boolean,
 ): Promise<number> {
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
@@ -191,15 +197,18 @@ export function runKizen(
       return;
     }
 
+    const forwarded: readonly NodeJS.Signals[] = interactive
+      ? FORWARDED_SIGNALS
+      : [...FORWARDED_SIGNALS, 'SIGINT'];
     const listeners = [
-      ...FORWARDED_SIGNALS.map((signal) => {
+      ...forwarded.map((signal) => {
         const forward = (): void => {
           child.kill(signal);
         };
 
         return [signal, forward] as const;
       }),
-      ['SIGINT', (): void => undefined] as const,
+      ...(interactive ? [['SIGINT', (): void => undefined] as const] : []),
     ];
 
     for (const [signal, listener] of listeners) {
@@ -243,6 +252,8 @@ export interface AdminDeps {
   ensureKizen: (options?: { force?: boolean }) => Promise<KizenInstall>;
   spawn: SpawnKizen;
   signals: SignalTarget;
+  /** Whether stdin is a TTY, so a Ctrl-C already reaches kizen and SIGINT isn't forwarded. */
+  interactive: boolean;
   processEnv: Readonly<Record<string, string | undefined>>;
   /** `process.execPath` and `process.argv[1]`: how kizen runs `appbuilder auth-header`. */
   execPath: string;
@@ -364,7 +375,16 @@ export async function runAdmin(args: readonly string[], deps: AdminDeps): Promis
   const childEnv = kizenChildEnv(deps.processEnv, resolved.session);
 
   try {
-    deps.setExitCode(await runKizen(install, invocation.args, childEnv, deps.spawn, deps.signals));
+    deps.setExitCode(
+      await runKizen(
+        install,
+        invocation.args,
+        childEnv,
+        deps.spawn,
+        deps.signals,
+        deps.interactive,
+      ),
+    );
   } catch (error) {
     fail(deps, `couldn't start kizen: ${errorMessage(error)}`);
   }

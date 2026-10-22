@@ -70,6 +70,7 @@ function fakeDeps(
     signedIn?: boolean;
     exit?: [code: number | null, signal: NodeJS.Signals | null] | 'hold' | 'spawn-error';
     processEnv?: Record<string, string>;
+    interactive?: boolean;
   } = {},
 ): Fake {
   const sessions = options.sessions ?? ['staging'];
@@ -109,6 +110,7 @@ function fakeDeps(
       on: (signal: NodeJS.Signals, listener: () => void) => signals.on(signal, listener),
       off: (signal: NodeJS.Signals, listener: () => void) => signals.off(signal, listener),
     },
+    interactive: options.interactive ?? true,
     processEnv: options.processEnv ?? { PATH: '/usr/bin' },
     execPath: '/usr/local/bin/node',
     scriptPath: '/opt/appbuilder/dist/index.js',
@@ -379,8 +381,8 @@ describe('runAdmin', () => {
     expect(deps.setExitCode).toHaveBeenCalledWith(143);
   });
 
-  it('(i) swallows SIGINT without forwarding it, and still exits with the child code', async () => {
-    const { deps, children, signals } = fakeDeps({ exit: 'hold' });
+  it('(i) interactive: swallows SIGINT without forwarding it, and still exits with the child code', async () => {
+    const { deps, children, signals } = fakeDeps({ interactive: true, exit: 'hold' });
     const running = runAdmin(['status'], deps);
 
     await vi.waitFor(() => {
@@ -391,6 +393,7 @@ describe('runAdmin', () => {
     expect(signals.listenerCount('SIGINT')).toBe(1);
 
     signals.emit('SIGINT');
+    signals.emit('SIGINT');
 
     const [child] = children;
 
@@ -399,46 +402,94 @@ describe('runAdmin', () => {
     child?.emit('close', 130, null);
     await running;
 
-    expect(signals.listenerCount('SIGINT')).toBe(0);
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+      expect(signals.listenerCount(signal)).toBe(0);
+    }
+
     expect(deps.setExitCode).toHaveBeenCalledWith(130);
   });
 
-  it('(i) forwards SIGTERM and SIGHUP to kizen, then removes its listeners', async () => {
-    const { deps, children, signals } = fakeDeps({ exit: 'hold' });
+  it('(i) non-interactive: forwards each SIGINT to kizen once, then removes its listeners', async () => {
+    const { deps, children, signals } = fakeDeps({ interactive: false, exit: 'hold' });
     const running = runAdmin(['status'], deps);
 
     await vi.waitFor(() => {
       expect(children).toHaveLength(1);
     });
 
-    signals.emit('SIGTERM');
-    signals.emit('SIGHUP');
+    expect(signals.listenerCount('SIGINT')).toBe(1);
+
+    signals.emit('SIGINT');
 
     const [child] = children;
 
-    expect(child?.kill.mock.calls).toStrictEqual([['SIGTERM'], ['SIGHUP']]);
+    expect(child?.kill.mock.calls).toStrictEqual([['SIGINT']]);
 
-    child?.emit('close', null, 'SIGTERM');
+    signals.emit('SIGINT');
+
+    expect(child?.kill.mock.calls).toStrictEqual([['SIGINT'], ['SIGINT']]);
+
+    child?.emit('close', null, 'SIGINT');
     await running;
 
     for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
       expect(signals.listenerCount(signal)).toBe(0);
     }
 
-    expect(deps.setExitCode).toHaveBeenCalledWith(143);
+    expect(deps.setExitCode).toHaveBeenCalledWith(130);
   });
 
-  it('(i) a spawn error prints one line, exits 1 and removes its listeners', async () => {
-    const { deps, stderr, signals } = fakeDeps({ exit: 'spawn-error' });
+  it.each([
+    ['interactive', true],
+    ['non-interactive', false],
+  ])(
+    '(i) %s: forwards SIGTERM and SIGHUP to kizen, then removes its listeners',
+    async (_, interactive) => {
+      const { deps, children, signals } = fakeDeps({ interactive, exit: 'hold' });
+      const running = runAdmin(['status'], deps);
 
-    await runAdmin(['status'], deps);
+      await vi.waitFor(() => {
+        expect(children).toHaveLength(1);
+      });
 
-    expect(stderr).toStrictEqual([
-      "appbuilder admin: couldn't start kizen: spawn /venvs/1.2.3-abc/bin/python ENOENT\n",
-    ]);
-    expect(deps.setExitCode.mock.calls).toStrictEqual([[1]]);
-    expect(signals.listenerCount('SIGINT')).toBe(0);
-  });
+      signals.emit('SIGTERM');
+      signals.emit('SIGHUP');
+
+      const [child] = children;
+
+      expect(child?.kill.mock.calls).toStrictEqual([['SIGTERM'], ['SIGHUP']]);
+
+      child?.emit('close', null, 'SIGTERM');
+      await running;
+
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        expect(signals.listenerCount(signal)).toBe(0);
+      }
+
+      expect(deps.setExitCode).toHaveBeenCalledWith(143);
+    },
+  );
+
+  it.each([
+    ['interactive', true],
+    ['non-interactive', false],
+  ])(
+    '(i) %s: a spawn error prints one line, exits 1 and removes its listeners',
+    async (_, interactive) => {
+      const { deps, stderr, signals } = fakeDeps({ interactive, exit: 'spawn-error' });
+
+      await runAdmin(['status'], deps);
+
+      expect(stderr).toStrictEqual([
+        "appbuilder admin: couldn't start kizen: spawn /venvs/1.2.3-abc/bin/python ENOENT\n",
+      ]);
+      expect(deps.setExitCode.mock.calls).toStrictEqual([[1]]);
+
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+        expect(signals.listenerCount(signal)).toBe(0);
+      }
+    },
+  );
 
   it('passes --force to the provisioner only from admin init --force', async () => {
     const { deps } = fakeDeps();

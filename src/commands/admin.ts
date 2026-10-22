@@ -34,11 +34,15 @@ export function createDefaultAdminDeps(command: Command): AdminDeps {
     writeStderr(`${ADMIN_PREFIX}: ${line}\n`);
   }, writeStderr);
 
+  // @types/node types `isTTY` as boolean, but it's undefined on a stream that isn't a TTY.
+  const stdin: { isTTY?: boolean } = process.stdin;
+
   return {
     store: createOAuthStore(),
     ensureKizen: (options) => ensureKizen(venvDeps, options),
     spawn,
     signals: process,
+    interactive: stdin.isTTY === true,
     processEnv: process.env,
     execPath: process.execPath,
     scriptPath: process.argv[1],
