@@ -3,6 +3,8 @@ import { render } from 'ink';
 import type { Command } from 'commander';
 import { CreateUI } from '../ui/CreateUI.js';
 import { loadGlobalCredentials } from '../lib/credentials.js';
+import { resolveCreateDefaults } from '../lib/createDefaults.js';
+import { createOAuthStore } from '../lib/oauthStore.js';
 import { createPlugin, precheckTargetDir } from '../lib/createPlugin.js';
 import { hasNonInteractiveFlags, runHeadlessCreate } from '../lib/createHeadless.js';
 import type { CreateOptions } from '../lib/createHeadless.js';
@@ -17,10 +19,13 @@ export function createCommand(program: Command): void {
     .option('-a, --api-name <name>', 'plugin api_name (inferred from --name when omitted)')
     .option('-d, --description <text>', 'plugin description')
     .option('-l, --external-link <url>', 'external link shown on the plugin listing')
-    .option('-b, --business-id <id>', 'developer business id (defaults to saved credentials)')
+    .option(
+      '-b, --business-id <id>',
+      'developer business id (defaults to your sign-in session, else saved API-key credentials)',
+    )
     .option(
       '-e, --environment <env>',
-      `environment the business id belongs to: ${ENVIRONMENTS.join(', ')} (defaults to saved credentials)`,
+      `environment the business id belongs to: ${ENVIRONMENTS.join(', ')} (defaults to your sign-in session, else saved API-key credentials)`,
     )
     .option(
       '--artifacts <list>',
@@ -29,9 +34,14 @@ export function createCommand(program: Command): void {
     .option('--include-lib', 'also install the Kizen data helper library (src/lib/kizenData.js)')
     .action(async (options: CreateOptions) => {
       const parentDir = process.cwd();
-      const globalCreds = await loadGlobalCredentials();
-      const defaultBusinessId = globalCreds?.businessId ?? '';
-      const defaultEnvironment = globalCreds?.environment ?? 'go';
+      const store = createOAuthStore();
+      const { businessId: defaultBusinessId, environment: defaultEnvironment } =
+        await resolveCreateDefaults({
+          listSessions: store.listSessions,
+          readSession: store.readSession,
+          loadGlobalCredentials,
+          ...(options.environment !== undefined && { requestedEnvironment: options.environment }),
+        });
 
       const isNonInteractive =
         !process.stdin.isTTY || !process.stdout.isTTY || hasNonInteractiveFlags(options);

@@ -8,7 +8,6 @@ import {
 } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
 import { type ValidationIssue } from '@kizenapps/packager';
-import { type Credentials } from '../lib/credentials.js';
 import { formatValidationIssues } from '../lib/formatValidationIssues.js';
 import { type Surface } from '../lib/kizenTypes.js';
 import { surfaceToDashboardType } from '../lib/pushBlock.js';
@@ -29,12 +28,14 @@ import {
   toTargetRow,
   warningLines,
   type AppliedPush,
+  type PushAccount,
   type PushChoice,
   type PushCommandOptions,
   type PushContext,
   type PushDeps,
   type PushPlan,
   type ResolvedBlock,
+  type ResolvedCredentials,
   type ResolvedTarget,
   type TargetCustomObject,
   type TargetRow,
@@ -57,7 +58,9 @@ interface ErrorView {
 }
 
 interface Session {
-  credentials: Credentials | null;
+  credentials: PushAccount | null;
+  /** Notices about how the command signed in, such as an ignored profile pin. */
+  credentialNotices: string[];
   warnings: ValidationIssue[];
   notices: string[];
 }
@@ -69,12 +72,12 @@ interface Resolving {
 
 type Phase =
   | { type: 'loading'; label: string }
-  | { type: 'profile-select'; options: PushCommandOptions; choices: PushChoice[] }
+  | { type: 'environment-select'; options: PushCommandOptions; choices: PushChoice[] }
   | { type: 'packaging' }
   | {
       type: 'block-select';
       options: PushCommandOptions;
-      credentials: Credentials;
+      resolved: ResolvedCredentials;
       choices: PushChoice[];
     }
   | ({ type: 'surface-select' } & Resolving)
@@ -191,14 +194,18 @@ function withTarget(
   return isCreateChoice(choice) ? { ...next, create: true } : { ...next, dashlet: choice.value };
 }
 
-function createPushFlow(
+/** The push flow behind PushUI's phases; exported for tests. */
+export function createPushFlow(
   apiName: string | undefined,
   deps: PushDeps,
   setPhase: Setter<Phase>,
   setSession: Setter<Session>,
 ): {
   start: (options: PushCommandOptions) => void;
-  pickProfile: (phase: Extract<Phase, { type: 'profile-select' }>, choice: PushChoice) => void;
+  pickEnvironment: (
+    phase: Extract<Phase, { type: 'environment-select' }>,
+    choice: PushChoice,
+  ) => void;
   pickBlock: (phase: Extract<Phase, { type: 'block-select' }>, choice: PushChoice) => void;
   pickSurface: (phase: Extract<Phase, { type: 'surface-select' }>, surface: Surface) => void;
   pickObject: (
@@ -324,12 +331,12 @@ function createPushFlow(
 
   const prepare = async (
     options: PushCommandOptions,
-    credentials: Credentials,
+    { credentials, client }: ResolvedCredentials,
     block: ResolvedBlock,
   ): Promise<void> => {
     const { context, forgotten } = await loadPushContext(
       {
-        client: deps.createClient(credentials),
+        client,
         credentials,
         block,
         forget: options.forget === true,
@@ -355,7 +362,7 @@ function createPushFlow(
 
   const packageBlock = async (
     options: PushCommandOptions,
-    credentials: Credentials,
+    resolved: ResolvedCredentials,
     name: string | undefined,
   ): Promise<void> => {
     setPhase({ type: 'packaging' });
@@ -364,7 +371,7 @@ function createPushFlow(
 
     if (!step.ok) {
       if (step.choice === 'block' && step.choices) {
-        setPhase({ type: 'block-select', options, credentials, choices: step.choices });
+        setPhase({ type: 'block-select', options, resolved, choices: step.choices });
 
         return;
       }
@@ -375,7 +382,7 @@ function createPushFlow(
     }
 
     setSession((session) => ({ ...session, warnings: step.value.warnings }));
-    await prepare(options, credentials, step.value);
+    await prepare(options, resolved, step.value);
   };
 
   const loadCredentials = async (options: PushCommandOptions): Promise<void> => {
@@ -384,8 +391,8 @@ function createPushFlow(
     const step = await resolveCredentials(options, deps);
 
     if (!step.ok) {
-      if (step.choice === 'profile' && step.choices) {
-        setPhase({ type: 'profile-select', options, choices: step.choices });
+      if (step.choice === 'environment' && step.choices) {
+        setPhase({ type: 'environment-select', options, choices: step.choices });
 
         return;
       }
@@ -395,10 +402,12 @@ function createPushFlow(
       return;
     }
 
-    const { credentials } = step.value;
-
-    setSession((session) => ({ ...session, credentials }));
-    await packageBlock(options, credentials, apiName);
+    setSession((session) => ({
+      ...session,
+      credentials: step.value.credentials,
+      credentialNotices: step.value.notices,
+    }));
+    await packageBlock(options, step.value, apiName);
   };
 
   const listDashboards = async (
@@ -442,11 +451,11 @@ function createPushFlow(
     start: (options) => {
       guard(() => loadCredentials(options));
     },
-    pickProfile: (phase, choice) => {
-      guard(() => loadCredentials({ ...phase.options, profile: choice.value }));
+    pickEnvironment: (phase, choice) => {
+      guard(() => loadCredentials({ ...phase.options, env: choice.value }));
     },
     pickBlock: (phase, choice) => {
-      guard(() => packageBlock(phase.options, phase.credentials, choice.value));
+      guard(() => packageBlock(phase.options, phase.resolved, choice.value));
     },
     pickSurface: (phase, surface) => {
       guard(async () => {
@@ -636,6 +645,7 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
   const [phase, setPhase] = useState<Phase>({ type: 'loading', label: 'Loading credentials…' });
   const [session, setSession] = useState<Session>({
     credentials: null,
+    credentialNotices: [],
     warnings: [],
     notices: [],
   });
@@ -668,6 +678,9 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           {session.credentials.businessId}
         </Text>
       )}
+      {session.credentialNotices.length > 0 && (
+        <Lines lines={session.credentialNotices} color="yellow" />
+      )}
       {session.warnings.length > 0 && (
         <Text dimColor>{formatValidationIssues(session.warnings)}</Text>
       )}
@@ -687,14 +700,14 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           label={`Pushing ${phase.plan.summary.blockName} to "${phase.plan.dashboard.name}"…`}
         />,
       );
-    case 'profile-select':
+    case 'environment-select':
       return frame(
         <SelectList
-          key="profile"
-          title="Credential profile"
+          key="environment"
+          title="Environment"
           items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
           onSelect={pick(phase.choices, (choice) => {
-            flow.pickProfile(phase, choice);
+            flow.pickEnvironment(phase, choice);
           })}
           onCancel={flow.cancel}
         />,

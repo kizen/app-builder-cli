@@ -30,7 +30,10 @@ export function encryptCommand(program: Command): void {
     .command('encrypt')
     .description('Encrypt a secret for a plugin against its encryption keys')
     .option('--remote', "encrypt via the plugin-wizard's remote API instead of on-machine")
-    .option('-c, --credentials <path>', 'path to a credentials JSON file')
+    .option(
+      '-c, --credentials <path>',
+      'path to an API-key credentials JSON file (encrypt still uses API keys until plugin-wizard accepts sign-in sessions)',
+    )
     .option('-a, --api-name <name>', 'plugin api_name the secret belongs to')
     .option('-v, --value <value>', 'plaintext secret value to encrypt')
     .option('-s, --stage <stage>', 'which encryption API to use: dev or prod (default: prod)')

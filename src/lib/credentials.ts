@@ -24,9 +24,20 @@ export const GLOBAL_CREDENTIALS_DIR = join(homedir(), '.kizenappbuilder');
 export const GLOBAL_CREDENTIALS_PATH = join(GLOBAL_CREDENTIALS_DIR, 'credentials.json');
 export const DEFAULT_PROFILE_NAME = 'credentials';
 
-function isValidEnvironment(value: unknown): value is Environment {
-  return ENVIRONMENTS.includes(value as Environment);
-}
+export const isEnvironment = (value: unknown): value is Environment =>
+  ENVIRONMENTS.includes(value as Environment);
+
+/** The error for an `--env` value that names no environment. */
+const unknownEnvironmentMessage = (value: string): string =>
+  `Unknown --env "${value}". Use one of: ${ENVIRONMENTS.join(', ')}.`;
+
+/** An `--env` value checked against the environments: the environment, or why it isn't one. */
+export type ParsedEnvironment =
+  | { environment: Environment; message?: undefined }
+  | { environment?: undefined; message: string };
+
+export const parseEnvironment = (value: string): ParsedEnvironment =>
+  isEnvironment(value) ? { environment: value } : { message: unknownEnvironmentMessage(value) };
 
 function trimString(value: unknown): unknown {
   return typeof value === 'string' ? value.trim() : value;
@@ -40,7 +51,7 @@ export interface DetailedCredentials {
 }
 
 function environmentSourceOf(env: unknown): EnvironmentSource {
-  if (isValidEnvironment(env)) {
+  if (isEnvironment(env)) {
     return 'explicit';
   }
 
@@ -58,7 +69,7 @@ function parseCredentials(raw: unknown): DetailedCredentials {
   return {
     credentials: {
       ...normalizeCredentialIds(obj),
-      environment: isValidEnvironment(env) ? env : 'go',
+      environment: isEnvironment(env) ? env : 'go',
     },
     environmentSource: environmentSourceOf(env),
   };

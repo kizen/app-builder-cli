@@ -1,17 +1,22 @@
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { claudeFiles } from './createCopilotFiles.js';
 import {
   CLAUDE_SKILL_PATH,
+  CLI_PACKAGE_NAME,
   entryDirsOf,
   isClaudeSkillStale,
   nodeClaudeFs,
   pluginClaudeFiles,
+  runCommand,
   runSetupClaude,
   STALE_CLAUDE_SKILL_WARNING,
   type ClaudeFs,
+  type CommandResult,
+  type RunCommand,
   type SetupClaudeDeps,
 } from './setupClaude.js';
 
@@ -80,12 +85,24 @@ interface DepsHarness {
   exitCodes: number[];
 }
 
-const makeDeps = (fs: ClaudeFs = nodeClaudeFs): DepsHarness => {
+/** Deliberately not the package's version, so a passing test proves deps.cliVersion is used. */
+const TEST_CLI_VERSION = '9.9.9-test.1';
+
+/** A runner that fails the test if anything tries to run `claude`. */
+const forbiddenRun: RunCommand = () => Promise.reject(new Error('claude must not run here'));
+
+const makeDeps = (
+  fs: ClaudeFs = nodeClaudeFs,
+  extra: Partial<Pick<SetupClaudeDeps, 'run' | 'hasOAuthSession'>> = {},
+): DepsHarness => {
   const logs: string[] = [];
   const errors: string[] = [];
   const exitCodes: number[] = [];
   const deps: SetupClaudeDeps = {
     fs,
+    run: extra.run ?? forbiddenRun,
+    cliVersion: TEST_CLI_VERSION,
+    hasOAuthSession: extra.hasOAuthSession ?? (() => Promise.resolve(true)),
     log: (line) => {
       logs.push(line);
     },
@@ -424,5 +441,381 @@ describe('pluginClaudeFiles', () => {
       'src/outlookInbox/lib/kizenData.js',
     ]);
     expect(files[3]?.content).toBe(BUNDLED_LIB);
+  });
+});
+
+describe('setup-claude --mcp', () => {
+  const inPlugin = async (): Promise<void> => {
+    await writeFile(join(dir, 'kizen.json'), '{}', 'utf-8');
+  };
+
+  const ok = (stdout = ''): CommandResult => ({ code: 0, stdout, stderr: '' });
+
+  interface FakeClaude {
+    run: ReturnType<typeof vi.fn<RunCommand>>;
+    calls: () => string[][];
+  }
+
+  /**
+   * A fake `claude` CLI, matching what the real one does (observed with a throwaway
+   * CLAUDE_CONFIG_DIR): `add-json --scope user` fails with "MCP server <name> already
+   * exists in user config" only when a user-scope server has that name; a local one
+   * doesn't block it. `remove --scope user` removes the user-scope one. `get` is never
+   * expected.
+   */
+  const fakeClaude = (
+    options: {
+      existsAt?: 'user' | 'local';
+      notInstalled?: boolean;
+      /** Overrides every add-json result. */
+      add?: CommandResult;
+      /** Overrides every remove result. */
+      remove?: CommandResult;
+    } = {},
+  ): FakeClaude => {
+    let userExists = options.existsAt === 'user';
+    const run = vi.fn<RunCommand>((command, args) => {
+      expect(command).toBe('claude');
+
+      if (options.notInstalled) {
+        return Promise.reject(
+          Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT', errno: -2 }),
+        );
+      }
+
+      // Both add-json and remove take: mcp <sub> --scope user <name> …
+      const sub = args[1];
+      const name = args[4] ?? '';
+
+      expect(args.slice(2, 4)).toStrictEqual(['--scope', 'user']);
+
+      if (sub === 'add-json') {
+        if (options.add) {
+          return Promise.resolve(options.add);
+        }
+
+        if (userExists) {
+          return Promise.resolve({
+            code: 1,
+            stdout: '',
+            stderr: `MCP server ${name} already exists in user config`,
+          });
+        }
+
+        userExists = true;
+
+        return Promise.resolve(ok(`Added http MCP server ${name} to user config`));
+      }
+
+      if (sub === 'remove') {
+        if (options.remove) {
+          return Promise.resolve(options.remove);
+        }
+
+        if (userExists) {
+          userExists = false;
+
+          return Promise.resolve(ok(`Removed MCP server ${name} from user config`));
+        }
+
+        return Promise.resolve({
+          code: 1,
+          stdout: '',
+          stderr: `No user-scoped MCP server found with name: ${name}`,
+        });
+      }
+
+      throw new Error(`unexpected claude call: ${args.join(' ')}`);
+    });
+
+    return { run, calls: () => run.mock.calls.map(([, args]) => [...args]) };
+  };
+
+  const STAGING_CONFIG = {
+    type: 'http',
+    url: 'https://staging.kizen.com/api/mcp',
+    headersHelper: `npx -y @kizenapps/cli@${TEST_CLI_VERSION} auth-header`,
+  };
+  const ADD_STAGING = [
+    'mcp',
+    'add-json',
+    '--scope',
+    'user',
+    'kizen-staging',
+    JSON.stringify(STAGING_CONFIG),
+  ];
+  const REMOVE_STAGING = ['mcp', 'remove', '--scope', 'user', 'kizen-staging'];
+
+  it('setup-claude --mcp registers kizen-<env> at user scope with the npx auth-header helper', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+    const { deps, logs, errors, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging' }, deps);
+
+    expect(claude.calls()).toStrictEqual([ADD_STAGING]);
+    expect(JSON.parse(claude.calls()[0]?.[5] ?? '')).toStrictEqual(STAGING_CONFIG);
+    // The skill files were installed first.
+    expect(await readSkill()).toBe(BUNDLED);
+    expect(logs.at(-1)).toBe(
+      'Registered the MCP server kizen-staging (https://staging.kizen.com/api/mcp) in Claude Code at user scope.',
+    );
+    expect(errors).toStrictEqual([]);
+    expect(exitCodes).toStrictEqual([]);
+  });
+
+  it('registers go by default, on the production API host', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+
+    await runSetupClaude(dir, { mcp: true }, makeDeps(nodeClaudeFs, { run: claude.run }).deps);
+
+    const config = JSON.parse(claude.calls()[0]?.[5] ?? '') as Record<string, string>;
+
+    expect(claude.calls()[0]?.[4]).toBe('kizen-go');
+    expect(config.url).toBe('https://app.go.kizen.com/api/mcp');
+  });
+
+  it('uses the published package name in the helper', async () => {
+    const pkg = JSON.parse(
+      await readFile(join(dirname(fileURLToPath(import.meta.url)), '../../package.json'), 'utf-8'),
+    ) as { name: string };
+
+    expect(CLI_PACKAGE_NAME).toBe(pkg.name);
+  });
+
+  it('setup-claude --mcp leaves an existing server alone without --force', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude({ existsAt: 'user' });
+    const { deps, logs, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging' }, deps);
+
+    expect(claude.calls()).toStrictEqual([ADD_STAGING]);
+    expect(logs.at(-1)).toBe(
+      'MCP server kizen-staging already exists in Claude Code; left unchanged. Pass --force to replace it.',
+    );
+    expect(exitCodes).toStrictEqual([]);
+  });
+
+  it('--force replaces it (remove then add)', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude({ existsAt: 'user' });
+    const { deps, logs, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging', force: true }, deps);
+
+    expect(claude.calls()).toStrictEqual([ADD_STAGING, REMOVE_STAGING, ADD_STAGING]);
+    expect(logs.at(-1)).toContain('Registered the MCP server kizen-staging');
+    expect(exitCodes).toStrictEqual([]);
+  });
+
+  it('--force reports a failed remove with its output', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude({
+      existsAt: 'user',
+      remove: { code: 1, stdout: '', stderr: 'EACCES: permission denied, open ~/.claude.json' },
+    });
+    const { deps, logs, errors, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging', force: true }, deps);
+
+    expect(claude.calls()).toStrictEqual([ADD_STAGING, REMOVE_STAGING]);
+    expect(exitCodes).toStrictEqual([1]);
+    expect(errors).toStrictEqual([
+      "Error: couldn't register the MCP server kizen-staging: claude mcp remove --scope user exited 1: EACCES: permission denied, open ~/.claude.json",
+    ]);
+    expect(logs.some((line) => line.includes('Registered'))).toBe(false);
+    expect(await readSkill()).toBe(BUNDLED);
+  });
+
+  it('--force reports when the re-add fails after removing the old server', async () => {
+    await inPlugin();
+
+    let adds = 0;
+    const claude = fakeClaude({ existsAt: 'user' });
+    const run = vi.fn<RunCommand>((command, args) => {
+      // The second add-json (after the remove) fails; everything else is the fake's.
+      if (args[1] === 'add-json' && ++adds === 2) {
+        return Promise.resolve({ code: 1, stdout: '', stderr: 'Failed to write config' });
+      }
+
+      return claude.run(command, args);
+    });
+    const { deps, logs, errors, exitCodes } = makeDeps(nodeClaudeFs, { run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging', force: true }, deps);
+
+    expect(run.mock.calls.map(([, args]) => [...args])).toStrictEqual([
+      ADD_STAGING,
+      REMOVE_STAGING,
+      ADD_STAGING,
+    ]);
+    expect(exitCodes).toStrictEqual([1]);
+    expect(errors).toStrictEqual([
+      "Error: couldn't register the MCP server kizen-staging: claude mcp add-json exited 1: Failed to write config",
+      'The old kizen-staging registration was already removed, so Claude Code has no kizen-staging server now. Re-run `appbuilder setup-claude --mcp --env staging`, or run:',
+      `  claude mcp add-json --scope user kizen-staging '${JSON.stringify(STAGING_CONFIG)}'`,
+    ]);
+    expect(logs.some((line) => line.includes('Registered'))).toBe(false);
+  });
+
+  it('setup-claude --mcp prints the command when claude is not installed and still exits 0', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude({ notInstalled: true });
+    const { deps, logs, errors, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging' }, deps);
+
+    expect(logs.slice(-2)).toStrictEqual([
+      "Claude Code's `claude` command wasn't found. To register the MCP server, run (in a POSIX shell such as bash or zsh):",
+      `  claude mcp add-json --scope user kizen-staging '${JSON.stringify(STAGING_CONFIG)}'`,
+    ]);
+    expect(errors).toStrictEqual([]);
+    expect(exitCodes).toStrictEqual([]);
+    expect(await readSkill()).toBe(BUNDLED);
+  });
+
+  it('setup-claude --mcp --dry-run runs nothing and prints the command', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+    const { deps, logs, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging', dryRun: true }, deps);
+
+    expect(claude.run).not.toHaveBeenCalled();
+    expect(logs.at(-1)).toBe(
+      `Dry run: would register the MCP server kizen-staging with: claude mcp add-json --scope user kizen-staging '${JSON.stringify(STAGING_CONFIG)}'`,
+    );
+    await expect(stat(skillFile())).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(exitCodes).toStrictEqual([]);
+  });
+
+  it('setup-claude without --mcp never invokes claude', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+    const hasOAuthSession = vi.fn(() => Promise.resolve(false));
+    const { deps, logs } = makeDeps(nodeClaudeFs, { run: claude.run, hasOAuthSession });
+
+    await runSetupClaude(dir, {}, deps);
+    await runSetupClaude(dir, { dryRun: true, includeLib: true }, deps);
+
+    expect(claude.run).not.toHaveBeenCalled();
+    expect(hasOAuthSession).not.toHaveBeenCalled();
+    expect(logs.some((line) => line.includes('MCP'))).toBe(false);
+  });
+
+  it('setup-claude --mcp hints login when no session exists for the env', async () => {
+    await inPlugin();
+
+    const signedOut = vi.fn(() => Promise.resolve(false));
+    const without = makeDeps(nodeClaudeFs, { run: fakeClaude().run, hasOAuthSession: signedOut });
+
+    await runSetupClaude(dir, { mcp: true, env: 'integration' }, without.deps);
+
+    expect(signedOut).toHaveBeenCalledWith('integration');
+    expect(without.logs.at(-1)).toBe(
+      "You're not signed in to integration yet. Run `appbuilder login --env integration` before using kizen-integration.",
+    );
+    expect(without.exitCodes).toStrictEqual([]);
+
+    const signedIn = makeDeps(nodeClaudeFs, {
+      run: fakeClaude().run,
+      hasOAuthSession: () => Promise.resolve(true),
+    });
+
+    await runSetupClaude(dir, { mcp: true, env: 'integration' }, signedIn.deps);
+    expect(signedIn.logs.some((line) => line.includes('appbuilder login'))).toBe(false);
+  });
+
+  it('--env or --force without --mcp is a usage error', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+    const { deps, errors, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { env: 'staging' }, deps);
+
+    expect(errors).toStrictEqual(['Error: --env and --force only apply with --mcp.']);
+    expect(exitCodes).toStrictEqual([1]);
+    expect(claude.run).not.toHaveBeenCalled();
+    // Rejected before anything is written.
+    await expect(stat(skillFile())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('unknown --env is rejected', async () => {
+    await inPlugin();
+
+    const claude = fakeClaude();
+    const { deps, errors, exitCodes } = makeDeps(nodeClaudeFs, { run: claude.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'prod' }, deps);
+
+    expect(errors).toStrictEqual([
+      'Error: Unknown --env "prod". Use one of: go, fmo, staging, integration, test1.',
+    ]);
+    expect(exitCodes).toStrictEqual([1]);
+    expect(claude.run).not.toHaveBeenCalled();
+    await expect(stat(skillFile())).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('mcp step failure keeps installed files and sets exit 1', async () => {
+    await inPlugin();
+
+    // Even with --force: an add-json failure that isn't "already exists" never leads to remove.
+    const addFails = fakeClaude({
+      existsAt: 'user',
+      add: { code: 1, stdout: '', stderr: 'Invalid configuration\nsomething went wrong' },
+    });
+    const first = makeDeps(nodeClaudeFs, { run: addFails.run });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging', force: true }, first.deps);
+
+    expect(addFails.calls()).toStrictEqual([ADD_STAGING]);
+    expect(first.errors).toStrictEqual([
+      "Error: couldn't register the MCP server kizen-staging: claude mcp add-json exited 1: Invalid configuration something went wrong",
+    ]);
+    expect(first.logs.some((line) => line.includes('left unchanged'))).toBe(false);
+    expect(await readSkill()).toBe(BUNDLED);
+    expect(await readDesign()).toBe(BUNDLED_DESIGN);
+    expect(first.exitCodes).toStrictEqual([1]);
+
+    // A spawn error other than ENOENT is a failure too, not the "not installed" path.
+    const broken = makeDeps(nodeClaudeFs, {
+      run: () =>
+        Promise.reject(Object.assign(new Error('spawn claude EACCES'), { code: 'EACCES' })),
+    });
+
+    await runSetupClaude(dir, { mcp: true, env: 'staging' }, broken.deps);
+    expect(broken.exitCodes).toStrictEqual([1]);
+    expect(broken.errors[0]).toContain('EACCES');
+    expect(await readSkill()).toBe(BUNDLED);
+  });
+});
+
+describe('runCommand', () => {
+  // Uses node itself, never `claude`, to check the shapes the MCP step relies on.
+  it('returns the exit code and output of a program run with argv', async () => {
+    await expect(
+      runCommand(process.execPath, [
+        '-e',
+        'process.stdout.write("out " + process.argv[1]); process.stderr.write("err"); process.exit(3)',
+        "it's one arg",
+      ]),
+    ).resolves.toStrictEqual({ code: 3, stdout: "out it's one arg", stderr: 'err' });
+  });
+
+  it('rejects with ENOENT when the program is not installed', async () => {
+    await expect(
+      runCommand('appbuilder-test-no-such-program-7c1e', ['mcp', 'get', 'x']),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

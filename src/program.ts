@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
+import { authCommands } from './commands/auth.js';
 import { blockCommand } from './commands/block.js';
 import { buildCommand } from './commands/build.js';
 import { createCommand } from './commands/create.js';
@@ -21,12 +22,13 @@ function readVersion(): string {
 
 export function createProgram(): Command {
   const program = new Command();
+  const version = readVersion();
 
-  program.name('appbuilder').description('Kizen plugin app builder').version(readVersion());
+  program.name('appbuilder').description('Kizen plugin app builder').version(version);
 
   createCommand(program);
 
-  setupClaudeCommand(program);
+  setupClaudeCommand(program, version);
 
   setupCopilotCommand(program);
 
@@ -41,6 +43,8 @@ export function createProgram(): Command {
   iconsCommand(program);
 
   blockCommand(program);
+
+  authCommands(program);
 
   return program;
 }

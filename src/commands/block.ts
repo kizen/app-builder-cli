@@ -67,8 +67,14 @@ export function blockCommand(program: Command): void {
     .command('push')
     .description('Push a block to a Kizen dashboard, homepage or chart group dashlet')
     .argument('[api_name]', 'api_name of the block to push (optional when there is only one)')
-    .option('-c, --credentials <path>', 'path to a credentials JSON file')
-    .option('--profile <name>', 'stored credential profile to use')
+    .option(
+      '-c, --credentials <path>',
+      'path to an API-key credentials JSON file (deprecated; replaces the sign-in session)',
+    )
+    .option(
+      '--profile <name>',
+      'stored API-key credential profile to use (deprecated; replaces the sign-in session)',
+    )
     .option('--dashboard <id>', 'dashboard, homepage or chart group to push to')
     .option('--dashlet <id>', 'existing custom code dashlet to update (needs --dashboard)')
     .option('--create', 'create a new dashlet instead of updating one')
@@ -78,10 +84,13 @@ export function blockCommand(program: Command): void {
     .option('--force', 'overwrite even if the block was edited in Kizen since the last push')
     .option('--forget', 'clear the remembered target for this block first')
     .option('--json', 'print a JSON result to stdout (always headless)')
+    .option('--env <env>', 'environment of the `appbuilder login` session to use')
     .action(async (apiName: string | undefined, options: PushCommandOptions) => {
       try {
+        const deps = createDefaultPushDeps(process.cwd());
+
         if (!process.stdin.isTTY || !process.stdout.isTTY || options.json === true) {
-          await runPushHeadless(apiName, options, createDefaultPushDeps(process.cwd()));
+          await runPushHeadless(apiName, options, deps);
 
           return;
         }
@@ -90,7 +99,7 @@ export function blockCommand(program: Command): void {
           createElement(PushUI, {
             ...(apiName !== undefined && { apiName }),
             options,
-            deps: createDefaultPushDeps(process.cwd()),
+            deps,
           }),
           { exitOnCtrlC: false },
         );
@@ -104,10 +113,17 @@ export function blockCommand(program: Command): void {
   block
     .command('targets')
     .description('List the dashboards, homepages and chart groups a block can be pushed to')
-    .option('-c, --credentials <path>', 'path to a credentials JSON file')
-    .option('--profile <name>', 'stored credential profile to use')
+    .option(
+      '-c, --credentials <path>',
+      'path to an API-key credentials JSON file (deprecated; replaces the sign-in session)',
+    )
+    .option(
+      '--profile <name>',
+      'stored API-key credential profile to use (deprecated; replaces the sign-in session)',
+    )
     .option('--object <id>', 'list the chart groups of this custom object')
     .option('--json', 'print a JSON result to stdout')
+    .option('--env <env>', 'environment of the `appbuilder login` session to use')
     .action(async (options: TargetsCommandOptions) => {
       try {
         await runTargetsHeadless(options, createDefaultPushDeps(process.cwd()));
