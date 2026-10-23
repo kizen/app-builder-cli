@@ -7,6 +7,13 @@
  * environment has saved accounts. Otherwise it runs the browser sign-in.
  */
 import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
+import {
+  accountRequest,
+  BUSINESS_ENV,
+  USER_ENV,
+  type AccountFlags,
+  type AccountRequest,
+} from './authSelection.js';
 import { ENVIRONMENTS, parseEnvironment, type Environment } from './credentials.js';
 import { errorMessage } from './guards.js';
 import { createKizenClient, KizenApiError, type KizenIdentity } from './kizenClient.js';
@@ -20,6 +27,7 @@ import {
   type BearerTokenProvider,
   type Identify,
   type LoginDeps,
+  type SessionEnvironment,
   type TokenProviderOptions,
 } from './oauthSession.js';
 import {
@@ -123,12 +131,13 @@ function requireEnvironment(env: string): Environment {
   return environment;
 }
 
-/** --env if given, else the only environment with a stored session; any problem is an error. */
+/** `resolveAccountEnvironment`, with any problem an error. */
 async function sessionEnvironment(
   env: string | undefined,
   store: OAuthStore,
+  request?: AccountRequest,
 ): Promise<Environment> {
-  const resolved = await resolveSessionEnvironment(env, () => store.listSessions());
+  const resolved = await resolveAccountEnvironment(env, request, store);
 
   if (!resolved.ok) {
     throw new Error(resolved.message);
@@ -241,11 +250,8 @@ type BusinessMatch =
   | { kind: 'one'; account: SavedAccount }
   | { kind: 'none' | 'several'; candidates: SavedAccount[] };
 
-/** What `--business` (and `--user`) ask for. */
-interface BusinessRequest {
-  business: string;
-  user?: string | undefined;
-}
+/** What `--business` (and `--user`), or `APPBUILDER_BUSINESS` (and `APPBUILDER_USER`), ask for. */
+type BusinessRequest = AccountRequest;
 
 /**
  * Whether a browser sign-in's `identity` is the account `--business` (and `--user`) asked for, by
@@ -294,9 +300,16 @@ export function matchBusiness(
 const candidateLines = (candidates: readonly SavedAccount[]): string =>
   candidates.map((candidate) => `\n  ${accountSummary(candidate)}`).join('');
 
-/** `--business <q>`, plus ` --user <id>` when given, shell-quoted, as the flags to repeat. */
-const requestFlags = ({ business, user }: BusinessRequest): string =>
-  `--business ${quoteArg(business)}${user === undefined ? '' : ` --user ${quoteArg(user)}`}`;
+/** How a request names its user id: `--user <id>`, or `APPBUILDER_USER=<id>`. */
+const userArg = (source: BusinessRequest['source'], user: string): string =>
+  source === 'env' ? `${USER_ENV}=${quoteArg(user)}` : `--user ${quoteArg(user)}`;
+
+/**
+ * `--business <q>`, plus ` --user <id>` when given, shell-quoted, as the flags to repeat; or the
+ * `APPBUILDER_BUSINESS=<q>` (and `APPBUILDER_USER=<id>`) assignments the request came from.
+ */
+const requestFlags = ({ business, user, source }: BusinessRequest): string =>
+  `${source === 'env' ? `${BUSINESS_ENV}=${quoteArg(business)}` : `--business ${quoteArg(business)}`}${user === undefined ? '' : ` ${userArg(source, user)}`}`;
 
 /**
  * The one saved account `--business` names; several or none is a usage error listing them. Pass
@@ -325,21 +338,120 @@ function requireBusiness(
     first !== undefined &&
     match.candidates.every(({ account }) => account.businessId === first.account.businessId);
 
-  // Several users of one business: only --user can tell them apart.
+  // Several users of one business: only --user (or APPBUILDER_USER) can tell them apart.
   if (sameBusiness) {
+    const { source } = request;
+
     throw new Error(
-      `${flags} matches several saved ${environment} users of the same business. Pass --user too, for example \`${requestFlags({ business: first.account.businessId, user: first.account.userId })}\`:${match.candidates
+      `${flags} matches several saved ${environment} users of the same business. ${source === 'env' ? `Set ${USER_ENV}` : 'Pass --user'} too, for example \`${requestFlags({ business: first.account.businessId, user: first.account.userId, source })}\`:${match.candidates
         .map(
           (candidate) =>
-            `\n  --user ${quoteArg(candidate.account.userId)}: ${accountSummary(candidate)}`,
+            `\n  ${userArg(source, candidate.account.userId)}: ${accountSummary(candidate)}`,
         )
         .join('')}`,
     );
   }
 
   throw new Error(
-    `${flags} matches several saved ${environment} accounts. Pass one of these business ids instead:${candidateLines(match.candidates)}`,
+    `${flags} matches several saved ${environment} accounts. ${request.source === 'env' ? `Set ${BUSINESS_ENV} to` : 'Pass'} one of these business ids instead:${candidateLines(match.candidates)}`,
   );
+}
+
+export type AccountEnvironment =
+  | { ok: true; environment: Environment }
+  | {
+      ok: false;
+      problem: Extract<SessionEnvironment, { ok: false }>['problem'];
+      message: string;
+      /** The environments to choose among, for `several_sessions`. */
+      environments: Environment[];
+    };
+
+/**
+ * The environment a command uses: --env if given; else, without a named account, the only
+ * signed-in one. With one, the only environment where the name matches a saved account, current
+ * or not; several are a choice. A name that matches nowhere resolves to the only environment with
+ * saved accounts, current or not, so the no-match error lists them.
+ */
+export async function resolveAccountEnvironment(
+  env: string | undefined,
+  request: AccountRequest | undefined,
+  store: Pick<OAuthStore, 'listSessions' | 'listAccounts'>,
+): Promise<AccountEnvironment> {
+  const resolveSignedIn = async (
+    list: () => Promise<Environment[]>,
+  ): Promise<AccountEnvironment> => {
+    let environments: Environment[] = [];
+    const resolved = await resolveSessionEnvironment(env, async () => {
+      environments = await list();
+
+      return environments;
+    });
+
+    return resolved.ok ? resolved : { ...resolved, environments };
+  };
+
+  if (request === undefined || env !== undefined) {
+    return resolveSignedIn(() => store.listSessions());
+  }
+
+  const saved = await Promise.all(
+    ENVIRONMENTS.map(async (environment) => ({
+      environment,
+      accounts: await store.listAccounts(environment),
+    })),
+  );
+  const matching = saved
+    .filter(
+      ({ accounts }) => matchBusiness(accounts, request.business, request.user).kind !== 'none',
+    )
+    .map(({ environment }) => environment);
+  const [only] = matching;
+
+  if (matching.length === 1 && only !== undefined) {
+    return { ok: true, environment: only };
+  }
+
+  if (matching.length > 1) {
+    return {
+      ok: false,
+      problem: 'several_sessions',
+      message: `${requestFlags(request)} matches saved accounts in several environments; pass --env <env>: ${matching.join(', ')}`,
+      environments: matching,
+    };
+  }
+
+  // Matches nowhere: the only environment with saved accounts, current or not, so the no-match
+  // error lists them.
+  return resolveSignedIn(() =>
+    Promise.resolve(
+      saved.filter(({ accounts }) => accounts.length > 0).map(({ environment }) => environment),
+    ),
+  );
+}
+
+/**
+ * The saved account `request` names among `accounts`, current or not; none or several is a usage
+ * error that lists them. Never falls back to the current account.
+ */
+export const requireNamedAccount = (
+  environment: Environment,
+  accounts: readonly SavedAccount[],
+  request: AccountRequest,
+): OAuthAccount => requireBusiness(environment, accounts, request).account;
+
+/** `accountRequest` for a command that throws its usage errors. */
+export function requireAccountRequest(
+  flags: AccountFlags,
+  processEnv: Readonly<Record<string, string | undefined>>,
+): AccountRequest | undefined {
+  const resolved = accountRequest(flags, processEnv);
+
+  if (!resolved.ok) {
+    throw new Error(resolved.message);
+  }
+
+  return resolved.request;
 }
 
 function listAccounts(
@@ -670,11 +782,23 @@ export const runLogout = guarded<LogoutCommandOptions>(async (options, deps) => 
   );
 });
 
-export const runWhoami = guarded(async (options, deps) => {
-  const environment = await sessionEnvironment(options.env, deps.store);
+export interface WhoamiCommandOptions extends AuthCommandOptions, AccountFlags {}
+
+export const runWhoami = guarded<WhoamiCommandOptions>(async (options, deps) => {
+  const request = requireAccountRequest(options, deps.processEnv);
+  const environment = await sessionEnvironment(options.env, deps.store, request);
+  const account =
+    request === undefined
+      ? undefined
+      : requireNamedAccount(environment, await deps.store.listAccounts(environment), request);
 
   deps.writeStdout(
-    identityLines(environment, await deps.identify(deps.tokenProvider(environment))),
+    identityLines(
+      environment,
+      await deps.identify(
+        deps.tokenProvider(environment, account === undefined ? undefined : { account }),
+      ),
+    ),
   );
 });
 
@@ -748,48 +872,11 @@ function boundAccount(options: AuthHeaderCommandOptions): OAuthAccount | undefin
 }
 
 /**
- * The bound account's token. It comes from that account's own file, so it's never another
- * account's; and the environment's current account must still be that one, so a switch to another
- * account fails the helper (as it aborts any running command) instead of serving on.
- */
-async function boundAccountToken(
-  environment: Environment,
-  account: OAuthAccount,
-  deps: AuthCommandDeps,
-): Promise<string> {
-  /** Throws unless `account` is the environment's current account. */
-  const requireCurrent = async (): Promise<void> => {
-    const current = await deps.store.readSession(environment);
-
-    if (current === null || !sameAccount(current, account)) {
-      const now =
-        current === null
-          ? 'nobody is signed in'
-          : `the current account is business ${current.businessId}, user ${current.userId}`;
-
-      throw new Error(
-        `--business ${account.businessId} --user ${account.userId} isn't the current ${environment} account (${now}), so auth-header won't send its token. Run the command again.`,
-      );
-    }
-  };
-
-  // Before the token read, so an account that's no longer current fails without a refresh; and
-  // after it, so a switch during that read fails too.
-  await requireCurrent();
-
-  const { requestTimeoutMs } = deps.authHeaderTimeouts;
-  const token = await deps
-    .tokenProvider(environment, { requestTimeoutMs, account })
-    .getAccessToken();
-
-  await requireCurrent();
-
-  return token;
-}
-
-/**
  * Claude Code `headersHelper`, and kizen's `KIZEN_AUTH_HELPER` (bound with `--business` and
- * `--user`). Failures print one stderr line and nothing to stdout.
+ * `--user`). Bound, it serves that saved account from its own file, current or not, so it's never
+ * another account's token; unbound, the current account. It never reads `APPBUILDER_BUSINESS`, so
+ * a headersHelper always follows the current account. Failures print one stderr line and nothing
+ * to stdout.
  */
 export const runAuthHeader: AuthCommand<AuthHeaderCommandOptions> = async (options, deps) => {
   let line: string;
@@ -798,10 +885,12 @@ export const runAuthHeader: AuthCommand<AuthHeaderCommandOptions> = async (optio
     const account = boundAccount(options);
     const environment = await headerEnvironment(options.env, deps);
     const { requestTimeoutMs } = deps.authHeaderTimeouts;
-    const token =
-      account === undefined
-        ? await deps.tokenProvider(environment, { requestTimeoutMs }).getAccessToken()
-        : await boundAccountToken(environment, account, deps);
+    const token = await deps
+      .tokenProvider(environment, {
+        requestTimeoutMs,
+        ...(account !== undefined && { account }),
+      })
+      .getAccessToken();
 
     line = `${JSON.stringify({ Authorization: `Bearer ${token}` })}\n`;
   } catch (error) {

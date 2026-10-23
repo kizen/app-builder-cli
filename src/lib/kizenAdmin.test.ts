@@ -1,6 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi, type Mock } from 'vitest';
 import type { Environment } from './credentials.js';
 import {
@@ -12,7 +15,13 @@ import {
   type SpawnKizen,
 } from './kizenAdmin.js';
 import type { KizenInstall } from './kizenVenv.js';
-import type { OAuthSession } from './oauthStore.js';
+import {
+  createOAuthStore,
+  type OAuthAccount,
+  type OAuthSession,
+  type SavedAccount,
+} from './oauthStore.js';
+import { ACCOUNT_A, ACCOUNT_B, oauthSession, signIn } from '../test/oauth.js';
 
 const BUSINESS_ID = '11111111-1111-4111-8111-111111111111';
 const USER_ID = '22222222-2222-4222-8222-222222222222';
@@ -48,6 +57,10 @@ interface FakeAdminDeps extends AdminDeps {
   store: {
     listSessions: Mock<() => Promise<Environment[]>>;
     readSession: Mock<(environment: Environment) => Promise<OAuthSession | null>>;
+    readAccount: Mock<
+      (environment: Environment, account: OAuthAccount) => Promise<OAuthSession | null>
+    >;
+    listAccounts: Mock<(environment: Environment) => Promise<SavedAccount[]>>;
   };
   ensureKizen: Mock<AdminDeps['ensureKizen']>;
   spawn: Mock<SpawnKizen>;
@@ -103,6 +116,8 @@ function fakeDeps(
       readSession: vi.fn((environment: Environment) =>
         Promise.resolve(options.signedIn === false ? null : session(environment)),
       ),
+      readAccount: vi.fn(() => Promise.resolve(null)),
+      listAccounts: vi.fn(() => Promise.resolve([])),
     },
     ensureKizen: vi.fn(() => Promise.resolve(INSTALL)),
     spawn,
@@ -184,6 +199,30 @@ describe('parseAdminArgs', () => {
     ],
     [['--env'], { kind: 'error', message: "option '--env <env>' argument missing" }],
     [['--env='], { kind: 'error', message: "option '--env <env>' argument missing" }],
+    [
+      ['--business', 'Acme', '--user', USER_ID, 'status'],
+      { kind: 'run', env: undefined, business: 'Acme', user: USER_ID, args: ['status'] },
+    ],
+    [
+      ['--user=u', '--env=go', '--business=b', '--', '--business', 'x'],
+      { kind: 'run', env: 'go', business: 'b', user: 'u', args: ['--business', 'x'] },
+    ],
+    [['--business', 'b', 'init'], { kind: 'init', force: false }],
+    // After the first kizen argument, --business and --user are kizen's, verbatim.
+    [
+      ['status', '--business', 'x', '--user', 'y'],
+      { kind: 'run', env: undefined, args: ['status', '--business', 'x', '--user', 'y'] },
+    ],
+    [
+      ['--business'],
+      { kind: 'error', message: "option '--business <id-or-name>' argument missing" },
+    ],
+    [
+      ['--business=', 'status'],
+      { kind: 'error', message: "option '--business <id-or-name>' argument missing" },
+    ],
+    [['--user'], { kind: 'error', message: "option '--user <userId>' argument missing" }],
+    [['--user='], { kind: 'error', message: "option '--user <userId>' argument missing" }],
   ])('%j', (args, expected) => {
     expect(parseAdminArgs(args)).toStrictEqual(expected);
   });
@@ -541,5 +580,172 @@ describe('runAdmin', () => {
     ]);
     expect(deps.setExitCode).toHaveBeenCalledWith(1);
     expect(deps.ensureKizen).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAdmin with a named saved account', () => {
+  /**
+   * A real store with account A current and B ("Bravo") saved but not current; `run` gets deps
+   * whose store is it.
+   */
+  const withAccounts = async (
+    run: (
+      deps: AdminDeps & FakeAdminDeps,
+      stderr: string[],
+      store: ReturnType<typeof createOAuthStore>,
+    ) => Promise<void>,
+    processEnv: Record<string, string> = { PATH: '/usr/bin' },
+  ): Promise<void> => {
+    const dir = await mkdtemp(join(tmpdir(), 'appbuilder-admin-'));
+
+    try {
+      const store = createOAuthStore(dir);
+
+      await store.writeSession(oauthSession({ ...ACCOUNT_B, businessName: 'Bravo' }));
+      await signIn(store, oauthSession());
+
+      const { deps, stderr } = fakeDeps({ processEnv });
+
+      await run({ ...deps, store } as unknown as AdminDeps & FakeAdminDeps, stderr, store);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  const boundTo = (account: OAuthAccount): Record<string, string> => ({
+    KIZEN_AUTH_HELPER: `/usr/local/bin/node /opt/appbuilder/dist/index.js auth-header --env staging --business ${account.businessId} --user ${account.userId}`,
+    KIZEN_BASE_URL: 'https://staging.kizen.com',
+    KIZEN_BUSINESS_ID: account.businessId,
+    KIZEN_USER_ID: account.userId,
+  });
+
+  it("--business binds kizen to that account while another is current, and later --business is kizen's", async () => {
+    await withAccounts(async (deps, stderr, store) => {
+      await runAdmin(['--business', 'bravo', '--', 'status', '--business', 'x'], deps);
+
+      expect(stderr).toStrictEqual([]);
+
+      const { args, options } = spawnCall(deps);
+
+      expect(args).toStrictEqual([INSTALL.kizen, 'status', '--business', 'x']);
+      expect(options.env).toStrictEqual({ PATH: '/usr/bin', ...boundTo(ACCOUNT_B) });
+      // The pointer never moves.
+      expect(await store.readSession('staging')).toMatchObject(ACCOUNT_A);
+    });
+  });
+
+  it('without --env, --business finds its environment when nothing is current', async () => {
+    await withAccounts(async (deps, stderr, store) => {
+      await store.signOut('staging');
+
+      await runAdmin(['--business', 'bravo', 'status'], deps);
+
+      expect(stderr).toStrictEqual([]);
+      expect(spawnCall(deps).options.env).toStrictEqual({
+        PATH: '/usr/bin',
+        ...boundTo(ACCOUNT_B),
+      });
+      expect(await store.listSessions()).toStrictEqual([]);
+    });
+  });
+
+  it('with --env, --business binds kizen to that account when nothing is current', async () => {
+    await withAccounts(async (deps, stderr, store) => {
+      await store.signOut('staging');
+
+      await runAdmin(['--env', 'staging', '--business', 'bravo', 'status'], deps);
+
+      expect(stderr).toStrictEqual([]);
+      expect(spawnCall(deps).options.env).toStrictEqual({
+        PATH: '/usr/bin',
+        ...boundTo(ACCOUNT_B),
+      });
+      expect(await store.listSessions()).toStrictEqual([]);
+    });
+  });
+
+  it('without --env, a name saved in staging and go asks for --env', async () => {
+    await withAccounts(async (deps, stderr, store) => {
+      await store.writeSession(
+        oauthSession({ ...ACCOUNT_B, environment: 'go', businessName: 'Bravo' }),
+      );
+
+      await runAdmin(['--business', 'bravo', 'status'], deps);
+
+      expect(stderr).toStrictEqual([
+        'appbuilder admin: --business bravo matches saved accounts in several environments; pass --env <env>: go, staging\n',
+      ]);
+      expect(deps.ensureKizen).not.toHaveBeenCalled();
+      expect(deps.spawn).not.toHaveBeenCalled();
+    });
+  });
+
+  it('--business after the first kizen argument leaves kizen on the current account', async () => {
+    await withAccounts(async (deps) => {
+      await runAdmin(['status', '--business', 'bravo'], deps);
+
+      const { args, options } = spawnCall(deps);
+
+      expect(args).toStrictEqual([INSTALL.kizen, 'status', '--business', 'bravo']);
+      expect(options.env).toMatchObject(boundTo(ACCOUNT_A));
+    });
+  });
+
+  it.each<[string, Record<string, string>, string[], OAuthAccount]>([
+    ['APPBUILDER_BUSINESS names it', { APPBUILDER_BUSINESS: 'Bravo' }, ['status'], ACCOUNT_B],
+    [
+      '--business beats APPBUILDER_BUSINESS',
+      { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+      ['--business', ACCOUNT_A.businessId, 'status'],
+      ACCOUNT_A,
+    ],
+    [
+      'an empty APPBUILDER_BUSINESS counts as unset',
+      { APPBUILDER_BUSINESS: '' },
+      ['status'],
+      ACCOUNT_A,
+    ],
+  ])('%s', async (_name, env, args, expected) => {
+    await withAccounts(
+      async (deps) => {
+        await runAdmin(args, deps);
+
+        expect(spawnCall(deps).options.env).toMatchObject(boundTo(expected));
+      },
+      { PATH: '/usr/bin', ...env },
+    );
+  });
+
+  it.each<[string, Record<string, string>, string[], string]>([
+    [
+      'a name no saved account matches',
+      {},
+      ['--business', 'Nope', 'status'],
+      `appbuilder admin: No saved staging account matches --business Nope. Saved accounts:\n  Acme A (${ACCOUNT_A.businessId}) ada@a.test\n  Bravo (${ACCOUNT_B.businessId}) ada@a.test\n`,
+    ],
+    [
+      'APPBUILDER_USER without APPBUILDER_BUSINESS',
+      { APPBUILDER_USER: ACCOUNT_B.userId },
+      ['status'],
+      'appbuilder admin: APPBUILDER_USER only applies with APPBUILDER_BUSINESS.\n',
+    ],
+    [
+      '--user without --business',
+      {},
+      ['--user', ACCOUNT_B.userId, 'status'],
+      'appbuilder admin: --user only applies with --business.\n',
+    ],
+  ])('%s: no provisioning, no spawn, exit 1', async (_name, env, args, line) => {
+    await withAccounts(
+      async (deps, stderr) => {
+        await runAdmin(args, deps);
+
+        expect(stderr).toStrictEqual([line]);
+        expect(deps.ensureKizen).not.toHaveBeenCalled();
+        expect(deps.spawn).not.toHaveBeenCalled();
+        expect(deps.setExitCode).toHaveBeenCalledWith(1);
+      },
+      { PATH: '/usr/bin', ...env },
+    );
   });
 });
