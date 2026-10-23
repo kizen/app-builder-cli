@@ -279,6 +279,322 @@ describe('whoami', () => {
     expect(h.exitCodes).toStrictEqual([1, 1]);
     expect(h.fetchMock).not.toHaveBeenCalled();
   });
+
+  describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APPBUILDER_USER)', () => {
+    const B_ACCESS = 'secret-b-access';
+    const B_SESSION = session('staging', {
+      ...ACCOUNT_B,
+      businessName: 'Bravo',
+      email: 'bea@b.test',
+      accessToken: B_ACCESS,
+    });
+    const IDENTITY_A: KizenIdentity = {
+      ...ACCOUNT_A,
+      businessName: 'Acme A',
+      fullName: 'Ada A',
+      email: 'ada@a.test',
+    };
+    const IDENTITY_B: KizenIdentity = {
+      ...ACCOUNT_B,
+      businessName: 'Bravo',
+      fullName: 'Bea B',
+      email: 'bea@b.test',
+    };
+    /** Bootstrap answers for whichever account's token is presented. */
+    const kizen = (_url: string, auth: string | undefined): Response =>
+      auth === `Bearer ${ACCESS}`
+        ? jsonResponse(bootstrapFor(IDENTITY_A))
+        : auth === `Bearer ${B_ACCESS}`
+          ? jsonResponse(bootstrapFor(IDENTITY_B))
+          : jsonResponse({ detail: 'unexpected' }, 401);
+
+    /** B saved, A current. */
+    const savedBCurrentA = async (): Promise<void> => {
+      await store.writeSession(B_SESSION);
+      await signIn(store, session('staging'));
+    };
+
+    const pointer = async (): Promise<OAuthSession | null> => store.readSession('staging');
+
+    it.each<[string, Record<string, string | undefined>, Record<string, string>, OAuthAccount]>([
+      [
+        '--business by name names a saved account that is not current',
+        {},
+        { business: 'bravo' },
+        ACCOUNT_B,
+      ],
+      [
+        'APPBUILDER_BUSINESS beats the current account',
+        { APPBUILDER_BUSINESS: BIZ_B },
+        {},
+        ACCOUNT_B,
+      ],
+      [
+        '--business beats APPBUILDER_BUSINESS',
+        { APPBUILDER_BUSINESS: BIZ_B, APPBUILDER_USER: USER_B },
+        { business: BIZ_A },
+        ACCOUNT_A,
+      ],
+      [
+        'APPBUILDER_BUSINESS with APPBUILDER_USER',
+        { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: USER_B },
+        {},
+        ACCOUNT_B,
+      ],
+    ])('%s', async (_name, processEnv, flags, expected) => {
+      await savedBCurrentA();
+
+      const h = harness(kizen, { processEnv });
+
+      await runWhoami({ env: 'staging', ...flags }, h.deps);
+
+      expect(h.exitCodes).toStrictEqual([]);
+      expect(h.stdout.join('')).toContain(
+        `Business: ${expected === ACCOUNT_B ? 'Bravo' : 'Acme A'} (${expected.businessId})`,
+      );
+      expect(h.providerOptions).toStrictEqual([{ account: expected }]);
+      // Naming an account never moves the pointer.
+      expect(await pointer()).toMatchObject(ACCOUNT_A);
+    });
+
+    it.each([
+      ['without a name, the current account', {}],
+      ['an empty APPBUILDER_BUSINESS counts as unset', { APPBUILDER_BUSINESS: '' }],
+      ['an empty APPBUILDER_USER counts as unset', { APPBUILDER_USER: '' }],
+    ])('%s', async (_name, processEnv) => {
+      await savedBCurrentA();
+
+      const h = harness(kizen, { processEnv });
+
+      await runWhoami({ env: 'staging' }, h.deps);
+
+      expect(h.exitCodes).toStrictEqual([]);
+      expect(h.stdout.join('')).toContain(`Business: Acme A (${BIZ_A})`);
+      expect(h.providerOptions).toStrictEqual([{}]);
+    });
+
+    it.each<[string, Record<string, string>, Record<string, string>, string]>([
+      ['--user without --business', {}, { user: USER_B }, '--user only applies with --business.'],
+      [
+        'APPBUILDER_USER without APPBUILDER_BUSINESS',
+        { APPBUILDER_USER: USER_B },
+        {},
+        'APPBUILDER_USER only applies with APPBUILDER_BUSINESS.',
+      ],
+      [
+        'APPBUILDER_USER with an empty APPBUILDER_BUSINESS',
+        { APPBUILDER_BUSINESS: '', APPBUILDER_USER: USER_B },
+        {},
+        'APPBUILDER_USER only applies with APPBUILDER_BUSINESS.',
+      ],
+    ])('%s is a usage error', async (_name, processEnv, flags, message) => {
+      await savedBCurrentA();
+
+      const h = harness(kizen, { processEnv });
+
+      await runWhoami({ env: 'staging', ...flags }, h.deps);
+
+      expect(h.stderr).toStrictEqual([`Error: ${message}\n`]);
+      expect(h.exitCodes).toStrictEqual([1]);
+      expect(h.stdout).toStrictEqual([]);
+      expect(h.fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a name that matches no saved account lists them and never uses the current one', async () => {
+      await savedBCurrentA();
+
+      for (const [processEnv, flags, subject] of [
+        [{}, { business: 'Nope' }, '--business Nope'],
+        [{ APPBUILDER_BUSINESS: 'Nope' }, {}, 'APPBUILDER_BUSINESS=Nope'],
+      ] as const) {
+        const h = harness(kizen, { processEnv });
+
+        await runWhoami({ env: 'staging', ...flags }, h.deps);
+
+        expect(h.stderr).toStrictEqual([
+          `Error: No saved staging account matches ${subject}. Saved accounts:\n  Acme A (${BIZ_A}) ada@a.test\n  Bravo (${BIZ_B}) bea@b.test\n`,
+        ]);
+        expect(h.exitCodes).toStrictEqual([1]);
+        expect(h.stdout).toStrictEqual([]);
+        expect(h.providerOptions).toStrictEqual([]);
+        expect(h.fetchMock).not.toHaveBeenCalled();
+      }
+    });
+
+    it('a name that matches several saved users of one business asks for the user', async () => {
+      await store.writeSession(B_SESSION);
+      await store.writeSession(session('staging', { userId: USER_A2, email: 'zed@a.test' }));
+      await signIn(store, session('staging'));
+
+      const byFlag = harness(kizen);
+
+      await runWhoami({ env: 'staging', business: 'acme a' }, byFlag.deps);
+
+      expect(byFlag.stderr).toStrictEqual([
+        `Error: --business 'acme a' matches several saved staging users of the same business. Pass --user too, for example \`--business ${BIZ_A} --user ${USER_A}\`:\n  --user ${USER_A}: Acme A (${BIZ_A}) ada@a.test\n  --user ${USER_A2}: Acme A (${BIZ_A}) zed@a.test\n`,
+      ]);
+
+      const byEnv = harness(kizen, { processEnv: { APPBUILDER_BUSINESS: BIZ_A } });
+
+      await runWhoami({ env: 'staging' }, byEnv.deps);
+
+      expect(byEnv.stderr).toStrictEqual([
+        `Error: APPBUILDER_BUSINESS=${BIZ_A} matches several saved staging users of the same business. Set APPBUILDER_USER too, for example \`APPBUILDER_BUSINESS=${BIZ_A} APPBUILDER_USER=${USER_A}\`:\n  APPBUILDER_USER=${USER_A}: Acme A (${BIZ_A}) ada@a.test\n  APPBUILDER_USER=${USER_A2}: Acme A (${BIZ_A}) zed@a.test\n`,
+      ]);
+
+      for (const h of [byFlag, byEnv]) {
+        expect(h.exitCodes).toStrictEqual([1]);
+        expect(h.providerOptions).toStrictEqual([]);
+        expect(h.fetchMock).not.toHaveBeenCalled();
+      }
+    });
+
+    it('a name that matches several businesses lists them', async () => {
+      await store.writeSession(session('staging', { ...ACCOUNT_B, businessName: 'Acme A' }));
+      await signIn(store, session('staging'));
+
+      const h = harness(kizen);
+
+      await runWhoami({ env: 'staging', business: 'Acme A' }, h.deps);
+
+      expect(h.stderr.join('')).toContain(
+        "--business 'Acme A' matches several saved staging accounts. Pass one of these business ids instead:",
+      );
+      expect(h.exitCodes).toStrictEqual([1]);
+      expect(h.fetchMock).not.toHaveBeenCalled();
+
+      const byEnv = harness(kizen, { processEnv: { APPBUILDER_BUSINESS: 'Acme A' } });
+
+      await runWhoami({ env: 'staging' }, byEnv.deps);
+
+      expect(byEnv.stderr).toStrictEqual([
+        `Error: APPBUILDER_BUSINESS='Acme A' matches several saved staging accounts. Set APPBUILDER_BUSINESS to one of these business ids instead:\n  Acme A (${BIZ_A}) ada@a.test\n  Acme A (${BIZ_B}) ada@a.test\n`,
+      ]);
+      expect(byEnv.fetchMock).not.toHaveBeenCalled();
+    });
+
+    describe('without --env, the environment is the only one where the name is saved, current or not', () => {
+      /** B saved in `environment`. */
+      const saveB = (environment: Environment): Promise<void> =>
+        store.writeSession({ ...B_SESSION, environment });
+
+      const run = async (
+        flags: Record<string, string>,
+        processEnv: Record<string, string> = {},
+      ): Promise<Harness> => {
+        const h = harness(kizen, { processEnv });
+
+        await runWhoami(flags, h.deps);
+
+        return h;
+      };
+
+      const expectServedB = (h: Harness, environment: Environment): void => {
+        expect(h.stderr).toStrictEqual([]);
+        expect(h.stdout.join('')).toContain(`Environment: ${environment}\n`);
+        expect(h.stdout.join('')).toContain(`Business: Bravo (${BIZ_B})`);
+        expect(h.providerOptions).toStrictEqual([{ account: ACCOUNT_B }]);
+      };
+
+      const expectRefused = (h: Harness, line: string): void => {
+        expect(h.stderr).toStrictEqual([`Error: ${line}\n`]);
+        expect(h.exitCodes).toStrictEqual([1]);
+        expect(h.providerOptions).toStrictEqual([]);
+        expect(h.fetchMock).not.toHaveBeenCalled();
+      };
+
+      it('nothing current, saved only in staging: uses staging', async () => {
+        await savedBCurrentA();
+        expect(await store.signOut('staging')).toBe(true);
+        expect(await store.listSessions()).toStrictEqual([]);
+
+        expectServedB(await run({ business: 'Bravo' }), 'staging');
+        expectServedB(await run({}, { APPBUILDER_BUSINESS: 'Bravo' }), 'staging');
+        expect(await store.listSessions()).toStrictEqual([]);
+      });
+
+      it('current in staging, saved only in go: uses go', async () => {
+        await signIn(store, session('staging'));
+        await saveB('go');
+
+        expectServedB(await run({ business: 'Bravo' }), 'go');
+      });
+
+      it('current in two environments, saved in one of them: uses that one', async () => {
+        await signIn(store, session('staging'));
+        await signIn(store, session('integration'));
+        await saveB('integration');
+
+        expectServedB(await run({ business: 'Bravo' }), 'integration');
+      });
+
+      it('saved in staging and go: asks for --env, naming them', async () => {
+        await signIn(store, session('staging'));
+        await saveB('staging');
+        await saveB('go');
+
+        const h = await run({ business: 'Bravo' });
+
+        expectRefused(
+          h,
+          '--business Bravo matches saved accounts in several environments; pass --env <env>: go, staging',
+        );
+        expect(h.stderr.join('')).not.toContain('signed-in');
+        expectRefused(
+          await run({}, { APPBUILDER_BUSINESS: 'Bravo' }),
+          'APPBUILDER_BUSINESS=Bravo matches saved accounts in several environments; pass --env <env>: go, staging',
+        );
+      });
+
+      it('a name that matches nowhere resolves the environment as without a name, then lists its accounts', async () => {
+        await savedBCurrentA();
+
+        expectRefused(
+          await run({ business: 'Nope' }),
+          `No saved staging account matches --business Nope. Saved accounts:\n  Acme A (${BIZ_A}) ada@a.test\n  Bravo (${BIZ_B}) bea@b.test`,
+        );
+      });
+
+      it('a name that matches nowhere, with saved accounts in staging but none current, lists them', async () => {
+        await savedBCurrentA();
+        expect(await store.signOut('staging')).toBe(true);
+        expect(await store.listSessions()).toStrictEqual([]);
+
+        expectRefused(
+          await run({ business: 'Nope' }),
+          `No saved staging account matches --business Nope. Saved accounts:\n  Bravo (${BIZ_B}) bea@b.test`,
+        );
+      });
+
+      it('a name that matches nowhere, with saved accounts in several environments, asks for --env', async () => {
+        await saveB('staging');
+        await saveB('go');
+
+        expectRefused(
+          await run({ business: 'Nope' }),
+          "You're signed in to several environments; pass --env <env>: go, staging",
+        );
+      });
+
+      it('a name that matches nowhere with nothing signed in is not signed in', async () => {
+        const h = await run({ business: 'Nope' });
+
+        expect(h.stderr.join('')).toContain("You're not signed in.");
+        expect(h.exitCodes).toStrictEqual([1]);
+        expect(h.fetchMock).not.toHaveBeenCalled();
+      });
+
+      it("a corrupt pointer or account file in another environment doesn't stop it", async () => {
+        await signIn(store, session('staging'));
+        await saveB('staging');
+        await signIn(store, session('integration'));
+        await writeFile(store.sessionPath('integration'), '{"businessId": "trunc');
+        await writeFile(store.accountPath('integration', ACCOUNT_A), '{"accessToken": "tr');
+
+        expectServedB(await run({ business: 'Bravo' }), 'staging');
+      });
+    });
+  });
 });
 
 describe('logout', () => {
@@ -1677,7 +1993,7 @@ describe('auth-header', () => {
       ]);
     });
 
-    it('fails closed, naming the mismatch, after a switch to another account', async () => {
+    it("serves that account's token while another account is current", async () => {
       await signIn(store, session('staging'));
       // Another terminal switches staging to account B while kizen still holds A's ids.
       await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
@@ -1686,41 +2002,18 @@ describe('auth-header', () => {
 
       await runAuthHeader(bound, h.deps);
 
-      expectHeaderFailure(h);
-      expect(h.stderr).toStrictEqual([
-        `appbuilder auth-header: --business ${BIZ_A} --user ${USER_A} isn't the current staging account (the current account is business ${BIZ_B}, user ${USER_B}), so auth-header won't send its token. Run the command again.\n`,
-      ]);
+      expect(h.stdout).toStrictEqual([header(ACCESS)]);
+      expect(h.stderr).toStrictEqual([]);
+      expect(h.exitCodes).toStrictEqual([]);
       expect(h.all()).not.toContain(B_ACCESS);
-      // It fails before reading (or refreshing) any token.
-      expect(h.providerOptions).toStrictEqual([]);
-      expect(h.fetchMock).not.toHaveBeenCalled();
-    });
-
-    it('fails closed after a switch that lands while the token is being read', async () => {
-      await signIn(store, session('staging'));
-
-      const h = harness(noKizen);
-      const provider = h.deps.tokenProvider;
-
-      h.deps.tokenProvider = (environment, providerOpts) => {
-        const inner = provider(environment, providerOpts);
-
-        return {
-          ...inner,
-          getAccessToken: async () => {
-            const token = await inner.getAccessToken();
-
-            await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
-
-            return token;
-          },
-        };
-      };
-
-      await runAuthHeader(bound, h.deps);
-
-      expectHeaderFailure(h, "isn't the current staging account (the current account is business");
-      expect(h.providerOptions).toHaveLength(1);
+      expect(h.providerOptions).toStrictEqual([
+        { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS, account: ACCOUNT_A },
+      ]);
+      // B stays current.
+      expect(await store.readSession('staging')).toMatchObject({
+        ...ACCOUNT_B,
+        accessToken: B_ACCESS,
+      });
     });
 
     it('fails closed when nobody is signed in to the environment any more', async () => {
@@ -1734,18 +2027,17 @@ describe('auth-header', () => {
       expectHeaderFailure(h, 'appbuilder auth-header: ');
     });
 
-    it('fails closed when the account is saved but not current', async () => {
+    it("fails closed once that account is signed out, even while another account's token is there", async () => {
       await signIn(store, session('staging'));
       await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
-
-      // A's file is still saved, so its token could be read: the pointer check is what refuses.
-      expect(await store.readAccount('staging', ACCOUNT_A)).not.toBeNull();
+      await store.removeAccount('staging', ACCOUNT_A);
 
       const h = harness(noKizen);
 
       await runAuthHeader(bound, h.deps);
 
-      expectHeaderFailure(h, "isn't the current staging account");
+      expectHeaderFailure(h, "appbuilder auth-header: You're not signed in to staging.");
+      expect(h.all()).not.toContain(B_ACCESS);
     });
 
     it.each([[{ business: BIZ_A }], [{ user: USER_A }]])('refuses %j alone', async (partial) => {
@@ -1762,11 +2054,13 @@ describe('auth-header', () => {
       expect(h.providerOptions).toStrictEqual([]);
     });
 
-    it('without the flags, serves the current account as before, after a switch too', async () => {
+    it('without the flags, serves the current account as before, after a switch too, whatever APPBUILDER_BUSINESS says', async () => {
       await signIn(store, session('staging'));
       await signIn(store, session('staging', { ...ACCOUNT_B, accessToken: B_ACCESS }));
 
-      const h = harness(noKizen);
+      const h = harness(noKizen, {
+        processEnv: { APPBUILDER_BUSINESS: BIZ_A, APPBUILDER_USER: USER_A },
+      });
 
       await runAuthHeader({ env: 'staging' }, h.deps);
 

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import type * as FsPromisesModule from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +38,51 @@ import {
 const AUTHORIZE = `${ISSUER}/discovered/authorize`;
 const REGISTER = `${ISSUER}/discovered/register`;
 
+/**
+ * `pauseRename`: the next `rename` onto a path it matches waits on `gate` first, a pause inside an
+ * atomic write just before it lands. `onCreateTaken` sees each exclusive create that finds its
+ * path taken: a waiter on a lock.
+ */
+const hooks = vi.hoisted(() => ({
+  pauseRename: undefined as
+    | { matches: (to: string) => boolean; reached: () => void; gate: Promise<void> }
+    | undefined,
+  onCreateTaken: undefined as ((path: string) => void) | undefined,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof FsPromisesModule>();
+  const rename = async (...args: Parameters<typeof fs.rename>): Promise<void> => {
+    const pause = hooks.pauseRename;
+
+    if (pause?.matches(String(args[1])) === true) {
+      hooks.pauseRename = undefined;
+      pause.reached();
+      await pause.gate;
+    }
+
+    return fs.rename(...args);
+  };
+
+  const open = async (
+    ...args: Parameters<typeof fs.open>
+  ): Promise<FsPromisesModule.FileHandle> => {
+    try {
+      return await fs.open(...args);
+    } catch (err) {
+      if (args[1] === 'wx' && (err as { code?: unknown }).code === 'EEXIST') {
+        hooks.onCreateTaken?.(String(args[0]));
+      }
+
+      throw err;
+    }
+  };
+
+  const mocked = { ...fs, rename, open };
+
+  return { ...mocked, default: mocked };
+});
+
 let dir: string;
 let store: OAuthStore;
 
@@ -46,6 +92,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  hooks.pauseRename = undefined;
+  hooks.onCreateTaken = undefined;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -213,7 +261,6 @@ const provider = (
     ...overrides,
   });
 
-const SIGN_IN_CHANGED = 'The staging sign-in changed while this command was running. Run it again.';
 const NOT_SIGNED_IN =
   "You're not signed in to staging. Run `appbuilder login --env staging` to sign in.";
 
@@ -632,17 +679,29 @@ describe('createTokenProvider', () => {
       expect(await readdir(store.dir)).toStrictEqual([]);
     });
 
-    it.each([
-      [
-        "a refresh that completes after a switch to another account doesn't overwrite it",
-        undefined,
-      ],
-      [
-        'a refresh that gets invalid_grant after a switch to another account does not delete it',
-        INVALID_GRANT,
-      ],
-    ])('%s', async (_name, respond) => {
-      const { pending, release, server } = await heldRefresh(respond);
+    it('a refresh that completes after a switch to another account saves only the pinned account', async () => {
+      const { pending, release, server } = await heldRefresh();
+
+      await signIn(createOAuthStore(dir), LOGIN_B);
+      release();
+
+      // The command keeps acting as A, and A's own file holds the new pair.
+      await expect(pending).resolves.toBe('access-1');
+      expect(await store.readAccount('staging', ACCOUNT_A)).toMatchObject({
+        ...ACCOUNT_A,
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+      });
+      // B's file and the pointer are exactly as the switch left them.
+      expect(await store.readAccount('staging', ACCOUNT_B)).toStrictEqual(LOGIN_B);
+      expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+        ACCOUNT_B,
+      );
+      expect(server.tokenRequests()).toHaveLength(1);
+    });
+
+    it('a refresh that gets invalid_grant after a switch to another account deletes only the pinned account', async () => {
+      const { pending, release, server } = await heldRefresh(INVALID_GRANT);
 
       await signIn(createOAuthStore(dir), LOGIN_B);
       release();
@@ -650,8 +709,12 @@ describe('createTokenProvider', () => {
       const error = await rejectionOf(pending);
 
       expect(error.code).toBe('login_required');
-      expect(error.message).toBe(SIGN_IN_CHANGED);
+      expect(error.message).toContain('is no longer valid');
+      expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
       expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+      expect(JSON.parse(await readFile(store.sessionPath('staging'), 'utf-8'))).toStrictEqual(
+        ACCOUNT_B,
+      );
       expect(server.tokenRequests()).toHaveLength(1);
     });
 
@@ -772,7 +835,7 @@ describe('createTokenProvider', () => {
 
     /** Starts a refresh of login A through `held`'s store; resolves once it is held. */
     const refreshUntilHeld = async (
-      method: 'writeSession' | 'deleteSession',
+      method: 'commitRefresh' | 'deleteSession',
       respond?: Parameters<typeof fakeAuthServer>[0],
     ): Promise<{ pending: Promise<string>; release: () => void }> => {
       await signIn(store, oauthSession({ expiresAt: EXPIRING }));
@@ -787,7 +850,7 @@ describe('createTokenProvider', () => {
     };
 
     it("a refresh that writes after another account becomes current doesn't replace it", async () => {
-      const { pending, release } = await refreshUntilHeld('writeSession');
+      const { pending, release } = await refreshUntilHeld('commitRefresh');
       const b = await loginB();
 
       release();
@@ -826,6 +889,69 @@ describe('createTokenProvider', () => {
       });
       expect(await store.readSession('staging')).toStrictEqual(b);
     });
+  });
+
+  describe('a logout while a refresh is paused just before its write lands', () => {
+    it.each([
+      ['signOut', (logout: OAuthStore) => logout.signOut('staging')],
+      ['removeAccount', (logout: OAuthStore) => logout.removeAccount('staging', ACCOUNT_A)],
+      ['signOutAll', (logout: OAuthStore) => logout.signOutAll('staging')],
+    ])(
+      'a logout (%s) of the account wins: its file stays gone and it can no longer be used',
+      async (_name, logout) => {
+        await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+        const accountFile = store.accountPath('staging', ACCOUNT_A);
+        const writing = deferred();
+        const gate = deferred();
+        const logoutWaits = deferred();
+
+        // Pause the refresh's final write after its last re-read, just before the rename.
+        hooks.pauseRename = {
+          matches: (to) => to === accountFile,
+          reached: () => {
+            writing.resolve();
+          },
+          gate: gate.promise,
+        };
+        hooks.onCreateTaken = (path) => {
+          if (path.endsWith('.lock')) {
+            logoutWaits.resolve();
+          }
+        };
+
+        const tokens = provider(fakeAuthServer());
+        const pending = tokens.getAccessToken();
+
+        pending.catch(() => undefined);
+        await writing.promise;
+
+        // Another terminal logs out of the account: it completes, or waits on the refresh's lock.
+        const loggingOut = logout(createOAuthStore(dir));
+
+        await Promise.race([loggingOut, logoutWaits.promise]);
+        gate.resolve();
+        await loggingOut;
+
+        // The command got the token it was issued before the logout...
+        await expect(pending).resolves.toBe('access-1');
+        // ...but the account file stays gone, so nothing serves it from here on.
+        await expect(stat(accountFile)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+        expect(await store.readSession('staging')).toBeNull();
+
+        const error = await rejectionOf(tokens.getAccessToken());
+
+        expect(error.code).toBe('login_required');
+        expect(error.message).toBe(NOT_SIGNED_IN);
+        expect(
+          (await rejectionOf(provider(fakeAuthServer(), { account: ACCOUNT_A }).getAccessToken()))
+            .message,
+        ).toBe(NOT_SIGNED_IN);
+        // No lock file or temp file is left behind.
+        expect(await readdir(store.dir)).toStrictEqual([]);
+      },
+    );
   });
 
   describe('two processes refreshing at once', () => {
@@ -941,28 +1067,29 @@ describe('createTokenProvider', () => {
     );
   });
 
-  it('switching to another account aborts a running command with sign-in changed', async () => {
+  it('a switch to another account after the first read keeps serving the pinned account', async () => {
     await signIn(store, oauthSession());
 
     const server = fakeAuthServer();
     const tokens = provider(server);
 
     await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+    await signIn(store, LOGIN_B);
 
-    const newLogin = oauthSession({ ...ACCOUNT_B, accessToken: 'access-b' });
-
-    await signIn(store, newLogin);
-
-    const error = await rejectionOf(tokens.getAccessToken());
-
-    expect(error.code).toBe('login_required');
-    expect(error.message).toBe(SIGN_IN_CHANGED);
-    expect(error.message).not.toContain('access-b');
-    // A 401 retry is refused the same way, without touching the new login.
-    expect((await rejectionOf(tokens.refreshAccessToken('access-0'))).code).toBe('login_required');
-    expect(server.fetch).not.toHaveBeenCalled();
-    expect(await store.readSession('staging')).toStrictEqual(newLogin);
-    // A provider created after the new login serves it.
+    // Still A's token, from A's own file, never B's.
+    await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+    // A 401 refreshes A, writing only A's file.
+    await expect(tokens.refreshAccessToken('access-0')).resolves.toBe('access-1');
+    await expect(tokens.getAccessToken()).resolves.toBe('access-1');
+    expect(server.tokenRequests().map((params) => params.get('refresh_token'))).toStrictEqual([
+      'refresh-0',
+    ]);
+    expect(await store.readAccount('staging', ACCOUNT_A)).toMatchObject({
+      accessToken: 'access-1',
+      refreshToken: 'refresh-1',
+    });
+    expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
+    // A provider created after the switch serves B.
     await expect(provider(server).getAccessToken()).resolves.toBe('access-b');
   });
 
@@ -974,7 +1101,107 @@ describe('createTokenProvider', () => {
     await expect(tokens.getAccessToken()).resolves.toBe('access-0');
     await signIn(store, oauthSession({ userId: ACCOUNT_B.userId, accessToken: 'access-other' }));
 
-    expect((await rejectionOf(tokens.getAccessToken())).message).toBe(SIGN_IN_CHANGED);
+    await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+  });
+
+  it('reads that start together before the first one settles all pin the same account', async () => {
+    await signIn(store, oauthSession());
+
+    // The first pointer read finds A and is then held; any other pointer read waits and reads
+    // after the switch below, so it would find B.
+    const gate = deferred();
+    let pointerReads = 0;
+    const counting: OAuthStore = {
+      ...store,
+      readSession: async (environment) => {
+        pointerReads += 1;
+
+        if (pointerReads === 1) {
+          const session = await store.readSession(environment);
+
+          await gate.promise;
+
+          return session;
+        }
+
+        await gate.promise;
+
+        return store.readSession(environment);
+      },
+    };
+    const tokens = provider(fakeAuthServer(), { store: counting });
+    const first = tokens.getAccessToken();
+    const second = tokens.getAccessToken();
+
+    await vi.waitFor(() => {
+      expect(pointerReads).toBe(1);
+    });
+    await signIn(store, LOGIN_B);
+    gate.resolve();
+
+    await expect(Promise.all([first, second])).resolves.toStrictEqual(['access-0', 'access-0']);
+    await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+    expect(pointerReads).toBe(1);
+  });
+
+  it('a first pointer read that throws pins nothing: a later read goes through the pointer', async () => {
+    await signIn(store, oauthSession());
+
+    let pointerReads = 0;
+    const flaky: OAuthStore = {
+      ...store,
+      readSession: (environment) => {
+        pointerReads += 1;
+
+        return pointerReads === 1
+          ? Promise.reject(new Error('EIO: transient read failure'))
+          : store.readSession(environment);
+      },
+    };
+    const tokens = provider(fakeAuthServer(), { store: flaky });
+
+    await expect(tokens.getAccessToken()).rejects.toThrow('EIO: transient read failure');
+    // Meanwhile B becomes current: the next read pins B, not A.
+    await signIn(store, LOGIN_B);
+    await expect(tokens.getAccessToken()).resolves.toBe('access-b');
+    expect(pointerReads).toBe(2);
+    // Pinned now: a switch back doesn't move it.
+    await signIn(store, oauthSession());
+    await expect(tokens.getAccessToken()).resolves.toBe('access-b');
+    expect(pointerReads).toBe(2);
+  });
+
+  it('a first pointer read that finds nobody signed in pins nothing: a later sign-in is served', async () => {
+    const tokens = provider(fakeAuthServer());
+    const error = await rejectionOf(tokens.getAccessToken());
+
+    expect(error.code).toBe('login_required');
+    expect(error.message).toBe(NOT_SIGNED_IN);
+
+    await signIn(store, LOGIN_B);
+    await expect(tokens.getAccessToken()).resolves.toBe('access-b');
+    await signIn(store, oauthSession());
+    await expect(tokens.getAccessToken()).resolves.toBe('access-b');
+  });
+
+  it('a logout of the pinned account stops the command even after a switch to another account', async () => {
+    await signIn(store, oauthSession());
+
+    const tokens = provider(fakeAuthServer());
+
+    await expect(tokens.getAccessToken()).resolves.toBe('access-0');
+    await signIn(store, LOGIN_B);
+    expect(await store.removeAccount('staging', ACCOUNT_A)).toStrictEqual({
+      removed: true,
+      current: false,
+    });
+
+    const error = await rejectionOf(tokens.getAccessToken());
+
+    expect(error.code).toBe('login_required');
+    expect(error.message).toBe(NOT_SIGNED_IN);
+    expect((await rejectionOf(tokens.refreshAccessToken('access-0'))).message).toBe(NOT_SIGNED_IN);
+    expect(await store.readSession('staging')).toStrictEqual(LOGIN_B);
   });
 
   it("re-login to the same account doesn't abort a running command", async () => {

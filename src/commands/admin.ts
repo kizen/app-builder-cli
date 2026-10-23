@@ -63,8 +63,21 @@ export function adminCommand(program: Command): void {
   const admin = new RawArgsCommand(ADMIN)
     .copyInheritedSettings(program)
     .description("Run Kizen's admin CLI (kizen) with the signed-in session")
-    .usage('[--env <env>] [--] <kizen args...>\n       appbuilder admin init [--force]')
-    .option('--env <env>', 'environment to use (default: the only signed-in one)')
+    .usage(
+      '[--env <env>] [--business <id-or-name> [--user <userId>]] [--] <kizen args...>\n       appbuilder admin init [--force]',
+    )
+    .option(
+      '--env <env>',
+      "environment to use (default: the only signed-in one, or with --business the only one where it's saved)",
+    )
+    .option(
+      '--business <id-or-name>',
+      'use this saved account, by business id or name (ignoring case), instead of the current one (default: $APPBUILDER_BUSINESS)',
+    )
+    .option(
+      '--user <userId>',
+      'with --business, use the saved account of this user id (default: $APPBUILDER_USER)',
+    )
     .allowExcessArguments()
     .addHelpText(
       'after',

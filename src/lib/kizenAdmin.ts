@@ -8,12 +8,17 @@
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { constants } from 'node:os';
 import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
+import type { AccountFlags } from './authSelection.js';
 import type { Environment } from './credentials.js';
 import { errorMessage } from './guards.js';
 import type { KizenInstall } from './kizenVenv.js';
 import { loginRequired } from './oauth.js';
-import { resolveSessionEnvironment } from './oauthSession.js';
-import type { OAuthAccount, OAuthStore } from './oauthStore.js';
+import {
+  resolveAccountEnvironment,
+  requireAccountRequest,
+  requireNamedAccount,
+} from './oauthCommands.js';
+import type { OAuthAccount, OAuthSession, OAuthStore } from './oauthStore.js';
 import { quoteArg } from './shellArg.js';
 
 export const ADMIN_PREFIX = 'appbuilder admin';
@@ -23,44 +28,59 @@ export type AdminInvocation =
   | { kind: 'help' }
   | { kind: 'init'; force: boolean }
   | { kind: 'init-help' }
-  | { kind: 'run'; env: string | undefined; args: string[] }
+  | ({ kind: 'run'; env: string | undefined; args: string[] } & AccountFlags)
   | { kind: 'error'; message: string };
 
-const ENV_FLAG = '--env';
+/** The wrapper's options that take a value: the flag, and its usage for a missing argument. */
+const VALUE_FLAGS = {
+  env: ['--env', '<env>'],
+  business: ['--business', '<id-or-name>'],
+  user: ['--user', '<userId>'],
+} as const;
 const HELP_FLAGS: readonly string[] = ['-h', '--help'];
 const FORCE_FLAG = '--force';
 
 /**
- * Wrapper options (`--env <env>`, `--env=<env>`, `-h`/`--help`) come first and end at the first
- * other token or at `--`; everything after goes to kizen verbatim. `init` is the wrapper's own
- * subcommand only as the first token after the wrapper options, never after `--`.
+ * Wrapper options (`--env <env>`, `--business <id-or-name>`, `--user <userId>`, each also as
+ * `--flag=<value>`, and `-h`/`--help`) come first and end at the first other token or at `--`;
+ * everything after goes to kizen verbatim. `init` is the wrapper's own subcommand only as the
+ * first token after the wrapper options, never after `--`.
  */
 export function parseAdminArgs(args: readonly string[]): AdminInvocation {
-  let env: string | undefined;
+  const values: { env?: string } & AccountFlags = {};
   let index = 0;
+  const run = (rest: string[]): AdminInvocation => ({
+    kind: 'run',
+    env: values.env,
+    ...(values.business !== undefined && { business: values.business }),
+    ...(values.user !== undefined && { user: values.user }),
+    args: rest,
+  });
 
-  while (index < args.length) {
+  options: while (index < args.length) {
     const arg = args[index] ?? '';
 
     if (arg === '--') {
-      return { kind: 'run', env, args: args.slice(index + 1) };
+      return run(args.slice(index + 1));
     }
 
     if (HELP_FLAGS.includes(arg)) {
       return { kind: 'help' };
     }
 
-    if (arg === ENV_FLAG || arg.startsWith(`${ENV_FLAG}=`)) {
-      const value = arg === ENV_FLAG ? args[index + 1] : arg.slice(ENV_FLAG.length + 1);
+    for (const [key, [flag, usage]] of Object.entries(VALUE_FLAGS)) {
+      if (arg === flag || arg.startsWith(`${flag}=`)) {
+        const value = arg === flag ? args[index + 1] : arg.slice(flag.length + 1);
 
-      if (value === undefined || value === '') {
-        return { kind: 'error', message: "option '--env <env>' argument missing" };
+        if (value === undefined || value === '') {
+          return { kind: 'error', message: `option '${flag} ${usage}' argument missing` };
+        }
+
+        values[key as keyof typeof VALUE_FLAGS] = value;
+        index += arg === flag ? 2 : 1;
+
+        continue options;
       }
-
-      env = value;
-      index += arg === ENV_FLAG ? 2 : 1;
-
-      continue;
     }
 
     break;
@@ -89,17 +109,17 @@ export function parseAdminArgs(args: readonly string[]): AdminInvocation {
     };
   }
 
-  return { kind: 'run', env, args: rest };
+  return run(rest);
 }
 
 /**
  * The `KIZEN_AUTH_HELPER` command: this CLI's `auth-header --env <env> --business <id> --user <id>`,
- * bound to the account kizen was given its ids for, so after a switch to another account it fails
- * rather than hand kizen that account's token. kizen caches the header for the life of its process
- * and runs the helper again only after a 401 (`kizen_builder/auth_helper.py`), so a switch makes
- * kizen's next token fetch fail (at startup, or after a 401), while a token it already holds,
- * which is still its own account's, stays in use until it expires. Run by the same node and
- * script, with each word POSIX-quoted so kizen's `shlex.split` gets them back exactly.
+ * bound to the account kizen was given its ids for. It serves that account from its own file
+ * whether or not it's current, so a switch to another account meanwhile neither stops kizen nor
+ * hands it the other account's token; a logout of that account makes the next token fetch fail.
+ * kizen caches the header for the life of its process and runs the helper again only after a 401
+ * (`kizen_builder/auth_helper.py`). Run by the same node and script, with each word POSIX-quoted
+ * so kizen's `shlex.split` gets them back exactly.
  */
 export const kizenAuthHelper = (
   execPath: string,
@@ -244,7 +264,7 @@ export function runKizen(
 }
 
 export interface AdminDeps {
-  store: Pick<OAuthStore, 'listSessions' | 'readSession'>;
+  store: Pick<OAuthStore, 'listSessions' | 'readSession' | 'readAccount' | 'listAccounts'>;
   /**
    * The provisioner `admin init` and every `admin` run share (`ensureKizen`). `force` (only from
    * `admin init --force`) removes the install first.
@@ -284,19 +304,36 @@ export async function runAdminInit(deps: AdminDeps, force = false): Promise<void
   deps.writeStderr(`${ADMIN_PREFIX}: kizen ${install.version} is ready in ${install.dir}.\n`);
 }
 
-/** The signed-in session's kizen variables, or why there's none. Never reads a token. */
+/**
+ * The kizen variables of the account `--business` / `--user` (or `APPBUILDER_BUSINESS` /
+ * `APPBUILDER_USER`) name, else of the current account, or why there's none. Never reads a token.
+ * A name that matches no saved account, or several, throws.
+ */
 async function sessionEnv(
-  env: string | undefined,
+  invocation: { env: string | undefined } & AccountFlags,
   deps: AdminDeps,
 ): Promise<{ ok: true; session: KizenSessionEnv } | { ok: false; message: string }> {
-  const resolved = await resolveSessionEnvironment(env, () => deps.store.listSessions());
+  const request = requireAccountRequest(invocation, deps.processEnv);
+  const resolved = await resolveAccountEnvironment(invocation.env, request, deps.store);
 
   if (!resolved.ok) {
     return { ok: false, message: resolved.message };
   }
 
   const { environment } = resolved;
-  const session = await deps.store.readSession(environment);
+  let session: OAuthSession | null;
+
+  if (request === undefined) {
+    session = await deps.store.readSession(environment);
+  } else {
+    const account = requireNamedAccount(
+      environment,
+      await deps.store.listAccounts(environment),
+      request,
+    );
+
+    session = await deps.store.readAccount(environment, account);
+  }
 
   if (session === null) {
     return {
@@ -320,7 +357,10 @@ async function sessionEnv(
   };
 }
 
-/** `appbuilder admin [--env <env>] [--] <kizen args…>` and `appbuilder admin init`. */
+/**
+ * `appbuilder admin [--env <env>] [--business <id-or-name> [--user <userId>]] [--] <kizen args…>`
+ * and `appbuilder admin init`.
+ */
 export async function runAdmin(args: readonly string[], deps: AdminDeps): Promise<void> {
   const invocation = parseAdminArgs(args);
 
@@ -349,7 +389,7 @@ export async function runAdmin(args: readonly string[], deps: AdminDeps): Promis
   let resolved: Awaited<ReturnType<typeof sessionEnv>>;
 
   try {
-    resolved = await sessionEnv(invocation.env, deps);
+    resolved = await sessionEnv(invocation, deps);
   } catch (error) {
     fail(deps, errorMessage(error));
 

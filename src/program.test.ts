@@ -41,6 +41,22 @@ vi.mock('./lib/kizenAdmin.js', async (importOriginal) => {
               businessId: '11111111-1111-4111-8111-111111111111',
               userId: '22222222-2222-4222-8222-222222222222',
             } as never),
+          readAccount: (_environment, account) => Promise.resolve(account as never),
+          listAccounts: (environment) =>
+            Promise.resolve(
+              environment !== 'staging'
+                ? []
+                : [
+                    {
+                      account: {
+                        businessId: '11111111-1111-4111-8111-111111111111',
+                        userId: '22222222-2222-4222-8222-222222222222',
+                      },
+                      session: undefined,
+                      current: true,
+                    },
+                  ],
+            ),
         },
         ensureKizen: () => {
           admin.provisioned += 1;
@@ -148,9 +164,9 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
   block: [],
   login: ['--env <env>', '--business <id-or-name>', '--user <userId>', '--list', '--json'],
   logout: ['--env <env>', '--all', '--business <id-or-name>', '--user <userId>'],
-  whoami: ['--env <env>'],
+  whoami: ['--env <env>', '--business <id-or-name>', '--user <userId>'],
   'auth-header': ['--env <env>', '--business <id>', '--user <userId>'],
-  admin: ['--env <env>'],
+  admin: ['--env <env>', '--business <id-or-name>', '--user <userId>'],
 };
 
 const BLOCK_PUSH_FLAGS = [
@@ -166,6 +182,8 @@ const BLOCK_PUSH_FLAGS = [
   '--forget',
   '--json',
   '--env <env>',
+  '--business <id-or-name>',
+  '--user <userId>',
 ];
 
 const BLOCK_TARGETS_FLAGS = [
@@ -174,6 +192,8 @@ const BLOCK_TARGETS_FLAGS = [
   '--object <id>',
   '--json',
   '--env <env>',
+  '--business <id-or-name>',
+  '--user <userId>',
 ];
 
 function subcommand(program: Command, name: string): Command {
@@ -397,6 +417,8 @@ describe('block command', () => {
       'forget',
       'json',
       'env',
+      'business',
+      'user',
     ]);
     expect(attributeNames('targets')).toStrictEqual([
       'credentials',
@@ -404,6 +426,8 @@ describe('block command', () => {
       'object',
       'json',
       'env',
+      'business',
+      'user',
     ]);
   });
 
@@ -532,6 +556,20 @@ describe('admin command', () => {
       ['--env=staging', 'x', '--', 'y'],
       ['x', '--', 'y'],
     ],
+    [
+      ['--business', '11111111-1111-4111-8111-111111111111', 'status', '--business', 'go'],
+      ['status', '--business', 'go'],
+    ],
+    [
+      [
+        '--user=22222222-2222-4222-8222-222222222222',
+        '--business=11111111-1111-4111-8111-111111111111',
+        '--',
+        '--user',
+        'x',
+      ],
+      ['--user', 'x'],
+    ],
     [['--', '--help'], ['--help']],
     [['--', '--version'], ['--version']],
     [
@@ -570,7 +608,9 @@ describe('admin command', () => {
     expect(() => program.parse(['help', 'admin'], { from: 'user' })).toThrow(
       expect.objectContaining({ code: 'commander.help' }),
     );
-    expect(out).toContain('Usage: appbuilder admin [--env <env>] [--] <kizen args...>');
+    expect(out).toContain(
+      'Usage: appbuilder admin [--env <env>] [--business <id-or-name> [--user <userId>]] [--] <kizen args...>',
+    );
     expect(out).toContain('--env <env>');
     expect(admin.provisioned).toBe(0);
     expect(admin.spawned).toStrictEqual([]);
@@ -589,7 +629,7 @@ describe('admin command', () => {
     command.configureHelp({ helpWidth: 100 });
 
     expect(command.helpInformation()).toContain(
-      'Usage: appbuilder admin [--env <env>] [--] <kizen args...>\n       appbuilder admin init',
+      'Usage: appbuilder admin [--env <env>] [--business <id-or-name> [--user <userId>]] [--] <kizen args...>\n       appbuilder admin init',
     );
   });
 });
