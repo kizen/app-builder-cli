@@ -309,10 +309,11 @@ export interface TokenProviderDeps extends TokenProviderOptions {
 
 /**
  * Refreshes with under a minute left or after a 401. In-process refreshes share one promise.
- * Across processes nothing is locked: Kizen hands a refresh token presented again within its
- * grace window the same pair, and refuses it with invalid_grant after that without revoking
- * anything. So each refresh re-reads the session before acting on a failure or writing, and keeps
- * a peer's rotation rather than overwriting it or signing out.
+ * Across processes the token request isn't locked: Kizen hands a refresh token presented again
+ * within its grace window the same pair, and refuses it with invalid_grant after that without
+ * revoking anything. So each refresh re-reads the session before acting on a failure, and writes
+ * through `commitRefresh`, which re-reads under the account's lock (the one logout's delete takes)
+ * and keeps a peer's rotation, or a logout, rather than overwriting it or signing out.
  *
  * Pinned to one account (business and user): `account`, else the current account at the first
  * read, which is the only read through the store's pointer. Every later read is of the pinned
@@ -418,8 +419,9 @@ export function createTokenProvider(
         }
 
         // Only this account's file, so a logout or a switch to another account meanwhile is
-        // untouched. A same-account peer write (a refresh, or a sign-in again) landing between the
-        // re-read above and this unlink is lost; the cost is a re-login.
+        // untouched. The delete takes the account's lock, so it never lands inside a peer's
+        // commit, but doesn't re-check: a same-account peer write (a refresh, or a sign-in again)
+        // landing between the re-read above and this unlink is lost; the cost is a re-login.
         const deleted = await deps.store.deleteSession(environment, current);
 
         // Best effort, and only this session's client: a login meanwhile may have registered a
@@ -442,20 +444,20 @@ export function createTokenProvider(
 
     const next = withTokens(current, tokens, deps.now());
 
-    // Writes only this account's own file, never the pointer, so a logout or a switch to another
-    // account can't be undone or replaced by it, whenever it lands. The re-read is for a
-    // same-account peer: a logout of this account makes it throw, and a peer's rotation or a
-    // sign-in again to this account is kept (this command still uses the token it was issued).
-    // What's left is a peer writing between this re-read and the rename, which this write
-    // overwrites: a peer rotation holds the same pair within Kizen's 300s grace window (beyond it
-    // the cost is a re-login), and tokens from a sign-in again are replaced by this grant's, which Kizen
-    // still accepts. A write landing after a logout of this account leaves it saved but not
-    // current. The deletes above are likewise scoped to this account's file. Vault entry:
+    // Writes only this account's own file, never the pointer, so a switch to another account
+    // can't be undone or replaced by it, whenever it lands. The commit re-reads that file under
+    // the account's lock, which every logout's delete of it takes too (not across the request
+    // above): a logout of this account, before the commit or waiting on it, leaves the file gone,
+    // and this command signed out from its next read on. A peer's rotation or a sign-in again to
+    // this account is kept (this command still uses the token it was issued). What's left is a
+    // peer that writes without the lock, a sign-in again, landing between the commit's read and
+    // its rename, which this write overwrites: its tokens are replaced by this grant's, which
+    // Kizen still accepts. And when the lock isn't acquired in time, the commit goes ahead
+    // without it, racing as it would unlocked. The deletes above are likewise scoped to this
+    // account's file. Vault entry:
     // cli-oauth-via-kizen-dcr-what-webapp-supports-the-app-builder-poc-design-and-its-gotchas
-    const { rotated } = await reread();
-
-    if (!rotated) {
-      await deps.store.writeSession(next);
+    if ((await deps.store.commitRefresh(next, current.refreshToken)) === 'gone') {
+      throw notSignedIn(environment);
     }
 
     return next.accessToken;

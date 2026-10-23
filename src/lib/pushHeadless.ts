@@ -58,6 +58,7 @@ import {
   type TargetMatch,
 } from './pushBlock.js';
 import {
+  accountRequest,
   notSignedInWithApiKeyHint,
   pinnedProfileNotice,
   selectAuth,
@@ -1230,13 +1231,25 @@ function writeResult(output: Output, result: unknown, text: string, jsonText = t
   }
 }
 
-/** `--business` / `--user` as passed, for the commands a choice prints. */
-const accountArgs = (options: AuthFlags): string[] => [
-  ...(options.business === undefined ? [] : ['--business', options.business]),
-  ...(options.user === undefined ? [] : ['--user', options.user]),
-];
+/**
+ * The account the run asked for (`--business` / `--user`, else `APPBUILDER_BUSINESS` /
+ * `APPBUILDER_USER`), as flags for the commands a choice prints: a one-command variable
+ * assignment doesn't survive being copied. Empty when no account was named, or the request is
+ * invalid (that run already failed with the usage error).
+ */
+const accountArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
+  const result = accountRequest(options, processEnv);
 
-const credentialArgs = (options: AuthFlags): string[] => {
+  if (!result.ok || result.request === undefined) {
+    return [];
+  }
+
+  const { business, user } = result.request;
+
+  return ['--business', business, ...(user === undefined ? [] : ['--user', user])];
+};
+
+const credentialArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
   if (options.credentials !== undefined) {
     return ['-c', options.credentials];
   }
@@ -1245,7 +1258,10 @@ const credentialArgs = (options: AuthFlags): string[] => {
     return ['--profile', options.profile];
   }
 
-  return [...(options.env === undefined ? [] : ['--env', options.env]), ...accountArgs(options)];
+  return [
+    ...(options.env === undefined ? [] : ['--env', options.env]),
+    ...accountArgs(options, processEnv),
+  ];
 };
 
 const writeNotices = (deps: PushDeps, notices: readonly string[]): void => {
@@ -1272,14 +1288,14 @@ export async function runPushHeadless(
   let blockArgs = apiName === undefined ? [] : [apiName];
   const choiceArgs: ChoiceArgs = (choice, kind) => {
     if (kind === 'environment') {
-      return [...blockArgs, ...choice.args, ...accountArgs(options)];
+      return [...blockArgs, ...choice.args, ...accountArgs(options, deps.processEnv)];
     }
 
     if (kind === 'block') {
-      return [...choice.args, ...credentialArgs(options)];
+      return [...choice.args, ...credentialArgs(options, deps.processEnv)];
     }
 
-    return [...blockArgs, ...credentialArgs(options), ...choice.args];
+    return [...blockArgs, ...credentialArgs(options, deps.processEnv), ...choice.args];
   };
 
   const fail = (result: PushFailure): void => {
@@ -1512,7 +1528,7 @@ export async function runTargetsHeadless(
   const objectArgs = options.object === undefined ? [] : ['--object', options.object];
   const choiceArgs: ChoiceArgs = (choice) => [
     ...choice.args,
-    ...accountArgs(options),
+    ...accountArgs(options, deps.processEnv),
     ...objectArgs,
   ];
   const fail = (result: PushFailure): void => {

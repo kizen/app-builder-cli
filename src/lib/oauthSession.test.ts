@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import type * as FsPromisesModule from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -37,6 +38,51 @@ import {
 const AUTHORIZE = `${ISSUER}/discovered/authorize`;
 const REGISTER = `${ISSUER}/discovered/register`;
 
+/**
+ * `pauseRename`: the next `rename` onto a path it matches waits on `gate` first, a pause inside an
+ * atomic write just before it lands. `onCreateTaken` sees each exclusive create that finds its
+ * path taken: a waiter on a lock.
+ */
+const hooks = vi.hoisted(() => ({
+  pauseRename: undefined as
+    | { matches: (to: string) => boolean; reached: () => void; gate: Promise<void> }
+    | undefined,
+  onCreateTaken: undefined as ((path: string) => void) | undefined,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const fs = await importOriginal<typeof FsPromisesModule>();
+  const rename = async (...args: Parameters<typeof fs.rename>): Promise<void> => {
+    const pause = hooks.pauseRename;
+
+    if (pause?.matches(String(args[1])) === true) {
+      hooks.pauseRename = undefined;
+      pause.reached();
+      await pause.gate;
+    }
+
+    return fs.rename(...args);
+  };
+
+  const open = async (
+    ...args: Parameters<typeof fs.open>
+  ): Promise<FsPromisesModule.FileHandle> => {
+    try {
+      return await fs.open(...args);
+    } catch (err) {
+      if (args[1] === 'wx' && (err as { code?: unknown }).code === 'EEXIST') {
+        hooks.onCreateTaken?.(String(args[0]));
+      }
+
+      throw err;
+    }
+  };
+
+  const mocked = { ...fs, rename, open };
+
+  return { ...mocked, default: mocked };
+});
+
 let dir: string;
 let store: OAuthStore;
 
@@ -46,6 +92,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  hooks.pauseRename = undefined;
+  hooks.onCreateTaken = undefined;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -787,7 +835,7 @@ describe('createTokenProvider', () => {
 
     /** Starts a refresh of login A through `held`'s store; resolves once it is held. */
     const refreshUntilHeld = async (
-      method: 'writeSession' | 'deleteSession',
+      method: 'commitRefresh' | 'deleteSession',
       respond?: Parameters<typeof fakeAuthServer>[0],
     ): Promise<{ pending: Promise<string>; release: () => void }> => {
       await signIn(store, oauthSession({ expiresAt: EXPIRING }));
@@ -802,7 +850,7 @@ describe('createTokenProvider', () => {
     };
 
     it("a refresh that writes after another account becomes current doesn't replace it", async () => {
-      const { pending, release } = await refreshUntilHeld('writeSession');
+      const { pending, release } = await refreshUntilHeld('commitRefresh');
       const b = await loginB();
 
       release();
@@ -841,6 +889,69 @@ describe('createTokenProvider', () => {
       });
       expect(await store.readSession('staging')).toStrictEqual(b);
     });
+  });
+
+  describe('a logout while a refresh is paused just before its write lands', () => {
+    it.each([
+      ['signOut', (logout: OAuthStore) => logout.signOut('staging')],
+      ['removeAccount', (logout: OAuthStore) => logout.removeAccount('staging', ACCOUNT_A)],
+      ['signOutAll', (logout: OAuthStore) => logout.signOutAll('staging')],
+    ])(
+      'a logout (%s) of the account wins: its file stays gone and it can no longer be used',
+      async (_name, logout) => {
+        await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+        const accountFile = store.accountPath('staging', ACCOUNT_A);
+        const writing = deferred();
+        const gate = deferred();
+        const logoutWaits = deferred();
+
+        // Pause the refresh's final write after its last re-read, just before the rename.
+        hooks.pauseRename = {
+          matches: (to) => to === accountFile,
+          reached: () => {
+            writing.resolve();
+          },
+          gate: gate.promise,
+        };
+        hooks.onCreateTaken = (path) => {
+          if (path.endsWith('.lock')) {
+            logoutWaits.resolve();
+          }
+        };
+
+        const tokens = provider(fakeAuthServer());
+        const pending = tokens.getAccessToken();
+
+        pending.catch(() => undefined);
+        await writing.promise;
+
+        // Another terminal logs out of the account: it completes, or waits on the refresh's lock.
+        const loggingOut = logout(createOAuthStore(dir));
+
+        await Promise.race([loggingOut, logoutWaits.promise]);
+        gate.resolve();
+        await loggingOut;
+
+        // The command got the token it was issued before the logout...
+        await expect(pending).resolves.toBe('access-1');
+        // ...but the account file stays gone, so nothing serves it from here on.
+        await expect(stat(accountFile)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+        expect(await store.readSession('staging')).toBeNull();
+
+        const error = await rejectionOf(tokens.getAccessToken());
+
+        expect(error.code).toBe('login_required');
+        expect(error.message).toBe(NOT_SIGNED_IN);
+        expect(
+          (await rejectionOf(provider(fakeAuthServer(), { account: ACCOUNT_A }).getAccessToken()))
+            .message,
+        ).toBe(NOT_SIGNED_IN);
+        // No lock file or temp file is left behind.
+        expect(await readdir(store.dir)).toStrictEqual([]);
+      },
+    );
   });
 
   describe('two processes refreshing at once', () => {

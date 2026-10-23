@@ -119,12 +119,13 @@ export interface HeldStore {
 }
 
 /**
- * `store` with `method` held: a call waits for `release()` before it runs, so a test can land a
- * logout or a switch to another account between a refresh's last check and its mutation.
+ * `store` with `method` held: a call waits for `release()` before it runs (for `commitRefresh`,
+ * before it takes the account lock), so a test can land a logout or a switch to another account
+ * between a refresh's last check and its mutation.
  */
 export const holdingStore = (
   store: OAuthStore,
-  method: 'writeSession' | 'deleteSession',
+  method: 'commitRefresh' | 'deleteSession',
 ): HeldStore => {
   const reached = deferred();
   const released = deferred();
@@ -135,12 +136,13 @@ export const holdingStore = (
 
   return {
     store:
-      method === 'writeSession'
+      method === 'commitRefresh'
         ? {
             ...store,
-            writeSession: async (session) => {
+            commitRefresh: async (session, spentRefreshToken) => {
               await hold();
-              await store.writeSession(session);
+
+              return store.commitRefresh(session, spentRefreshToken);
             },
           }
         : {

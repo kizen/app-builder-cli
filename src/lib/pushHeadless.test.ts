@@ -2634,6 +2634,109 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
       `appbuilder block push ${BLOCK} --env staging --business Bravo --user ${ACCOUNT_B.userId}`,
     );
   });
+
+  describe('the printed commands name the requested account as flags', () => {
+    const A_USER = 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1';
+    const run = (
+      command: 'push' | 'targets',
+      flags: PushCommandOptions,
+      deps: PushDeps,
+    ): Promise<void> =>
+      command === 'push' ? runPushHeadless(BLOCK, flags, deps) : runTargetsHeadless(flags, deps);
+
+    // A one-command `APPBUILDER_BUSINESS=… appbuilder …` doesn't persist, so a copied command
+    // needs the account as flags.
+    it.each<[string, 'push' | 'targets', Record<string, string>, PushCommandOptions, string]>([
+      [
+        'push after APPBUILDER_BUSINESS',
+        'push',
+        { APPBUILDER_BUSINESS: 'Bravo' },
+        {},
+        `appbuilder block push ${BLOCK} --env staging --business Bravo\n`,
+      ],
+      [
+        'push after APPBUILDER_BUSINESS and APPBUILDER_USER',
+        'push',
+        { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        {},
+        `appbuilder block push ${BLOCK} --env staging --business Bravo --user ${ACCOUNT_B.userId}\n`,
+      ],
+      [
+        'push with --business over the variables',
+        'push',
+        { APPBUILDER_BUSINESS: 'Acme', APPBUILDER_USER: A_USER },
+        { business: 'Bravo' },
+        `appbuilder block push ${BLOCK} --env staging --business Bravo\n`,
+      ],
+      [
+        'targets after APPBUILDER_BUSINESS',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Bravo' },
+        {},
+        'appbuilder block targets --env staging --business Bravo\n',
+      ],
+      [
+        'targets after APPBUILDER_BUSINESS and APPBUILDER_USER',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        {},
+        `appbuilder block targets --env staging --business Bravo --user ${ACCOUNT_B.userId}\n`,
+      ],
+      [
+        'targets with --business over the variables',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Acme', APPBUILDER_USER: A_USER },
+        { business: 'Bravo' },
+        'appbuilder block targets --env staging --business Bravo\n',
+      ],
+    ])('environment choice: %s', async (_name, command, processEnv, flags, expected) => {
+      const oauth = oauthDeps(['staging', 'integration']);
+
+      // Saved in both environments.
+      oauth.listAccounts.mockImplementation((environment: Environment) =>
+        Promise.resolve(environment === 'staging' || environment === 'integration' ? ACCOUNTS : []),
+      );
+
+      const harness = makeHarness({ deps: { oauth, processEnv } });
+
+      await run(command, flags, harness.deps);
+
+      const err = harness.stderr.join('');
+
+      expect(err).toContain('Choices:');
+      expect(err).toContain(`staging  →  ${expected}`);
+      // Business and user come from one source: the variables' Acme user never joins Bravo.
+      expect(err).not.toContain('Acme');
+      expect(err).not.toContain(A_USER);
+      expect(oauth.connect).not.toHaveBeenCalled();
+    });
+
+    it('a dashboard choice after APPBUILDER_BUSINESS and APPBUILDER_USER', async () => {
+      const fake = makeClient({
+        summaries: { generic_dashboard: [summary()] },
+        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'other' })] })],
+      });
+      const oauth = oauthDeps(['staging'], fake);
+
+      oauth.listAccounts.mockImplementation((environment: Environment) =>
+        Promise.resolve(environment === 'staging' ? ACCOUNTS : []),
+      );
+
+      const harness = makeHarness({
+        fake,
+        deps: {
+          oauth,
+          processEnv: { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        },
+      });
+
+      await runPushHeadless(BLOCK, {}, harness.deps);
+
+      expect(harness.stderr.join('')).toContain(
+        `Sales  →  appbuilder block push ${BLOCK} --business Bravo --user ${ACCOUNT_B.userId} --dashboard D1\n`,
+      );
+    });
+  });
 });
 
 describe('the sign-in session is the default', () => {
