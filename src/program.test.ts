@@ -111,7 +111,8 @@ const COMMAND_NAMES = [
 /** Every command's `--help` blurb, verbatim. */
 const COMMAND_DESCRIPTIONS: Record<string, string> = {
   create: 'Scaffold a new Kizen plugin project',
-  'setup-claude': 'Install or refresh the Claude Code skill for building custom blocks',
+  'setup-claude':
+    'Install or refresh the Claude Code files in a plugin, or with --mcp only register the Kizen MCP server',
   'setup-copilot': 'Add or refresh the Copilot code-review setup in an existing plugin repo',
   build: 'Bundle the plugin app into .kizenapp directory',
   dev: 'Start the plugin viewer dev server',

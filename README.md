@@ -122,25 +122,26 @@ As with `create`, the workflow only runs once it has reached the repository's de
 
 ### `appbuilder setup-claude`
 
-Installs or refreshes the Claude Code skill for building custom blocks (`.claude/skills/kizen-custom-block/SKILL.md`) in the plugin in the current directory. `appbuilder create` writes the skill once; run `setup-claude` in an existing plugin to add it, or after upgrading the CLI to pick up the bundled version.
+Installs or refreshes the Claude Code skill for building custom blocks (`.claude/skills/kizen-custom-block/SKILL.md`) in the plugin in the current directory. `appbuilder create` writes the skill once; run `setup-claude` in an existing plugin to add it, or after upgrading the CLI to pick up the bundled version. With `--mcp` it only registers the Kizen MCP server instead and writes no files, so it can run in any directory (see below).
 
 ```sh
-appbuilder setup-claude [--dry-run] [--include-lib] [--mcp [--env <env>] [--force]]
+appbuilder setup-claude [--dry-run] [--include-lib]
+appbuilder setup-claude --mcp [--env <env>] [--force] [--dry-run]
 ```
 
-| Flag            | Default | Purpose                                                      |
-| --------------- | ------- | ------------------------------------------------------------ |
-| `--dry-run`     | off     | Report what would change without writing files.              |
-| `--include-lib` | off     | Also install the Kizen data helper library (`kizenData.js`). |
-| `--mcp`         | off     | Also register the Kizen MCP server in Claude Code.           |
-| `--env <env>`   | `go`    | Environment of the MCP server to register.                   |
-| `--force`       | off     | Replace an existing registration of that server.             |
+| Flag            | Default | Purpose                                                                                                        |
+| --------------- | ------- | -------------------------------------------------------------------------------------------------------------- |
+| `--dry-run`     | off     | Report what would change without writing files.                                                                |
+| `--include-lib` | off     | Also install the Kizen data helper library (`kizenData.js`).                                                   |
+| `--mcp`         | off     | Only register the Kizen MCP server in Claude Code (user scope); writes no files, so it works in any directory. |
+| `--env <env>`   | `go`    | Environment of the MCP server to register.                                                                     |
+| `--force`       | off     | Replace an existing registration of that server.                                                               |
 
-`--env` and `--force` only apply with `--mcp`; see [Using the session from Claude Code](#using-the-session-from-claude-code-mcp).
+`--env` and `--force` only apply with `--mcp`, and `--mcp` can't be combined with `--include-lib`; see [Using the session from Claude Code](#using-the-session-from-claude-code-mcp).
 
 It also installs the skill's design guide (`.claude/skills/kizen-custom-block/design.md`), which tells the agent how to make blocks match native dashlets. With `--include-lib`, it installs the Kizen data helper library that block scripts import to read records and apply the dashboard's date and team filters. The library goes under the `entry` directory from `kizen.json` (`<entry>/lib/kizenData.js`, one per entry in a multi-plugin `kizen.json`), and under `src/` when `kizen.json` has no usable `entry`. Without the flag, it refreshes only the libraries that already exist. `appbuilder create --include-lib` writes it to `src/lib/kizenData.js`.
 
-It prints one line per file (`created`, `updated` or `unchanged`) and a one-line summary. These files are managed by the CLI, so local edits to them, including edits to `kizenData.js`, are replaced when they're `updated`. Don't edit `kizenData.js`; put your own helpers in another file under `src/lib/`. It only writes these files and never touches the `.github/` Copilot files or block code. It fails with exit code 1 when there's no `kizen.json` in the current directory.
+It prints one line per file (`created`, `updated` or `unchanged`) and a one-line summary. These files are managed by the CLI, so local edits to them, including edits to `kizenData.js`, are replaced when they're `updated`. Don't edit `kizenData.js`; put your own helpers in another file under `src/lib/`. It only writes these files and never touches the `.github/` Copilot files or block code. Without `--mcp`, it fails with exit code 1 when there's no `kizen.json` in the current directory.
 
 `block push` adds the warning `Claude files managed by appbuilder are out of date; run appbuilder setup-claude` when the plugin has the skill and the skill or its design guide is missing or differs from the bundled one, or an existing `kizenData.js` differs from the bundled one. The warning never fails the push.
 
@@ -508,14 +509,14 @@ A session file that is corrupt or can't be read isn't treated as "not signed in"
 
 Kizen's MCP server at `/api/mcp` accepts the same session. As a Claude Code `headersHelper`, `appbuilder auth-header` prints `{"Authorization":"Bearer <access token>"}` as one line on stdout, refreshing the token first if it's about to expire.
 
-To set it up, run these from a plugin directory:
+To set it up, run these from any directory:
 
 ```sh
 npx @kizenapps/cli setup-claude --mcp --env staging
 npx @kizenapps/cli login --env staging
 ```
 
-`setup-claude --mcp` installs the skill files as usual, then registers the server `kizen-<env>` at user scope by running `claude mcp add-json` (`--dry-run` only prints that command). The helper is pinned to the version of the CLI you ran it with. For CLI version 1.16.0, for example, it's equivalent to this POSIX-shell command:
+`setup-claude --mcp` only registers the server `kizen-<env>` at user scope, by running `claude mcp add-json` (`--dry-run` only prints that command). It writes no files, in a plugin directory or anywhere else. The helper is pinned to the version of the CLI you ran it with. For CLI version 1.16.0, for example, it's equivalent to this POSIX-shell command:
 
 ```sh
 claude mcp add-json --scope user kizen-staging '{"type":"http","url":"https://staging.kizen.com/api/mcp","headersHelper":"npx -y @kizenapps/cli@1.16.0 auth-header"}'
@@ -525,7 +526,7 @@ claude mcp add-json --scope user kizen-staging '{"type":"http","url":"https://st
 - `--force` only replaces the user-scope server. A server with the same name at local or project scope (for example, one you added by hand without `--scope user`) takes precedence over it in that project. Remove that one with `claude mcp remove kizen-<env>` (run in the project) if you want the user-scope server there.
 - If the `claude` command isn't installed, it prints this command for you to run instead, and still succeeds.
 - If you aren't signed in to that environment yet, it reminds you to run `appbuilder login` (with `--env <env>` for an environment other than `go`). If the saved session can't be read, it prints that error, with the file's path, instead. Either way the server is still registered.
-- If registering fails, the skill files stay installed and the command exits with code 1.
+- If registering fails, the command exits with code 1.
 
 The helper runs through `npx`, which reuses its cached copy of the CLI (running `setup-claude` through `npx` fills that cache), so it starts in about a second. That works when Claude Code was started from a shell with `node` on `PATH`. If it wasn't (for example, with nvm and Claude Code launched outside a terminal), use absolute paths instead, from `which node` and `which appbuilder`: `"headersHelper":"/absolute/path/to/node /absolute/path/to/appbuilder auth-header"`. `appbuilder` starts with `#!/usr/bin/env node`, so the path to `appbuilder` alone isn't enough. Use the absolute paths too when testing a local or `pnpm link` build whose version isn't published, because `npx` can't fetch that version.
 
