@@ -228,6 +228,10 @@ function usageProblem(options: SetupClaudeOptions): string | undefined {
     return '--env and --force only apply with --mcp.';
   }
 
+  if (options.mcp === true && options.includeLib === true) {
+    return "--mcp and --include-lib can't be combined. Run `appbuilder setup-claude --include-lib` and `appbuilder setup-claude --mcp` separately.";
+  }
+
   return options.env === undefined ? undefined : parseEnvironment(options.env).message;
 }
 
@@ -354,14 +358,30 @@ export async function runSetupClaude(
     return;
   }
 
+  const dryRun = options.dryRun === true;
+
+  // --mcp only registers the user-scope server and never writes files, in or out of a plugin,
+  // so running it from any directory can't rewrite a repo's managed files.
+  if (options.mcp === true) {
+    await setupMcpServer(
+      (options.env === undefined ? undefined : parseEnvironment(options.env).environment) ??
+        DEFAULT_LOGIN_ENVIRONMENT,
+      { dryRun, force: options.force === true },
+      deps,
+    );
+
+    return;
+  }
+
   if (!(await deps.fs.exists(join(dir, 'kizen.json')))) {
-    deps.error('Error: kizen.json not found. Run this command from a plugin directory.');
+    deps.error(
+      'Error: kizen.json not found. Run this command from a plugin directory, or pass --mcp to only register the MCP server.',
+    );
     deps.setExitCode(1);
 
     return;
   }
 
-  const dryRun = options.dryRun === true;
   let plan: ManagedFilePlan[];
 
   try {
@@ -390,13 +410,4 @@ export async function runSetupClaude(
       ? `Dry run: ${counts}; nothing written (${managed}).`
       : `Claude files: ${counts} (${managed}).`,
   );
-
-  if (options.mcp === true) {
-    await setupMcpServer(
-      (options.env === undefined ? undefined : parseEnvironment(options.env).environment) ??
-        DEFAULT_LOGIN_ENVIRONMENT,
-      { dryRun, force: options.force === true },
-      deps,
-    );
-  }
 }

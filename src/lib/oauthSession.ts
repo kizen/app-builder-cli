@@ -22,17 +22,9 @@ import {
   type TokenResponse,
 } from './oauth.js';
 import type { KizenIdentity } from './kizenClient.js';
-import {
-  sameAccount,
-  type OAuthAccount,
-  type OAuthSession,
-  type OAuthStore,
-} from './oauthStore.js';
+import type { OAuthAccount, OAuthSession, OAuthStore } from './oauthStore.js';
 
 const REFRESH_LEEWAY_MS = 60_000;
-
-/** Thrown when the pointer names another account than a provider is pinned to. */
-class SignInChangedError extends OAuthError {}
 
 /** `/auth/bootstrap` through `bearer`: who its tokens act as. */
 export type Identify = (bearer: BearerTokenProvider) => Promise<KizenIdentity>;
@@ -303,7 +295,8 @@ export interface TokenProviderOptions {
   fetch?: typeof fetch;
   /**
    * Serve this saved account, current or not, reading its own file instead of the pointer. Used
-   * to verify an account before switching to it; never moves the pointer.
+   * to verify an account before switching to it, and for a command that names a saved account;
+   * never moves the pointer.
    */
   account?: OAuthAccount;
 }
@@ -316,16 +309,18 @@ export interface TokenProviderDeps extends TokenProviderOptions {
 
 /**
  * Refreshes with under a minute left or after a 401. In-process refreshes share one promise.
- * Across processes nothing is locked: Kizen hands a refresh token presented again within its
- * grace window the same pair, and refuses it with invalid_grant after that without revoking
- * anything. So each refresh re-reads the session before acting on a failure or writing, and keeps
- * a peer's rotation rather than overwriting it or signing out.
+ * Across processes the token request isn't locked: Kizen hands a refresh token presented again
+ * within its grace window the same pair, and refuses it with invalid_grant after that without
+ * revoking anything. So each refresh re-reads the session before acting on a failure, and writes
+ * through `commitRefresh`, which re-reads under the account's lock (the one logout's delete takes)
+ * and keeps a peer's rotation, or a logout, rather than overwriting it or signing out.
  *
- * Pinned to the first session's account (business and user): a command resolves who it acts as
- * once, so after a switch to another account every read throws rather than hand out its tokens.
- * Signing in again to the same account doesn't: its new tokens are kept like a peer's rotation.
- * Reads go through the store's pointer (or, with `account`, that account's file); writes and
- * deletes touch only the pinned account's file, never the pointer.
+ * Pinned to one account (business and user): `account`, else the current account at the first
+ * read, which is the only read through the store's pointer. Every later read is of the pinned
+ * account's own file, so a switch to another account meanwhile doesn't change who the command acts
+ * as, and a logout of the pinned account makes the next read throw not-signed-in. Signing in again
+ * to the same account replaces its file, and its new tokens are kept like a peer's rotation.
+ * Writes and deletes touch only the pinned account's file, never the pointer.
  */
 export function createTokenProvider(
   environment: Environment,
@@ -333,30 +328,40 @@ export function createTokenProvider(
 ): BearerTokenProvider {
   let inflight: Promise<string> | undefined;
   let pinned: OAuthAccount | undefined = deps.account;
+  /** The read through the pointer that pins, shared by reads that start before it settles. */
+  let pinning: Promise<OAuthSession> | undefined;
 
   const fresh = (session: OAuthSession): boolean =>
     session.expiresAt - deps.now() > REFRESH_LEEWAY_MS;
 
-  const readOrThrow = async (): Promise<OAuthSession> => {
-    const session =
-      deps.account === undefined
-        ? await deps.store.readSession(environment)
-        : await deps.store.readAccount(environment, deps.account);
-
+  const orThrow = (session: OAuthSession | null): OAuthSession => {
     if (session === null) {
       throw notSignedIn(environment);
     }
 
-    pinned ??= { businessId: session.businessId, userId: session.userId };
+    return session;
+  };
 
-    if (!sameAccount(session, pinned)) {
-      throw new SignInChangedError(
-        'login_required',
-        `The ${environment} sign-in changed while this command was running. Run it again.`,
-      );
+  const readOrThrow = async (): Promise<OAuthSession> => {
+    if (pinned !== undefined) {
+      return orThrow(await deps.store.readAccount(environment, pinned));
     }
 
-    return session;
+    // A failed first read pins nothing, so the next read goes through the pointer again.
+    pinning ??= deps.store
+      .readSession(environment)
+      .then((session) => {
+        const current = orThrow(session);
+
+        pinned = { businessId: current.businessId, userId: current.userId };
+
+        return current;
+      })
+      .finally(() => {
+        pinning = undefined;
+      });
+
+    return pinning;
   };
 
   /**
@@ -414,8 +419,9 @@ export function createTokenProvider(
         }
 
         // Only this account's file, so a logout or a switch to another account meanwhile is
-        // untouched. A same-account peer write (a refresh, or a sign-in again) landing between the
-        // re-read above and this unlink is lost; the cost is a re-login.
+        // untouched. The delete takes the account's lock, so it never lands inside a peer's
+        // commit, but doesn't re-check: a same-account peer write (a refresh, or a sign-in again)
+        // landing between the re-read above and this unlink is lost; the cost is a re-login.
         const deleted = await deps.store.deleteSession(environment, current);
 
         // Best effort, and only this session's client: a login meanwhile may have registered a
@@ -438,39 +444,20 @@ export function createTokenProvider(
 
     const next = withTokens(current, tokens, deps.now());
 
-    // Writes only this account's own file, never the pointer, so a logout or a switch to another
-    // account can't be undone or replaced by it, whenever it lands. The re-read is for a
-    // same-account peer: a logout or a switch makes it throw, and a peer's rotation or a sign-in
-    // again to this account is kept (this command still uses the token it was issued). What's
-    // left is a peer writing between this re-read and the rename, which this write overwrites:
-    // a peer rotation holds the same pair within Kizen's 300s grace window (beyond it the cost is
-    // a re-login), and tokens from a sign-in again are replaced by this grant's, which Kizen
-    // still accepts. A write landing after a logout of this account leaves it saved but not
-    // current. The deletes above are likewise scoped to this account's file. Vault entry:
+    // Writes only this account's own file, never the pointer, so a switch to another account
+    // can't be undone or replaced by it, whenever it lands. The commit re-reads that file under
+    // the account's lock, which every logout's delete of it takes too (not across the request
+    // above): a logout of this account, before the commit or waiting on it, leaves the file gone,
+    // and this command signed out from its next read on. A peer's rotation or a sign-in again to
+    // this account is kept (this command still uses the token it was issued). What's left is a
+    // peer that writes without the lock, a sign-in again, landing between the commit's read and
+    // its rename, which this write overwrites: its tokens are replaced by this grant's, which
+    // Kizen still accepts. And when the lock isn't acquired in time, the commit goes ahead
+    // without it, racing as it would unlocked. The deletes above are likewise scoped to this
+    // account's file. Vault entry:
     // cli-oauth-via-kizen-dcr-what-webapp-supports-the-app-builder-poc-design-and-its-gotchas
-    let rotated: boolean;
-
-    try {
-      ({ rotated } = await reread());
-    } catch (err) {
-      // A switch to another account landed while the request was out. The server has already
-      // spent this account's refresh token, so its file would be useless to switch back to:
-      // save the new pair there (its own file only, and only if no peer rotated it or a logout
-      // removed it), then abort as usual.
-      if (err instanceof SignInChangedError) {
-        const own = await deps.store.readAccount(environment, current).catch(() => null);
-
-        if (own !== null && own.refreshToken === current.refreshToken) {
-          // Best effort: the error to report is the abort below.
-          await deps.store.writeSession(next).catch(() => undefined);
-        }
-      }
-
-      throw err;
-    }
-
-    if (!rotated) {
-      await deps.store.writeSession(next);
+    if ((await deps.store.commitRefresh(next, current.refreshToken)) === 'gone') {
+      throw notSignedIn(environment);
     }
 
     return next.accessToken;

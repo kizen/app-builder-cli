@@ -85,6 +85,14 @@ export function blockCommand(program: Command): void {
     .option('--forget', 'clear the remembered target for this block first')
     .option('--json', 'print a JSON result to stdout (always headless)')
     .option('--env <env>', 'environment of the `appbuilder login` session to use')
+    .option(
+      '--business <id-or-name>',
+      'use this saved account, by business id or name (ignoring case), instead of the current one (default: $APPBUILDER_BUSINESS)',
+    )
+    .option(
+      '--user <userId>',
+      'with --business, use the saved account of this user id (default: $APPBUILDER_USER)',
+    )
     .action(async (apiName: string | undefined, options: PushCommandOptions) => {
       try {
         const deps = createDefaultPushDeps(process.cwd());
@@ -124,6 +132,14 @@ export function blockCommand(program: Command): void {
     .option('--object <id>', 'list the chart groups of this custom object')
     .option('--json', 'print a JSON result to stdout')
     .option('--env <env>', 'environment of the `appbuilder login` session to use')
+    .option(
+      '--business <id-or-name>',
+      'use this saved account, by business id or name (ignoring case), instead of the current one (default: $APPBUILDER_BUSINESS)',
+    )
+    .option(
+      '--user <userId>',
+      'with --business, use the saved account of this user id (default: $APPBUILDER_USER)',
+    )
     .action(async (options: TargetsCommandOptions) => {
       try {
         await runTargetsHeadless(options, createDefaultPushDeps(process.cwd()));

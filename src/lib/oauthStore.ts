@@ -6,22 +6,39 @@
  *   oauth/                          0700
  *     <env>.json                    0600  pointer: `{ "businessId", "userId" }`, the current account
  *     <env>.<business>.<user>.json  0600  one saved account's session (tokens and labels)
+ *     <env>.<business>.<user>.lock  0600  its holder's random nonce; exists only while held
  *     clients.json                  0600  DCR client_id cache, keyed by issuer
  *
  * `<business>` and `<user>` are the account's ids, lowercase UUIDs as Kizen issues them. Each
  * account file is a saved account; the pointer picks the current one.
  *
- * Nothing is locked: every write is an atomic rename. A refresh only ever writes or deletes its
- * own account's file, and only login, a switch and logout move the pointer, so a refresh racing a
- * logout or a switch to another account can't undo it (see `createTokenProvider`). Accepted: a
- * logout racing a sign-in to the same account can delete that sign-in's new session file, leaving
- * the account signed out.
+ * Every write is an atomic rename. Only login, a switch and logout move the pointer, and a refresh
+ * only ever writes or deletes its own account's file, so it can't undo a logout of another account
+ * or a switch. Its write and a logout's unlink of that same file are serialized by the account's
+ * lock (`withLockFile`): the refresh writes only if, under the lock, the file is still there with
+ * the refresh token it spent (`commitRefresh`), so a refresh that finishes after a logout can't
+ * bring the account back. The lock is best effort, as in GitHub CLI's `refresh.lock`: a lock not
+ * acquired within `waitMs` is skipped, leaving that one operation to race as it would unlocked,
+ * rather than wedging the CLI. Nothing else is locked. Accepted: a logout racing a sign-in to the
+ * same account can delete that sign-in's new session file, leaving the account signed out.
  */
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, open, readdir, readFile, rename, rm, unlink } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  type FileHandle,
+} from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { ENVIRONMENTS, GLOBAL_CREDENTIALS_DIR, type Environment } from './credentials.js';
-import { ifExists, isRecord, nonEmptyString } from './guards.js';
+import { ifExists, isErrnoCode, isRecord, nonEmptyString } from './guards.js';
 import { loginRequired, OAuthError } from './oauth.js';
 
 /** Who a session acts as: a token is bound to one Kizen user in one business. */
@@ -71,11 +88,23 @@ export interface OAuthStore {
   listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
   /** Writes this account's session file only, in place; never moves the pointer. */
   writeSession: (session: OAuthSession) => Promise<void>;
+  /**
+   * A refresh's write of `session`, under its account's lock: re-reads that account's own file and
+   * writes only if it's still there holding `spentRefreshToken`, the token the refresh presented.
+   * `'gone'`: the file was removed (a logout), so nothing is written and the account stays signed
+   * out. `'rotated'`: a peer stored newer tokens (another refresh, or a sign-in again), which are
+   * kept. Never moves the pointer. An unreadable file throws as `readAccount` does.
+   */
+  commitRefresh: (
+    session: OAuthSession,
+    spentRefreshToken: string,
+  ) => Promise<'written' | 'rotated' | 'gone'>;
   /** Points the environment at `account` (after `writeSession` of it), then cleans up. */
   setCurrent: (environment: Environment, account: OAuthAccount) => Promise<void>;
   /**
-   * Deletes this account's file only; never touches the pointer, so a pointer to it then reads as
-   * not signed in. Returns whether the file existed.
+   * Deletes this account's file only, under its lock (as every account-file delete here is, so a
+   * `commitRefresh` in progress finishes first and the delete wins); never touches the pointer, so
+   * a pointer to it then reads as not signed in. Returns whether the file existed.
    */
   deleteSession: (environment: Environment, account: OAuthAccount) => Promise<boolean>;
   /**
@@ -119,6 +148,127 @@ const CLIENTS_FILE = 'clients.json';
  * this, so a logout in progress keeps its own.
  */
 export const SIGNOUT_MAX_AGE_MS = 10 * 60_000;
+
+export interface LockFileOptions {
+  /** How long to wait for a live lock before going ahead without it. */
+  waitMs: number;
+  /** A lock file older than this (by mtime) was left by a crash, and is taken over. */
+  staleMs: number;
+  /** How often a waiter retries. */
+  pollMs: number;
+}
+
+/**
+ * An account lock is held for one read and one fsync'd atomic write, or one unlink: milliseconds.
+ * `waitMs` covers a slow disk while keeping `auth-header` inside Claude Code's 10s helper limit: a
+ * refresh takes the lock once (its commit or its delete), after a request of at most 5s. `staleMs`
+ * is far above any real hold, so only a lock whose holder died (or was stopped, or slept with the
+ * laptop) mid-hold is taken over; a process that resumes after that races as an unlocked one would.
+ */
+export const ACCOUNT_LOCK: LockFileOptions = { waitMs: 2_000, staleMs: 30_000, pollMs: 25 };
+
+/**
+ * Creates `path` exclusively and writes a random nonce into it, waiting up to `waitMs` for a live
+ * holder and taking over a stale file. Resolves to the nonce, which tells this holder's file from
+ * a successor's on release (an inode number can be reused at once, and isn't reliable on Windows
+ * or FAT). Undefined when it can't: timed out, or any error but EEXIST (a missing directory too,
+ * where there's nothing yet to race over). The handle is closed at once, so the file can be
+ * unlinked on Windows while held. Others only stat a lock, by mtime, so one just created and
+ * still empty is live like any other.
+ *
+ * Best effort: two waiters that both judge one file stale can each remove it, the later removing
+ * the earlier's new lock, and then both hold it. That's the unlocked race again, for that pair.
+ */
+async function acquireLockFile(
+  path: string,
+  { waitMs, staleMs, pollMs }: LockFileOptions,
+): Promise<string | undefined> {
+  const deadline = Date.now() + waitMs;
+
+  for (;;) {
+    let handle: FileHandle;
+
+    try {
+      handle = await open(path, 'wx', 0o600);
+    } catch (err) {
+      if (!isErrnoCode(err, 'EEXIST')) {
+        return undefined;
+      }
+
+      try {
+        const holder = await ifExists(stat(path));
+
+        // Released since the open: try again at once.
+        if (holder === undefined) {
+          continue;
+        }
+
+        if (Date.now() - holder.mtimeMs > staleMs) {
+          await ifExists(unlink(path));
+          continue;
+        }
+      } catch {
+        return undefined;
+      }
+
+      if (Date.now() >= deadline) {
+        return undefined;
+      }
+
+      await sleep(pollMs);
+      continue;
+    }
+
+    let nonce: string | undefined = randomBytes(16).toString('hex');
+
+    try {
+      await handle.writeFile(nonce, 'utf-8');
+    } catch {
+      // Without its nonce the release couldn't tell this file from a successor's.
+      nonce = undefined;
+    }
+
+    try {
+      await handle.close();
+    } catch {
+      nonce = undefined;
+    }
+
+    if (nonce === undefined) {
+      await rm(path, { force: true }).catch(() => undefined);
+    }
+
+    return nonce;
+  }
+}
+
+/**
+ * Runs `run` holding the lock file `path` (see `acquireLockFile`), or without it once `waitMs` has
+ * passed, so a lock never wedges the CLI. `held` says which. The file exists only while held: it's
+ * removed whether `run` resolves or throws, and only if it still holds this call's nonce.
+ */
+export async function withLockFile<T>(
+  path: string,
+  options: LockFileOptions,
+  run: () => Promise<T>,
+): Promise<{ value: T; held: boolean }> {
+  const lock = await acquireLockFile(path, options);
+
+  try {
+    return { value: await run(), held: lock !== undefined };
+  } finally {
+    if (lock !== undefined) {
+      try {
+        // Another nonce: taken over as stale meanwhile, so that file is the new holder's.
+        if ((await ifExists(readFile(path, 'utf-8'))) === lock) {
+          await ifExists(unlink(path));
+        }
+      } catch {
+        // Best effort: a lock left behind is taken over once stale, or removed by `cleanUp`.
+      }
+    }
+  }
+}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -190,12 +340,31 @@ function parseSession(raw: unknown, environment: Environment): OAuthSession | nu
   };
 }
 
+export interface OAuthStoreOptions {
+  /** The account lock's timings; `ACCOUNT_LOCK` by default. */
+  lock?: Partial<LockFileOptions>;
+}
+
 /** @param baseDir the credentials directory; `oauth/` is created inside it. */
-export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAuthStore {
+export function createOAuthStore(
+  baseDir: string = GLOBAL_CREDENTIALS_DIR,
+  options: OAuthStoreOptions = {},
+): OAuthStore {
   const dir = join(baseDir, 'oauth');
+  const lockOptions: LockFileOptions = { ...ACCOUNT_LOCK, ...options.lock };
   const sessionPath = (environment: Environment): string => join(dir, `${environment}.json`);
   const accountPath = (environment: Environment, account: OAuthAccount): string =>
     join(dir, `${environment}.${accountKey(account)}.json`);
+  /** A stable name beside the account file, which is replaced by rename on every write. */
+  const lockPath = (environment: Environment, account: OAuthAccount): string =>
+    join(dir, `${environment}.${accountKey(account)}.lock`);
+
+  /** `run` under the account's lock, or without it after `waitMs` (see `withLockFile`). */
+  const underAccountLock = async <T>(
+    environment: Environment,
+    account: OAuthAccount,
+    run: () => Promise<T>,
+  ): Promise<T> => (await withLockFile(lockPath(environment, account), lockOptions, run)).value;
   const clientsPath = join(dir, CLIENTS_FILE);
 
   /** The account a file name in `dir` holds, for this environment; undefined for anything else. */
@@ -256,7 +425,8 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
   /**
    * Best effort, on login, switch and logout: deletes `<env>.json.<ms>-<hex>.signout` pointers a
    * crash left mid-logout once they're old enough, by the time in their name (when the logout
-   * moved them aside). Only names matching that fixed pattern reach `join`.
+   * moved them aside), and account locks a crash left, once stale by their mtime (a lock is never
+   * renamed). Only names matching those fixed patterns reach `join`.
    */
   const cleanUp = async (environment: Environment): Promise<void> => {
     try {
@@ -267,6 +437,20 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
 
         if (movedAt !== undefined && Date.now() - Number(movedAt) > SIGNOUT_MAX_AGE_MS) {
           await ifExists(unlink(join(dir, name)));
+        }
+
+        const locked = name.endsWith('.lock')
+          ? accountOfName(environment, `${name.slice(0, -'.lock'.length)}.json`)
+          : undefined;
+
+        if (locked !== undefined) {
+          const path = lockPath(environment, locked);
+          const lock = await ifExists(stat(path));
+
+          // Read-then-unlink, as in a stale takeover; a lock this old has no live holder.
+          if (lock !== undefined && Date.now() - lock.mtimeMs > lockOptions.staleMs) {
+            await ifExists(unlink(path));
+          }
         }
       }
     } catch {
@@ -377,9 +561,17 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
     }
   };
 
-  /** Unlinks one account file; a failure other than "already gone" surfaces. */
-  const unlinkAccount = async (environment: Environment, account: OAuthAccount): Promise<boolean> =>
-    (await ifExists(unlink(accountPath(environment, account)).then(() => true))) ?? false;
+  /**
+   * Unlinks one account file, under its lock so a `commitRefresh` in progress can't recreate it;
+   * a failure other than "already gone" surfaces. Every logout's delete comes through here.
+   */
+  const unlinkAccount = (environment: Environment, account: OAuthAccount): Promise<boolean> =>
+    underAccountLock(
+      environment,
+      account,
+      async () =>
+        (await ifExists(unlink(accountPath(environment, account)).then(() => true))) ?? false,
+    );
 
   return {
     dir,
@@ -440,6 +632,26 @@ export function createOAuthStore(baseDir: string = GLOBAL_CREDENTIALS_DIR): OAut
 
     async writeSession(session) {
       await writeAtomic(accountPath(session.environment, session), session);
+    },
+
+    async commitRefresh(session, spentRefreshToken) {
+      const { environment } = session;
+
+      return underAccountLock(environment, session, async () => {
+        const stored = await readAccount(environment, session);
+
+        if (stored === null) {
+          return 'gone';
+        }
+
+        if (stored.refreshToken !== spentRefreshToken) {
+          return 'rotated';
+        }
+
+        await writeAtomic(accountPath(environment, session), session);
+
+        return 'written';
+      });
     },
 
     async setCurrent(environment, account) {

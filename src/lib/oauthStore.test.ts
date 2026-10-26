@@ -6,8 +6,11 @@ import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   accountKey,
+  ACCOUNT_LOCK,
   createOAuthStore,
   SIGNOUT_MAX_AGE_MS,
+  withLockFile,
+  type LockFileOptions,
   type OAuthAccount,
   type OAuthSession,
   type OAuthStore,
@@ -36,6 +39,10 @@ const hooks = vi.hoisted(() => ({
         before?: boolean;
       }
     | undefined,
+  /** When set, the next `unlink` of a path it matches rejects with `error` instead. */
+  failUnlink: undefined as { matches: (path: string) => boolean; error: Error } | undefined,
+  /** Called with the path whenever an exclusive create (`open(path, 'wx')`) finds it taken. */
+  onCreateTaken: undefined as ((path: string) => void) | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -63,11 +70,40 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     return result;
   };
 
-  return { ...fs, readFile, default: { ...fs, readFile } };
+  const unlink = async (...args: Parameters<typeof fs.unlink>): Promise<void> => {
+    const fail = hooks.failUnlink;
+
+    if (fail !== undefined && typeof args[0] === 'string' && fail.matches(args[0])) {
+      hooks.failUnlink = undefined;
+      throw fail.error;
+    }
+
+    return fs.unlink(...args);
+  };
+
+  const open = async (
+    ...args: Parameters<typeof fs.open>
+  ): Promise<FsPromisesModule.FileHandle> => {
+    try {
+      return await fs.open(...args);
+    } catch (err) {
+      if (args[1] === 'wx' && (err as { code?: unknown }).code === 'EEXIST') {
+        hooks.onCreateTaken?.(String(args[0]));
+      }
+
+      throw err;
+    }
+  };
+
+  const mocked = { ...fs, readFile, unlink, open };
+
+  return { ...mocked, default: mocked };
 });
 
 afterEach(() => {
   hooks.pauseRead = undefined;
+  hooks.failUnlink = undefined;
+  hooks.onCreateTaken = undefined;
 });
 
 /** Every store gets a base dir under this, so the real ~/.kizenappbuilder is never touched. */
@@ -547,5 +583,315 @@ describe('oauth store', () => {
 
       expect(await readdir(dir)).toStrictEqual(['clients.json']);
     }
+  });
+});
+
+describe('account lock', () => {
+  /** A refresh's next session for account A: what a commit of `refresh-0` would write. */
+  const refreshed = oauthSession({ accessToken: 'access-1', refreshToken: 'refresh-1' });
+  const lockOf = (store: OAuthStore, account: OAuthAccount = ACCOUNT_A): string =>
+    join(store.dir, `staging.${accountKey(account)}.lock`);
+  /** Seconds, for utimes: a minute past the stale threshold. */
+  const staleTime = (): number => (Date.now() - ACCOUNT_LOCK.staleMs - 60_000) / 1000;
+  const noLockFiles = async (store: OAuthStore): Promise<void> => {
+    expect((await readdir(store.dir)).filter((name) => name.endsWith('.lock'))).toStrictEqual([]);
+  };
+
+  /** Options that never wait out a lock within a test's time, so only a release or takeover ends it. */
+  const patient: LockFileOptions = { waitMs: 60_000, staleMs: ACCOUNT_LOCK.staleMs, pollMs: 5 };
+
+  it('the account lock is a separate file beside the account file, never mistaken for an account', () => {
+    const store = createOAuthStore(join(root, 'lock-name'));
+
+    expect(lockOf(store)).toBe(store.accountPath('staging', ACCOUNT_A).replace(/\.json$/, '.lock'));
+  });
+
+  it('commitRefresh writes only while the file still holds the spent refresh token', async () => {
+    const store = createOAuthStore(join(root, 'commit-outcomes'));
+    const rotated = oauthSession({ accessToken: 'access-peer', refreshToken: 'refresh-peer' });
+
+    await signIn(store, oauthSession());
+    expect(await store.commitRefresh(refreshed, 'refresh-0')).toBe('written');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(refreshed);
+
+    // A peer rotated past refresh-0 (here, to refresh-peer): its tokens are kept.
+    await store.writeSession(rotated);
+    expect(await store.commitRefresh(refreshed, 'refresh-0')).toBe('rotated');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(rotated);
+
+    // Logged out: nothing is written back.
+    expect(await store.removeAccount('staging', ACCOUNT_A)).toStrictEqual({
+      removed: true,
+      current: true,
+    });
+    expect(await store.commitRefresh(refreshed, 'refresh-peer')).toBe('gone');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+    expect(await readdir(store.dir)).toStrictEqual([]);
+  });
+
+  it('a peer rotation that lands while a commit waits on the lock is kept', async () => {
+    const store = createOAuthStore(join(root, 'commit-rotated-under-lock'), { lock: patient });
+    const rotated = oauthSession({ accessToken: 'access-peer', refreshToken: 'refresh-peer' });
+    const waiting = deferred();
+
+    await signIn(store, oauthSession());
+    // A peer's commit holds the lock; ours waits on it.
+    await writeFile(lockOf(store), '');
+    hooks.onCreateTaken = (path) => {
+      if (path === lockOf(store)) {
+        waiting.resolve();
+      }
+    };
+
+    const committing = store.commitRefresh(refreshed, 'refresh-0');
+
+    await waiting.promise;
+    // The peer writes its rotation, then releases.
+    await store.writeSession(rotated);
+    await rm(lockOf(store));
+
+    expect(await committing).toBe('rotated');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(rotated);
+    await noLockFiles(store);
+  });
+
+  it('no lock file remains after a commit or a logout, whether it succeeds or throws', async () => {
+    const store = createOAuthStore(join(root, 'lock-cleanup'));
+
+    await signIn(store, oauthSession());
+    expect(await store.commitRefresh(refreshed, 'refresh-0')).toBe('written');
+    await noLockFiles(store);
+
+    // The write throws once the temp file is open (as in the failed-write test above).
+    const poisoned = oauthSession({
+      accessToken: {
+        toJSON: () => {
+          throw new Error('disk on fire');
+        },
+      } as unknown as string,
+    });
+
+    await expect(store.commitRefresh(poisoned, 'refresh-1')).rejects.toThrow('disk on fire');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(refreshed);
+    await noLockFiles(store);
+
+    // A logout whose unlink of the account file fails.
+    hooks.failUnlink = {
+      matches: (path) => path === store.accountPath('staging', ACCOUNT_A),
+      error: Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }),
+    };
+    await expect(store.signOut('staging')).rejects.toThrow('EACCES');
+    await noLockFiles(store);
+
+    await store.setCurrent('staging', ACCOUNT_A);
+    await store.writeSession(oauthSession({ ...ACCOUNT_B }));
+    expect(await store.removeAccount('staging', ACCOUNT_B)).toStrictEqual({
+      removed: true,
+      current: false,
+    });
+    await noLockFiles(store);
+    expect(await store.deleteSession('staging', ACCOUNT_A)).toBe(true);
+    await noLockFiles(store);
+    await signIn(store, oauthSession());
+    expect(await store.signOutAll('staging')).toStrictEqual({ signedIn: true, removed: 1 });
+    expect(await store.signOut('staging')).toBe(false);
+    expect(await readdir(store.dir)).toStrictEqual([]);
+  });
+
+  it("a lock held past the wait doesn't stop a commit or a logout, and isn't removed by them", async () => {
+    const store = createOAuthStore(join(root, 'lock-timeout'), {
+      lock: { waitMs: 50, pollMs: 5 },
+    });
+    const foreign = lockOf(store);
+
+    await signIn(store, oauthSession());
+    // A live holder (fresh mtime) that never releases within the wait.
+    await writeFile(foreign, '');
+
+    expect(await store.commitRefresh(refreshed, 'refresh-0')).toBe('written');
+    expect(await store.readAccount('staging', ACCOUNT_A)).toStrictEqual(refreshed);
+    expect(await store.signOut('staging')).toBe(true);
+    expect(await store.readAccount('staging', ACCOUNT_A)).toBeNull();
+
+    // Only the holder's own lock is left: nothing of ours.
+    expect(await readdir(store.dir)).toStrictEqual([`staging.${accountKey(ACCOUNT_A)}.lock`]);
+
+    const run = vi.fn(() => Promise.resolve('ran'));
+
+    expect(
+      await withLockFile(foreign, { ...ACCOUNT_LOCK, waitMs: 50, pollMs: 5 }, run),
+    ).toStrictEqual({ value: 'ran', held: false });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('a stale lock file is taken over at once, not waited out', async () => {
+    const store = createOAuthStore(join(root, 'lock-stale'), { lock: patient });
+
+    await signIn(store, oauthSession());
+    await writeFile(lockOf(store), '');
+    await utimes(lockOf(store), staleTime(), staleTime());
+
+    const started = Date.now();
+    const seen: boolean[] = [];
+
+    const result = await withLockFile(lockOf(store), patient, async () => {
+      // Held: the file is ours, created fresh.
+      seen.push(Date.now() - (await stat(lockOf(store))).mtimeMs < ACCOUNT_LOCK.staleMs);
+
+      return 'ran';
+    });
+
+    expect(result).toStrictEqual({ value: 'ran', held: true });
+    expect(seen).toStrictEqual([true]);
+    // `patient` waits a minute for a live lock; a takeover is immediate.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    await noLockFiles(store);
+
+    // Through the store too: a commit behind a stale lock writes.
+    await writeFile(lockOf(store), '');
+    await utimes(lockOf(store), staleTime(), staleTime());
+    expect(await store.commitRefresh(refreshed, 'refresh-0')).toBe('written');
+    await noLockFiles(store);
+  });
+
+  it('a live lock is waited for, and the waiter goes ahead holding it once it is released', async () => {
+    const store = createOAuthStore(join(root, 'lock-wait'), { lock: patient });
+    const path = lockOf(store);
+    const waiting = deferred();
+    const run = vi.fn(async () => {
+      // The waiter's own lock, while it runs.
+      await stat(path);
+
+      return 'ran';
+    });
+
+    await mkdir(store.dir, { recursive: true });
+    await writeFile(path, '');
+
+    let polls = 0;
+
+    hooks.onCreateTaken = (taken) => {
+      if (taken === path && (polls += 1) === 3) {
+        waiting.resolve();
+      }
+    };
+
+    const locked = withLockFile(path, patient, run);
+
+    // It has found the lock taken three times, and hasn't run.
+    await waiting.promise;
+    expect(run).not.toHaveBeenCalled();
+    await rm(path);
+
+    expect(await locked).toStrictEqual({ value: 'ran', held: true });
+    expect(run).toHaveBeenCalledOnce();
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it("a holder's release leaves a lock that replaced its own alone, whatever its inode", async () => {
+    const store = createOAuthStore(join(root, 'lock-successor'));
+    const path = lockOf(store);
+    const nonces: string[] = [];
+
+    await mkdir(store.dir, { recursive: true });
+
+    const result = await withLockFile(path, ACCOUNT_LOCK, async () => {
+      nonces.push(await readFile(path, 'utf-8'));
+      // Taken over meanwhile (as stale, after a long pause): another holder's file now, which a
+      // file system may give the inode just freed.
+      await rm(path);
+      await writeFile(path, 'successor');
+
+      return 'ran';
+    });
+
+    expect(result).toStrictEqual({ value: 'ran', held: true });
+    // While held, the file holds this holder's random nonce.
+    expect(nonces).toHaveLength(1);
+    expect(nonces[0]).toMatch(/^[0-9a-f]{32}$/);
+    expect(await readFile(path, 'utf-8')).toBe('successor');
+  });
+
+  it('a release leaves the lock alone when it holds another nonce, even in the same file', async () => {
+    const store = createOAuthStore(join(root, 'lock-other-nonce'));
+    const path = lockOf(store);
+    const other = 'f'.repeat(32);
+
+    await mkdir(store.dir, { recursive: true });
+
+    const before = await withLockFile(path, ACCOUNT_LOCK, async () => {
+      const ino = (await stat(path)).ino;
+
+      // Rewritten in place: same inode, so only the content tells it isn't this holder's.
+      await writeFile(path, other);
+
+      return ino;
+    });
+
+    expect((await stat(path)).ino).toBe(before.value);
+    expect(await readFile(path, 'utf-8')).toBe(other);
+
+    // A release of a file still holding its own nonce removes it.
+    await rm(path);
+    expect(await withLockFile(path, ACCOUNT_LOCK, () => Promise.resolve('ran'))).toStrictEqual({
+      value: 'ran',
+      held: true,
+    });
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('a run that throws releases the lock and passes the error on', async () => {
+    const store = createOAuthStore(join(root, 'lock-throw'));
+    const path = lockOf(store);
+
+    await mkdir(store.dir, { recursive: true });
+    await expect(
+      withLockFile(path, ACCOUNT_LOCK, () => Promise.reject(new Error('boom'))),
+    ).rejects.toThrow('boom');
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('listing, login, switching and logout --all work with lock files present, and clean-up removes only stale ones', async () => {
+    const store = createOAuthStore(join(root, 'lock-present'), {
+      lock: { waitMs: 50, pollMs: 5 },
+    });
+    // A stale lock for A, a live one for B, and a stale one in another environment.
+    const goLock = join(store.dir, `go.${accountKey(ACCOUNT_A)}.lock`);
+
+    await store.writeSession(sessionB());
+    await signIn(store, oauthSession());
+    await writeFile(lockOf(store, ACCOUNT_A), '');
+    await writeFile(lockOf(store, ACCOUNT_B), '');
+    await writeFile(goLock, '');
+
+    for (const path of [lockOf(store, ACCOUNT_A), goLock]) {
+      await utimes(path, staleTime(), staleTime());
+    }
+
+    expect(
+      (await store.listAccounts('staging')).map(({ account, current }) => ({ account, current })),
+    ).toStrictEqual([
+      { account: ACCOUNT_A, current: true },
+      { account: ACCOUNT_B, current: false },
+    ]);
+    expect(await store.listAccounts('go')).toStrictEqual([]);
+    expect(await store.listSessions()).toStrictEqual(['staging']);
+
+    // A switch cleans up: A's stale lock goes; B's live one and go's (another environment) stay.
+    await store.setCurrent('staging', ACCOUNT_B);
+    expect(await store.readSession('staging')).toStrictEqual(sessionB());
+    expect(
+      (await readdir(store.dir)).filter((name) => name.endsWith('.lock')).sort(),
+    ).toStrictEqual(
+      [`go.${accountKey(ACCOUNT_A)}.lock`, `staging.${accountKey(ACCOUNT_B)}.lock`].sort(),
+    );
+
+    // A login again to A writes past nothing; logout --all counts accounts, not locks.
+    await signIn(store, oauthSession());
+    expect(await store.readSession('staging')).toStrictEqual(oauthSession());
+    expect(await store.signOutAll('staging')).toStrictEqual({ signedIn: true, removed: 2 });
+    expect((await readdir(store.dir)).sort()).toStrictEqual(
+      [`go.${accountKey(ACCOUNT_A)}.lock`, `staging.${accountKey(ACCOUNT_B)}.lock`].sort(),
+    );
   });
 });

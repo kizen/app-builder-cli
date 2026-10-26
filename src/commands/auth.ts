@@ -54,7 +54,17 @@ const AUTH_COMMANDS: AuthCommandSpec[] = [
   {
     name: 'whoami',
     description: 'Show the user and business of the stored session',
-    env: 'environment to check (default: the only signed-in one)',
+    env: "environment to check (default: the only signed-in one, or with --business the only one where it's saved)",
+    options: [
+      [
+        '--business <id-or-name>',
+        'check this saved account, by business id or name (ignoring case), instead of the current one (default: $APPBUILDER_BUSINESS)',
+      ],
+      [
+        '--user <userId>',
+        'with --business, check the saved account of this user id (default: $APPBUILDER_USER)',
+      ],
+    ],
     run: runWhoami,
   },
   {
@@ -63,10 +73,7 @@ const AUTH_COMMANDS: AuthCommandSpec[] = [
       'Print an Authorization header for the stored session as JSON (for a Claude Code MCP headersHelper)',
     env: 'environment to use; must match CLAUDE_CODE_MCP_SERVER_URL when that is set (default: the environment matching it, else the only signed-in one)',
     options: [
-      [
-        '--business <id>',
-        "with --user, use only this saved account, and fail if it isn't the environment's current one",
-      ],
+      ['--business <id>', 'with --user, use this saved account, current or not'],
       ['--user <userId>', 'with --business, the user id of that account'],
     ],
     run: runAuthHeader,

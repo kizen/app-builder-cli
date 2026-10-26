@@ -58,13 +58,21 @@ import {
   type TargetMatch,
 } from './pushBlock.js';
 import {
+  accountRequest,
   notSignedInWithApiKeyHint,
   pinnedProfileNotice,
   selectAuth,
+  type AccountRequest,
   type AuthFlags,
 } from './authSelection.js';
-import { createDefaultTokenProvider, resolveSessionEnvironment } from './oauthSession.js';
-import { createOAuthStore, type OAuthStore } from './oauthStore.js';
+import { requireNamedAccount, resolveAccountEnvironment } from './oauthCommands.js';
+import { createDefaultTokenProvider } from './oauthSession.js';
+import {
+  createOAuthStore,
+  type OAuthAccount,
+  type OAuthStore,
+  type SavedAccount,
+} from './oauthStore.js';
 import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
 import { quoteArg } from './shellArg.js';
 
@@ -122,6 +130,8 @@ export interface PushCommandOptions {
   forget?: boolean;
   json?: boolean;
   env?: string;
+  business?: string;
+  user?: string;
 }
 
 export interface TargetsCommandOptions {
@@ -130,13 +140,23 @@ export interface TargetsCommandOptions {
   object?: string;
   json?: boolean;
   env?: string;
+  business?: string;
+  user?: string;
 }
 
 /** The stored `appbuilder login` sessions, which commands use unless -c or --profile is passed. */
 export interface OAuthPushDeps {
   listSessions: () => Promise<Environment[]>;
-  /** The identity and the client that resolved it, so later requests are pinned to that login. */
-  connect: (environment: Environment) => Promise<{ identity: KizenIdentity; client: KizenClient }>;
+  /** The saved accounts `--business` / `APPBUILDER_BUSINESS` choose among. */
+  listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
+  /**
+   * The identity and the client that resolved it, so later requests are pinned to that login:
+   * `account` when given, else the current account at the first read.
+   */
+  connect: (
+    environment: Environment,
+    account?: OAuthAccount,
+  ) => Promise<{ identity: KizenIdentity; client: KizenClient }>;
 }
 
 export interface PushDeps {
@@ -156,6 +176,8 @@ export interface PushDeps {
   writeStdout: (text: string) => void;
   writeStderr: (text: string) => void;
   setExitCode: (code: number) => void;
+  /** Where `APPBUILDER_BUSINESS` / `APPBUILDER_USER` are read from. */
+  processEnv: Readonly<Record<string, string | undefined>>;
   oauth: OAuthPushDeps;
 }
 
@@ -167,9 +189,11 @@ export function createOAuthPushDeps(
 
   return {
     listSessions: () => store.listSessions(),
-    connect: async (environment) => {
+    listAccounts: (environment) => store.listAccounts(environment),
+    connect: async (environment, account) => {
       const bearer = createDefaultTokenProvider(environment, store, {
         ...(fetchImpl && { fetch: fetchImpl }),
+        ...(account !== undefined && { account }),
       });
       const client = createKizenClient({ bearer, ...(fetchImpl && { fetch: fetchImpl }) });
 
@@ -201,6 +225,7 @@ export function createDefaultPushDeps(cwd: string): PushDeps {
     setExitCode: (code) => {
       process.exitCode = code;
     },
+    processEnv: process.env,
     // Constructing the store does no IO; a -c / --profile push never touches it.
     oauth: createOAuthPushDeps(createOAuthStore()),
   };
@@ -320,15 +345,10 @@ async function pinnedProfileNotices(deps: PushDeps): Promise<string[]> {
 
 async function resolveSessionCredentials(
   env: string | undefined,
+  request: AccountRequest | undefined,
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
-  // Kept so the environment choices come from the same read that found several sessions.
-  let sessions: Environment[] = [];
-  const resolved = await resolveSessionEnvironment(env, async () => {
-    sessions = await deps.oauth.listSessions();
-
-    return sessions;
-  });
+  const resolved = await resolveAccountEnvironment(env, request, deps.oauth);
 
   if (!resolved.ok) {
     switch (resolved.problem) {
@@ -337,7 +357,7 @@ async function resolveSessionCredentials(
       case 'several_sessions':
         return failure('needs_choice', resolved.message, {
           choice: 'environment',
-          choices: sessions.map((environment) => ({
+          choices: resolved.environments.map((environment) => ({
             value: environment,
             label: environment,
             args: ['--env', environment],
@@ -350,10 +370,29 @@ async function resolveSessionCredentials(
 
   const { environment } = resolved;
 
+  let account: OAuthAccount | undefined;
+
+  if (request !== undefined) {
+    let accounts: SavedAccount[];
+
+    try {
+      accounts = await deps.oauth.listAccounts(environment);
+    } catch (error) {
+      return apiFailure(error);
+    }
+
+    // A name that matches no saved account, or several, is a bad argument: never the current one.
+    try {
+      account = requireNamedAccount(environment, accounts, request);
+    } catch (error) {
+      return failure('usage_error', errorMessage(error));
+    }
+  }
+
   let connected: Awaited<ReturnType<OAuthPushDeps['connect']>>;
 
   try {
-    connected = await deps.oauth.connect(environment);
+    connected = await deps.oauth.connect(environment, account);
   } catch (error) {
     return apiFailure(error);
   }
@@ -367,14 +406,15 @@ async function resolveSessionCredentials(
 }
 
 /**
- * The `appbuilder login` session by default (--env picks its environment); an API key
- * only for -c or --profile, which never read the sessions.
+ * The `appbuilder login` session by default (--env picks its environment; --business / --user, or
+ * APPBUILDER_BUSINESS / APPBUILDER_USER, a saved account in it); an API key only for -c or
+ * --profile, which never read the sessions.
  */
 export async function resolveCredentials(
   options: AuthFlags,
   deps: PushDeps,
 ): Promise<Step<ResolvedCredentials>> {
-  const selected = selectAuth(options);
+  const selected = selectAuth(options, deps.processEnv);
 
   if (!selected.ok) {
     return failure('usage_error', selected.message);
@@ -383,7 +423,7 @@ export async function resolveCredentials(
   const { selection } = selected;
 
   if (selection.kind === 'oauth') {
-    return resolveSessionCredentials(selection.env, deps);
+    return resolveSessionCredentials(selection.env, selection.account, deps);
   }
 
   return selection.credentials === undefined
@@ -1191,7 +1231,25 @@ function writeResult(output: Output, result: unknown, text: string, jsonText = t
   }
 }
 
-const credentialArgs = (options: AuthFlags): string[] => {
+/**
+ * The account the run asked for (`--business` / `--user`, else `APPBUILDER_BUSINESS` /
+ * `APPBUILDER_USER`), as flags for the commands a choice prints: a one-command variable
+ * assignment doesn't survive being copied. Empty when no account was named, or the request is
+ * invalid (that run already failed with the usage error).
+ */
+const accountArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
+  const result = accountRequest(options, processEnv);
+
+  if (!result.ok || result.request === undefined) {
+    return [];
+  }
+
+  const { business, user } = result.request;
+
+  return ['--business', business, ...(user === undefined ? [] : ['--user', user])];
+};
+
+const credentialArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
   if (options.credentials !== undefined) {
     return ['-c', options.credentials];
   }
@@ -1200,7 +1258,10 @@ const credentialArgs = (options: AuthFlags): string[] => {
     return ['--profile', options.profile];
   }
 
-  return options.env === undefined ? [] : ['--env', options.env];
+  return [
+    ...(options.env === undefined ? [] : ['--env', options.env]),
+    ...accountArgs(options, processEnv),
+  ];
 };
 
 const writeNotices = (deps: PushDeps, notices: readonly string[]): void => {
@@ -1227,14 +1288,14 @@ export async function runPushHeadless(
   let blockArgs = apiName === undefined ? [] : [apiName];
   const choiceArgs: ChoiceArgs = (choice, kind) => {
     if (kind === 'environment') {
-      return [...blockArgs, ...choice.args];
+      return [...blockArgs, ...choice.args, ...accountArgs(options, deps.processEnv)];
     }
 
     if (kind === 'block') {
-      return [...choice.args, ...credentialArgs(options)];
+      return [...choice.args, ...credentialArgs(options, deps.processEnv)];
     }
 
-    return [...blockArgs, ...credentialArgs(options), ...choice.args];
+    return [...blockArgs, ...credentialArgs(options, deps.processEnv), ...choice.args];
   };
 
   const fail = (result: PushFailure): void => {
@@ -1465,7 +1526,11 @@ export async function runTargetsHeadless(
   const output: Output = { json: options.json === true, deps };
   const command = 'appbuilder block targets';
   const objectArgs = options.object === undefined ? [] : ['--object', options.object];
-  const choiceArgs: ChoiceArgs = (choice) => [...choice.args, ...objectArgs];
+  const choiceArgs: ChoiceArgs = (choice) => [
+    ...choice.args,
+    ...accountArgs(options, deps.processEnv),
+    ...objectArgs,
+  ];
   const fail = (result: PushFailure): void => {
     writeFailure(output, result, command, choiceArgs);
   };

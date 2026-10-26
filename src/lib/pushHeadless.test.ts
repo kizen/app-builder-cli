@@ -15,7 +15,7 @@ import type { ViewsByPlugin } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
 import { BASE_URLS } from '../../shared/lib/kizenUrls.js';
 import { KizenApiError } from './kizenClient.js';
-import { createOAuthStore, type OAuthSession } from './oauthStore.js';
+import { createOAuthStore, type OAuthSession, type SavedAccount } from './oauthStore.js';
 import type {
   KizenClient,
   PushMapEntry,
@@ -299,8 +299,9 @@ const oauthDeps = (
   sessions: Environment[],
   fake: FakeClient = makeClient(),
   identity: typeof IDENTITY = IDENTITY,
-): OAuthPushDeps & { listSessions: Mock; connect: Mock } => ({
+): OAuthPushDeps & { listSessions: Mock; listAccounts: Mock; connect: Mock } => ({
   listSessions: vi.fn(() => Promise.resolve(sessions)),
+  listAccounts: vi.fn(() => Promise.resolve([])),
   connect: vi.fn(() => Promise.resolve({ identity, client: fake.client })),
 });
 
@@ -369,8 +370,10 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
       exitCodes.push(code);
     },
     // Signed out: a test that leaves out -c / --profile must sign in explicitly.
+    processEnv: {},
     oauth: {
       listSessions: vi.fn(() => Promise.resolve([])),
+      listAccounts: vi.fn(() => Promise.resolve([])),
       connect: vi.fn(() => Promise.reject(new Error('no OAuth session in this test'))),
     },
     ...options.deps,
@@ -2215,55 +2218,71 @@ describe('sign-in session credentials', () => {
     });
   });
 
-  it('push aborts without writing the push map when the login changes after identity lookup', async () => {
+  /**
+   * A Kizen API that serves either login, by token, recording every request. The bootstrap answer
+   * names the business of whichever token was presented; `onBootstrap` runs before it answers.
+   */
+  const kizenFor = (
+    onBootstrap: () => Promise<void> = () => Promise.resolve(),
+  ): {
+    fetchMock: ReturnType<typeof vi.fn<typeof fetch>>;
+    requests: { method: string; url: string; auth: string }[];
+  } => {
+    const base = BASE_URLS.staging;
+    const businessFor: Record<string, string> = {
+      'Bearer access-a': 'oauth-biz-a',
+      'Bearer access-b': 'oauth-biz-b',
+    };
+    const requests: { method: string; url: string; auth: string }[] = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = input as string;
+      const method = init?.method ?? 'GET';
+      const auth = new Headers(init?.headers).get('Authorization') ?? '';
+
+      requests.push({ method, url, auth });
+
+      if (url === `${base}/auth/bootstrap`) {
+        await onBootstrap();
+
+        return jsonResponse({
+          team: { user: 'oauth-user' },
+          business: { id: businessFor[auth], name: 'Acme' },
+        });
+      }
+
+      if (url === `${base}/dashboards/D1` && method === 'GET') {
+        return jsonResponse(makeDashboard());
+      }
+
+      if (url === `${base}/dashboards/D1/dashlet` && method === 'POST') {
+        return jsonResponse({
+          id: 'NEW',
+          name: pushKey(PLUGIN, BLOCK),
+          layout: null,
+          config: {},
+          dashboard: 'D1',
+        } satisfies WireDashlet);
+      }
+
+      return new Response('not found', { status: 404 });
+    });
+
+    return { fetchMock, requests };
+  };
+
+  const loginBFrom = (loginA: OAuthSession): OAuthSession => ({
+    ...loginA,
+    ...ACCOUNT_B,
+    businessName: 'Bravo',
+    accessToken: 'access-b',
+    refreshToken: 'refresh-b',
+  });
+
+  it('push keeps acting as the account it started with when the login changes after identity lookup', async () => {
     await withStore(async (store, loginA) => {
-      const loginB = {
-        ...loginA,
-        ...ACCOUNT_B,
-        accessToken: 'access-b',
-        refreshToken: 'refresh-b',
-      };
-      const base = BASE_URLS.staging;
-      const businessFor: Record<string, string> = {
-        'Bearer access-a': 'oauth-biz-a',
-        'Bearer access-b': 'oauth-biz-b',
-      };
-      const requests: { method: string; url: string; auth: string }[] = [];
-      // A Kizen API that serves either login: only the provider's pin can stop
-      // business B's token from writing a dashlet the push records under business A.
-      const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
-        const url = input as string;
-        const method = init?.method ?? 'GET';
-        const auth = new Headers(init?.headers).get('Authorization') ?? '';
-
-        requests.push({ method, url, auth });
-
-        if (url === `${base}/auth/bootstrap`) {
-          // Another terminal signs in to another business right after the lookup.
-          await signIn(store, loginB);
-
-          return jsonResponse({
-            team: { user: 'oauth-user' },
-            business: { id: businessFor[auth], name: 'Acme' },
-          });
-        }
-
-        if (url === `${base}/dashboards/D1` && method === 'GET') {
-          return jsonResponse(makeDashboard());
-        }
-
-        if (url === `${base}/dashboards/D1/dashlet` && method === 'POST') {
-          return jsonResponse({
-            id: 'NEW',
-            name: pushKey(PLUGIN, BLOCK),
-            layout: null,
-            config: {},
-            dashboard: 'D1',
-          } satisfies WireDashlet);
-        }
-
-        return new Response('not found', { status: 404 });
-      });
+      const loginB = loginBFrom(loginA);
+      // Another terminal switches to another business right after the lookup.
+      const { fetchMock, requests } = kizenFor(() => signIn(store, loginB));
       // The real wiring: one provider behind the identity lookup and every write.
       const harness = makeHarness({
         deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
@@ -2275,20 +2294,447 @@ describe('sign-in session credentials', () => {
         harness.deps,
       );
 
-      expect(harness.json()).toMatchObject({
-        ok: false,
-        code: 'auth_failed',
-        message: 'The staging sign-in changed while this command was running. Run it again.',
-      });
-      expect(harness.exitCodes).not.toStrictEqual([]);
-      // The identity came from login A, and nothing after it went out at all.
-      expect(requests).toStrictEqual([
-        { method: 'GET', url: `${base}/auth/bootstrap`, auth: 'Bearer access-a' },
+      expect(harness.json()).toMatchObject({ ok: true, businessId: 'oauth-biz-a' });
+      expect(harness.exitCodes).toStrictEqual([]);
+      // Every request, the write included, went out as login A; B's token never did.
+      expect(requests.length).toBeGreaterThan(1);
+      expect(requests.every(({ auth }) => auth === 'Bearer access-a')).toBe(true);
+      expect(harness.pushMap.entries).toMatchObject([
+        { environment: 'staging', businessId: 'oauth-biz-a', dashletId: 'NEW' },
       ]);
-      expect(harness.deps.createClient).not.toHaveBeenCalled();
-      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
-      expect(harness.pushMap.entries).toStrictEqual([]);
+      // The switch stands.
       expect(await store.readSession('staging')).toStrictEqual(loginB);
+    });
+  });
+
+  it('push with --business uses that saved account while another is current, and never moves the pointer', async () => {
+    await withStore(async (store, loginA) => {
+      const loginB = loginBFrom(loginA);
+
+      await store.writeSession(loginB);
+
+      const { fetchMock, requests } = kizenFor();
+      const harness = makeHarness({
+        deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
+      });
+
+      await runPushHeadless(
+        BLOCK,
+        {
+          json: true,
+          env: 'staging',
+          business: 'bravo',
+          dashboard: 'D1',
+          create: true,
+          yes: true,
+        },
+        harness.deps,
+      );
+
+      expect(harness.json()).toMatchObject({ ok: true, businessId: 'oauth-biz-b' });
+      expect(requests.length).toBeGreaterThan(1);
+      expect(requests.every(({ auth }) => auth === 'Bearer access-b')).toBe(true);
+      expect(await store.readSession('staging')).toStrictEqual(loginA);
+    });
+  });
+
+  it('push --json with --business and no --env uses staging when nothing is current and it is saved only there', async () => {
+    await withStore(async (store, loginA) => {
+      await store.writeSession(loginBFrom(loginA));
+      await store.signOut('staging');
+
+      const { fetchMock, requests } = kizenFor();
+      const harness = makeHarness({
+        deps: { oauth: createOAuthPushDeps(store, { fetch: fetchMock }) },
+      });
+
+      await runPushHeadless(
+        BLOCK,
+        { json: true, business: 'bravo', dashboard: 'D1', create: true, yes: true },
+        harness.deps,
+      );
+
+      expect(harness.json()).toMatchObject({
+        ok: true,
+        environment: 'staging',
+        businessId: 'oauth-biz-b',
+      });
+      expect(requests.length).toBeGreaterThan(1);
+      expect(requests.every(({ auth }) => auth === 'Bearer access-b')).toBe(true);
+      expect(await store.listSessions()).toStrictEqual([]);
+    });
+  });
+
+  it('targets with APPBUILDER_BUSINESS and no --env uses the only environment where it is saved', async () => {
+    await withStore(async (store, loginA) => {
+      await store.writeSession(loginBFrom(loginA));
+
+      const { fetchMock, requests } = kizenFor();
+      const harness = makeHarness({
+        deps: {
+          processEnv: { APPBUILDER_BUSINESS: 'Bravo' },
+          oauth: createOAuthPushDeps(store, { fetch: fetchMock }),
+        },
+      });
+
+      await runTargetsHeadless({ json: true }, harness.deps);
+
+      // The session resolved to B in staging (the fake API has no listing endpoints).
+      expect(requests[0]).toStrictEqual({
+        method: 'GET',
+        url: `${BASE_URLS.staging}/auth/bootstrap`,
+        auth: 'Bearer access-b',
+      });
+    });
+  });
+
+  it('push with --business saved in staging and go and no --env is needs_choice', async () => {
+    await withStore(async (store, loginA) => {
+      const loginB = loginBFrom(loginA);
+
+      await store.writeSession(loginB);
+      await store.writeSession({ ...loginB, environment: 'go' });
+
+      const { fetchMock, requests } = kizenFor();
+      const oauth = createOAuthPushDeps(store, { fetch: fetchMock });
+      const connect = vi.spyOn(oauth, 'connect');
+      const harness = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { json: true, business: 'bravo' }, harness.deps);
+
+      expect(harness.json()).toStrictEqual({
+        ok: false,
+        code: 'needs_choice',
+        message:
+          '--business bravo matches saved accounts in several environments; pass --env <env>: go, staging',
+        choice: 'environment',
+        choices: [
+          { value: 'go', label: 'go', args: ['--env', 'go'] },
+          { value: 'staging', label: 'staging', args: ['--env', 'staging'] },
+        ],
+      });
+      expect(connect).not.toHaveBeenCalled();
+      expect(requests).toStrictEqual([]);
+
+      const text = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { business: 'bravo' }, text.deps);
+
+      expect(text.stderr.join('')).toContain(
+        `appbuilder block push ${BLOCK} --env staging --business bravo`,
+      );
+      expect(text.stderr.join('')).not.toContain('signed-in');
+    });
+  });
+
+  it('targets with APPBUILDER_BUSINESS uses that saved account', async () => {
+    await withStore(async (store, loginA) => {
+      await store.writeSession(loginBFrom(loginA));
+
+      const { fetchMock, requests } = kizenFor();
+      const harness = makeHarness({
+        deps: {
+          processEnv: { APPBUILDER_BUSINESS: ACCOUNT_B.businessId },
+          oauth: createOAuthPushDeps(store, { fetch: fetchMock }),
+        },
+      });
+
+      await runTargetsHeadless({ json: true, env: 'staging' }, harness.deps);
+
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every(({ auth }) => auth === 'Bearer access-b')).toBe(true);
+      expect(await store.readSession('staging')).toStrictEqual(loginA);
+    });
+  });
+});
+
+describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APPBUILDER_USER)', () => {
+  const BIZ_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const saved = (businessId: string, userId: string, businessName: string): SavedAccount => ({
+    account: { businessId, userId },
+    session: oauthSession({ businessId, userId, businessName, email: `${userId}@x.test` }),
+    current: false,
+  });
+  const ACCOUNTS: SavedAccount[] = [
+    saved(BIZ_A, 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1', 'Acme'),
+    saved(ACCOUNT_B.businessId, ACCOUNT_B.userId, 'Bravo'),
+  ];
+
+  const oauthWithAccounts = (accounts: SavedAccount[] = ACCOUNTS): ReturnType<typeof oauthDeps> => {
+    const oauth = oauthDeps(['staging']);
+
+    // Saved in staging only.
+    oauth.listAccounts.mockImplementation((environment: Environment) =>
+      Promise.resolve(environment === 'staging' ? accounts : []),
+    );
+
+    return oauth;
+  };
+
+  it.each<[string, Record<string, string>, PushCommandOptions, string]>([
+    [
+      '--business beats APPBUILDER_BUSINESS',
+      { APPBUILDER_BUSINESS: 'Acme' },
+      { business: 'Bravo' },
+      ACCOUNT_B.businessId,
+    ],
+    [
+      'APPBUILDER_BUSINESS when no flag is passed',
+      { APPBUILDER_BUSINESS: 'bravo' },
+      {},
+      ACCOUNT_B.businessId,
+    ],
+    ['--business by id', {}, { business: BIZ_A }, BIZ_A],
+  ])('%s', async (_name, processEnv, flags, businessId) => {
+    const oauth = oauthWithAccounts();
+    const { deps } = makeHarness({ deps: { oauth, processEnv } });
+    const step = await resolveCredentials(flags, deps);
+
+    expect(step.ok).toBe(true);
+    expect(oauth.listAccounts).toHaveBeenCalledWith('staging');
+    expect(oauth.connect.mock.calls).toStrictEqual([
+      ['staging', ACCOUNTS.find(({ account }) => account.businessId === businessId)?.account],
+    ]);
+  });
+
+  it('an empty APPBUILDER_BUSINESS counts as unset: the current account', async () => {
+    const oauth = oauthWithAccounts();
+    const { deps } = makeHarness({ deps: { oauth, processEnv: { APPBUILDER_BUSINESS: '' } } });
+
+    expect((await resolveCredentials({}, deps)).ok).toBe(true);
+    expect(oauth.listAccounts).not.toHaveBeenCalled();
+    expect(oauth.connect.mock.calls).toStrictEqual([['staging', undefined]]);
+  });
+
+  it.each<[string, Record<string, string>, PushCommandOptions, string]>([
+    [
+      '--user without --business',
+      {},
+      { user: ACCOUNT_B.userId },
+      '--user only applies with --business.',
+    ],
+    [
+      'APPBUILDER_USER without APPBUILDER_BUSINESS',
+      { APPBUILDER_USER: ACCOUNT_B.userId },
+      {},
+      'APPBUILDER_USER only applies with APPBUILDER_BUSINESS.',
+    ],
+  ])('%s is a usage error', async (_name, processEnv, flags, message) => {
+    const oauth = oauthWithAccounts();
+    const { deps } = makeHarness({ deps: { oauth, processEnv } });
+
+    expect(await resolveCredentials(flags, deps)).toStrictEqual({
+      ok: false,
+      code: 'usage_error',
+      message,
+    });
+    expect(oauth.connect).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, PushCommandOptions, SavedAccount[], string, string]>([
+    [
+      'no saved account matches',
+      { business: 'Nope' },
+      ACCOUNTS,
+      'No saved staging account matches --business Nope. Saved accounts:',
+      `Bravo (${ACCOUNT_B.businessId})`,
+    ],
+    [
+      'several saved accounts match',
+      { business: 'acme' },
+      [
+        ...ACCOUNTS,
+        saved(
+          'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          'c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1',
+          'ACME',
+        ),
+      ],
+      '--business acme matches several saved staging accounts. Pass one of these business ids instead:',
+      'ACME (cccccccc-cccc-4ccc-8ccc-cccccccccccc)',
+    ],
+  ])(
+    '%s: a usage_error listing them, never the current account',
+    async (_name, flags, accounts, message, listed) => {
+      const oauth = oauthWithAccounts(accounts);
+      const harness = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { json: true, dashboard: 'D1', ...flags }, harness.deps);
+
+      const result = harness.json() as { ok: boolean; code: string; message: string };
+
+      expect(result).toMatchObject({ ok: false, code: 'usage_error' });
+      expect(result.message).toContain(message);
+      // The candidates: every saved account when none matches, the matches when several do.
+      expect(result.message).toContain(listed);
+      expect(oauth.connect).not.toHaveBeenCalled();
+      expect(harness.deps.packageBlocks).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each<[PushCommandOptions, string]>([
+    [{ profile: 'Demo', business: 'Bravo' }, '--business'],
+    [{ credentials: '/tmp/c.json', business: 'Bravo' }, '--business'],
+    [{ profile: 'Demo', user: ACCOUNT_B.userId }, '--user'],
+  ])('%j with an API key is a usage error', async (flags, flag) => {
+    const oauth = oauthWithAccounts();
+    const harness = makeHarness({ deps: { oauth } });
+
+    await runPushHeadless(BLOCK, { json: true, ...flags }, harness.deps);
+
+    expect(harness.json()).toStrictEqual({
+      ok: false,
+      code: 'usage_error',
+      message: `${flag} selects a saved sign-in account, so it can't be combined with -c or --profile.`,
+    });
+    expect(oauth.connect).not.toHaveBeenCalled();
+    expect(harness.deps.loadCredentialsDetailed).not.toHaveBeenCalled();
+  });
+
+  it('an API key ignores APPBUILDER_BUSINESS and APPBUILDER_USER', async () => {
+    const oauth = oauthWithAccounts();
+    const { deps } = makeHarness({
+      deps: { oauth, processEnv: { APPBUILDER_BUSINESS: 'Nope', APPBUILDER_USER: 'nobody' } },
+    });
+    const step = await resolveCredentials(API_KEY, deps);
+
+    expect(step).toMatchObject({ ok: true, value: { credentials: { businessId: 'biz' } } });
+    expect(oauth.listAccounts).not.toHaveBeenCalled();
+    expect(oauth.connect).not.toHaveBeenCalled();
+  });
+
+  it('the environment choices keep --business and --user', async () => {
+    const oauth = oauthDeps(['staging', 'integration']);
+
+    // Bravo is saved in both environments.
+    oauth.listAccounts.mockImplementation((environment: Environment) =>
+      Promise.resolve(environment === 'staging' || environment === 'integration' ? ACCOUNTS : []),
+    );
+
+    const harness = makeHarness({ deps: { oauth } });
+
+    await runPushHeadless(
+      BLOCK,
+      { json: true, business: 'Bravo', user: ACCOUNT_B.userId },
+      harness.deps,
+    );
+
+    expect(harness.json()).toMatchObject({
+      ok: false,
+      code: 'needs_choice',
+      choice: 'environment',
+      choices: [{ value: 'staging' }, { value: 'integration' }],
+    });
+
+    const text = makeHarness({ deps: { oauth } });
+
+    await runPushHeadless(BLOCK, { business: 'Bravo', user: ACCOUNT_B.userId }, text.deps);
+
+    expect(text.stderr.join('')).toContain(
+      `appbuilder block push ${BLOCK} --env staging --business Bravo --user ${ACCOUNT_B.userId}`,
+    );
+  });
+
+  describe('the printed commands name the requested account as flags', () => {
+    const A_USER = 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1';
+    const run = (
+      command: 'push' | 'targets',
+      flags: PushCommandOptions,
+      deps: PushDeps,
+    ): Promise<void> =>
+      command === 'push' ? runPushHeadless(BLOCK, flags, deps) : runTargetsHeadless(flags, deps);
+
+    // A one-command `APPBUILDER_BUSINESS=… appbuilder …` doesn't persist, so a copied command
+    // needs the account as flags.
+    it.each<[string, 'push' | 'targets', Record<string, string>, PushCommandOptions, string]>([
+      [
+        'push after APPBUILDER_BUSINESS',
+        'push',
+        { APPBUILDER_BUSINESS: 'Bravo' },
+        {},
+        `appbuilder block push ${BLOCK} --env staging --business Bravo\n`,
+      ],
+      [
+        'push after APPBUILDER_BUSINESS and APPBUILDER_USER',
+        'push',
+        { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        {},
+        `appbuilder block push ${BLOCK} --env staging --business Bravo --user ${ACCOUNT_B.userId}\n`,
+      ],
+      [
+        'push with --business over the variables',
+        'push',
+        { APPBUILDER_BUSINESS: 'Acme', APPBUILDER_USER: A_USER },
+        { business: 'Bravo' },
+        `appbuilder block push ${BLOCK} --env staging --business Bravo\n`,
+      ],
+      [
+        'targets after APPBUILDER_BUSINESS',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Bravo' },
+        {},
+        'appbuilder block targets --env staging --business Bravo\n',
+      ],
+      [
+        'targets after APPBUILDER_BUSINESS and APPBUILDER_USER',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        {},
+        `appbuilder block targets --env staging --business Bravo --user ${ACCOUNT_B.userId}\n`,
+      ],
+      [
+        'targets with --business over the variables',
+        'targets',
+        { APPBUILDER_BUSINESS: 'Acme', APPBUILDER_USER: A_USER },
+        { business: 'Bravo' },
+        'appbuilder block targets --env staging --business Bravo\n',
+      ],
+    ])('environment choice: %s', async (_name, command, processEnv, flags, expected) => {
+      const oauth = oauthDeps(['staging', 'integration']);
+
+      // Saved in both environments.
+      oauth.listAccounts.mockImplementation((environment: Environment) =>
+        Promise.resolve(environment === 'staging' || environment === 'integration' ? ACCOUNTS : []),
+      );
+
+      const harness = makeHarness({ deps: { oauth, processEnv } });
+
+      await run(command, flags, harness.deps);
+
+      const err = harness.stderr.join('');
+
+      expect(err).toContain('Choices:');
+      expect(err).toContain(`staging  →  ${expected}`);
+      // Business and user come from one source: the variables' Acme user never joins Bravo.
+      expect(err).not.toContain('Acme');
+      expect(err).not.toContain(A_USER);
+      expect(oauth.connect).not.toHaveBeenCalled();
+    });
+
+    it('a dashboard choice after APPBUILDER_BUSINESS and APPBUILDER_USER', async () => {
+      const fake = makeClient({
+        summaries: { generic_dashboard: [summary()] },
+        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'other' })] })],
+      });
+      const oauth = oauthDeps(['staging'], fake);
+
+      oauth.listAccounts.mockImplementation((environment: Environment) =>
+        Promise.resolve(environment === 'staging' ? ACCOUNTS : []),
+      );
+
+      const harness = makeHarness({
+        fake,
+        deps: {
+          oauth,
+          processEnv: { APPBUILDER_BUSINESS: 'Bravo', APPBUILDER_USER: ACCOUNT_B.userId },
+        },
+      });
+
+      await runPushHeadless(BLOCK, {}, harness.deps);
+
+      expect(harness.stderr.join('')).toContain(
+        `Sales  →  appbuilder block push ${BLOCK} --business Bravo --user ${ACCOUNT_B.userId} --dashboard D1\n`,
+      );
     });
   });
 });
@@ -2442,7 +2888,7 @@ describe('the sign-in session is the default', () => {
         environment: 'staging',
         businessId: 'oauth-biz',
       });
-      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging', undefined]]);
       expectNoApiKeyReads(harness.deps);
     });
 
@@ -2495,7 +2941,7 @@ describe('the sign-in session is the default', () => {
         environment: 'staging',
         businessId: 'oauth-biz',
       });
-      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging', undefined]]);
       expect(rerun.exitCodes).toStrictEqual([]);
     });
   });
@@ -2526,7 +2972,7 @@ describe('the sign-in session is the default', () => {
         environment: 'staging',
         businessId: 'oauth-biz',
       });
-      expect(oauth.connect).toHaveBeenCalledWith('staging');
+      expect(oauth.connect).toHaveBeenCalledWith('staging', undefined);
       expect(fake.createDashlet).toHaveBeenCalledTimes(1);
       expect(harness.pushMap.entries).toMatchObject([
         { environment: 'staging', businessId: 'oauth-biz' },
@@ -2642,7 +3088,7 @@ describe('the sign-in session is the default', () => {
       await vi.waitFor(() => {
         expect(phase()?.type).toBe('surface-select');
       });
-      expect(oauth.connect.mock.calls).toStrictEqual([['staging']]);
+      expect(oauth.connect.mock.calls).toStrictEqual([['staging', undefined]]);
       expect(state.session.credentials).toStrictEqual({
         environment: 'staging',
         businessId: 'oauth-biz',
