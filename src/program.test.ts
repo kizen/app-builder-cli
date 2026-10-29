@@ -7,12 +7,26 @@ import { ALL_VALID_ICONS_LIST, CUSTOM_ICON_NAMES } from '../shared/lib/validIcon
 import type * as KizenAdminModule from './lib/kizenAdmin.js';
 import type * as SetupClaudeModule from './lib/setupClaude.js';
 import { mcpServerPlan, runSetupClaude } from './lib/setupClaude.js';
+import type * as SetupCodexModule from './lib/setupCodex.js';
+import { runSetupCodex } from './lib/setupCodex.js';
+import type * as WhoamiCommandModule from './lib/whoamiCommand.js';
+import { runWhoamiCommand } from './lib/whoamiCommand.js';
 import { createProgram } from './program.js';
 
 // Only the setup-claude action's runner is replaced, so a test can see the deps it gets.
 vi.mock('./lib/setupClaude.js', async (importOriginal) => ({
   ...(await importOriginal<typeof SetupClaudeModule>()),
   runSetupClaude: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock('./lib/setupCodex.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof SetupCodexModule>()),
+  runSetupCodex: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock('./lib/whoamiCommand.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof WhoamiCommandModule>()),
+  runWhoamiCommand: vi.fn(() => Promise.resolve()),
 }));
 
 /**
@@ -90,10 +104,11 @@ vi.mock('./lib/kizenAdmin.js', async (importOriginal) => {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The fourteen commands, in the order `createProgram` registers them. */
+/** The sixteen commands, in the order `createProgram` registers them. */
 const COMMAND_NAMES = [
   'create',
   'setup-claude',
+  'setup-codex',
   'setup-copilot',
   'build',
   'dev',
@@ -101,6 +116,7 @@ const COMMAND_NAMES = [
   'report',
   'icons',
   'block',
+  'app',
   'login',
   'logout',
   'whoami',
@@ -113,6 +129,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   create: 'Scaffold a new Kizen plugin project',
   'setup-claude':
     'Install or refresh the Claude Code files in a plugin, or with --mcp only register the Kizen MCP server',
+  'setup-codex': 'Install or refresh the Codex skills (.agents/skills) in a plugin',
   'setup-copilot': 'Add or refresh the Copilot code-review setup in an existing plugin repo',
   build: 'Bundle the plugin app into .kizenapp directory',
   dev: 'Start the plugin viewer dev server',
@@ -120,6 +137,7 @@ const COMMAND_DESCRIPTIONS: Record<string, string> = {
   report: 'Generate a self-contained HTML report of the plugin',
   icons: 'List all valid icon names accepted by toolbar items, pages, and adornments',
   block: 'Work with plugin content blocks',
+  app: 'Publish the plugin as a Business App: previews, releases, merges and rollbacks',
   login:
     'Sign in to Kizen in the browser, or switch to a saved account, and store the session on this machine',
   logout: 'Remove the stored session from this machine',
@@ -140,8 +158,10 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-e, --environment <env>',
     '--artifacts <list>',
     '--include-lib',
+    '--no-interactive',
   ],
   'setup-claude': ['--dry-run', '--include-lib', '--mcp', '--env <env>', '--force'],
+  'setup-codex': ['--dry-run', '--include-lib'],
   'setup-copilot': ['--dry-run'],
   build: [],
   dev: [
@@ -159,13 +179,22 @@ const COMMAND_OPTION_FLAGS: Record<string, string[]> = {
     '-v, --value <value>',
     '-s, --stage <stage>',
     '-o, --out <path>',
+    '--no-interactive',
   ],
   report: ['-o, --output <path>'],
   icons: [],
   block: [],
-  login: ['--env <env>', '--business <id-or-name>', '--user <userId>', '--list', '--json'],
+  app: [],
+  login: [
+    '--env <env>',
+    '--business <id-or-name>',
+    '--user <userId>',
+    '--list',
+    '--json',
+    '--no-interactive',
+  ],
   logout: ['--env <env>', '--all', '--business <id-or-name>', '--user <userId>'],
-  whoami: ['--env <env>', '--business <id-or-name>', '--user <userId>'],
+  whoami: ['--env <env>', '--business <id-or-name>', '--user <userId>', '--json'],
   'auth-header': ['--env <env>', '--business <id>', '--user <userId>'],
   admin: ['--env <env>', '--business <id-or-name>', '--user <userId>'],
 };
@@ -182,6 +211,7 @@ const BLOCK_PUSH_FLAGS = [
   '--force',
   '--forget',
   '--json',
+  '--no-interactive',
   '--env <env>',
   '--business <id-or-name>',
   '--user <userId>',
@@ -197,6 +227,18 @@ const BLOCK_TARGETS_FLAGS = [
   '--user <userId>',
 ];
 
+const APP_SESSION_FLAGS = [
+  '--json',
+  '--no-interactive',
+  '--env <env>',
+  '--business <id-or-name>',
+  '--user <userId>',
+];
+
+const APP_CREDENTIAL_FLAGS = ['-c, --credentials <path>', '--profile <name>'];
+
+const APP_WRITE_FLAGS = ['--dry-run', '--yes', '--allow-production'];
+
 function subcommand(program: Command, name: string): Command {
   const found = program.commands.find((command) => command.name() === name);
 
@@ -206,6 +248,10 @@ function subcommand(program: Command, name: string): Command {
 
   return found;
 }
+
+/** A command's runnable commands: itself, or the leaves of its subcommand groups. */
+const leafCommands = (command: Command): Command[] =>
+  command.commands.length === 0 ? [command] : command.commands.flatMap(leafCommands);
 
 function option(program: Command, commandName: string, flags: string): Option {
   const found = subcommand(program, commandName).options.find((opt) => opt.flags === flags);
@@ -258,7 +304,7 @@ describe('createProgram', () => {
 });
 
 describe('command wiring', () => {
-  it('registers exactly the fourteen documented commands, in order', () => {
+  it('registers exactly the sixteen documented commands, in order', () => {
     expect(createProgram().commands.map((command) => command.name())).toStrictEqual(COMMAND_NAMES);
   });
 
@@ -272,7 +318,7 @@ describe('command wiring', () => {
     expect(flags).toStrictEqual(COMMAND_OPTION_FLAGS[name]);
   });
 
-  it.each(['create', 'setup-claude', 'setup-copilot', 'build', 'icons'])(
+  it.each(['create', 'setup-claude', 'setup-codex', 'setup-copilot', 'build', 'icons'])(
     'takes no arguments on %s',
     (name) => {
       expect(subcommand(createProgram(), name).registeredArguments).toStrictEqual([]);
@@ -337,8 +383,10 @@ describe('encrypt command options', () => {
 
   it('leaves every encrypt option unset before parsing', () => {
     // The action falls back to interactive prompts / kizen.json for anything
-    // missing, so no encrypt flag may carry a commander-level default.
-    expect(subcommand(createProgram(), 'encrypt').opts()).toStrictEqual({});
+    // missing, so no encrypt flag may carry a commander-level default. The one
+    // exception is commander's own: `--no-interactive` defaults `interactive` to
+    // true, and the action splits it off (`takeInteractiveFlag`).
+    expect(subcommand(createProgram(), 'encrypt').opts()).toStrictEqual({ interactive: true });
   });
 });
 
@@ -417,6 +465,7 @@ describe('block command', () => {
       'force',
       'forget',
       'json',
+      'interactive',
       'env',
       'business',
       'user',
@@ -435,8 +484,293 @@ describe('block command', () => {
   it('leaves every push and targets option unset before parsing', () => {
     const block = subcommand(createProgram(), 'block');
 
-    expect(subcommand(block, 'push').opts()).toStrictEqual({});
+    // But `--no-interactive`'s commander default, which the action splits off.
+    expect(subcommand(block, 'push').opts()).toStrictEqual({ interactive: true });
     expect(subcommand(block, 'targets').opts()).toStrictEqual({});
+  });
+});
+
+describe('app command', () => {
+  it('registers versions, push, publish, merge, rollback, pull, actions and preview, in order', () => {
+    expect(
+      subcommand(createProgram(), 'app').commands.map((command) => command.name()),
+    ).toStrictEqual([
+      'versions',
+      'push',
+      'publish',
+      'merge',
+      'rollback',
+      'pull',
+      'actions',
+      'preview',
+    ]);
+  });
+
+  it('registers preview delete, with --owner, --expect-updated and --delete-app before the write flags', () => {
+    const preview = subcommand(subcommand(createProgram(), 'app'), 'preview');
+
+    expect(preview.description()).toBe("Manage the app's previews: delete");
+    expect(preview.commands.map((command) => command.name())).toStrictEqual(['delete']);
+
+    const remove = subcommand(preview, 'delete');
+
+    expect(remove.description()).toBe(
+      "Delete your preview of the app, or with --owner, another developer's",
+    );
+    expect(remove.registeredArguments).toStrictEqual([]);
+    expect(remove.options.map((opt) => opt.flags)).toStrictEqual([
+      ...APP_CREDENTIAL_FLAGS,
+      '--owner <userId>',
+      '--expect-updated <ts>',
+      '--delete-app',
+      ...APP_WRITE_FLAGS,
+      ...APP_SESSION_FLAGS,
+    ]);
+    expect(remove.options.map((opt) => opt.attributeName())).toStrictEqual([
+      'credentials',
+      'profile',
+      'owner',
+      'expectUpdated',
+      'deleteApp',
+      'dryRun',
+      'yes',
+      'allowProduction',
+      'json',
+      'interactive',
+      'env',
+      'business',
+      'user',
+    ]);
+  });
+
+  it('registers actions list, link and unlink, in order', () => {
+    const actions = subcommand(subcommand(createProgram(), 'app'), 'actions');
+
+    expect(actions.description()).toBe(
+      "Link the app's JS actions to objects: list, link and unlink",
+    );
+    expect(actions.commands.map((command) => command.name())).toStrictEqual([
+      'list',
+      'link',
+      'unlink',
+    ]);
+  });
+
+  it.each([
+    [
+      'list',
+      "Show the app's JS actions and the objects they're linked to",
+      [],
+      [...APP_CREDENTIAL_FLAGS, ...APP_SESSION_FLAGS],
+    ],
+    [
+      'link',
+      'Link a JS action to an object, or change whether it shows in its menus',
+      // Optional so a terminal can pick them; headless, a missing one is a usage_error.
+      [
+        ['action', false],
+        ['object', false],
+      ],
+      [...APP_CREDENTIAL_FLAGS, '--menu', '--no-menu', ...APP_WRITE_FLAGS, ...APP_SESSION_FLAGS],
+    ],
+    [
+      'unlink',
+      "Remove a JS action's link to an object",
+      [
+        ['action', false],
+        ['object', false],
+      ],
+      [...APP_CREDENTIAL_FLAGS, ...APP_WRITE_FLAGS, ...APP_SESSION_FLAGS],
+    ],
+  ])(
+    'describes actions %s and gives it its documented arguments and flags',
+    (name, description, args, flags) => {
+      const command = subcommand(subcommand(subcommand(createProgram(), 'app'), 'actions'), name);
+
+      expect(command.description()).toBe(description);
+      expect(command.registeredArguments.map((arg) => [arg.name(), arg.required])).toStrictEqual(
+        args,
+      );
+      expect(command.options.map((opt) => opt.flags)).toStrictEqual(flags);
+    },
+  );
+
+  it('maps --menu and --no-menu to one `menu` option, unset unless passed', () => {
+    const parse = (args: string[]): unknown => {
+      const program = createProgram();
+      let seen: unknown = 'not run';
+
+      const link = subcommand(subcommand(subcommand(program, 'app'), 'actions'), 'link');
+
+      link.action((_action: string, _object: string, options: { menu?: boolean }) => {
+        seen = options.menu;
+      });
+      program.parse(['app', 'actions', 'link', 'a', 'b', ...args], { from: 'user' });
+
+      return seen;
+    };
+
+    expect(parse([])).toBeUndefined();
+    expect(parse(['--menu'])).toBe(true);
+    expect(parse(['--no-menu'])).toBe(false);
+  });
+
+  it.each([
+    [
+      'versions',
+      "Show the app's Live, released and preview versions",
+      [],
+      [...APP_CREDENTIAL_FLAGS, ...APP_SESSION_FLAGS],
+    ],
+    [
+      'push',
+      'Save this folder as your preview of the app',
+      [],
+      [
+        ...APP_CREDENTIAL_FLAGS,
+        ...APP_WRITE_FLAGS,
+        '--force',
+        '--base-from-preview <id>',
+        ...APP_SESSION_FLAGS,
+      ],
+    ],
+    [
+      'publish',
+      'Publish your preview as the next Live version',
+      [],
+      [
+        ...APP_CREDENTIAL_FLAGS,
+        ...APP_WRITE_FLAGS,
+        '--force',
+        '--expect-preview <id>',
+        ...APP_SESSION_FLAGS,
+      ],
+    ],
+    [
+      'merge',
+      'Merge the Live version (or --release) into this folder',
+      [],
+      [
+        ...APP_CREDENTIAL_FLAGS,
+        '--release <n>',
+        '--base <n>',
+        '--accept-live-base',
+        '--dry-run',
+        '--yes',
+        ...APP_SESSION_FLAGS,
+      ],
+    ],
+    [
+      'rollback',
+      'Restore a released version as your preview',
+      [['version', true]],
+      [...APP_CREDENTIAL_FLAGS, ...APP_WRITE_FLAGS, ...APP_SESSION_FLAGS],
+    ],
+    [
+      'pull',
+      "Download a released version's source into a new folder",
+      [['version', true]],
+      [...APP_CREDENTIAL_FLAGS, '--out <dir>', ...APP_SESSION_FLAGS],
+    ],
+  ])(
+    'describes %s and gives it its documented arguments and flags',
+    (name, description, args, flags) => {
+      const command = subcommand(subcommand(createProgram(), 'app'), name);
+
+      expect(command.description()).toBe(description);
+      expect(command.registeredArguments.map((arg) => [arg.name(), arg.required])).toStrictEqual(
+        args,
+      );
+      expect(command.options.map((opt) => opt.flags)).toStrictEqual(flags);
+    },
+  );
+
+  it('maps the app flags to the option names the runners read', () => {
+    const app = subcommand(createProgram(), 'app');
+    const attributeNames = (name: string): string[] =>
+      subcommand(app, name).options.map((opt) => opt.attributeName());
+
+    expect(attributeNames('publish')).toStrictEqual([
+      'credentials',
+      'profile',
+      'dryRun',
+      'yes',
+      'allowProduction',
+      'force',
+      'expectPreview',
+      'json',
+      'interactive',
+      'env',
+      'business',
+      'user',
+    ]);
+    expect(attributeNames('merge')).toStrictEqual([
+      'credentials',
+      'profile',
+      'release',
+      'base',
+      'acceptLiveBase',
+      'dryRun',
+      'yes',
+      'json',
+      'interactive',
+      'env',
+      'business',
+      'user',
+    ]);
+    expect(attributeNames('pull')).toContain('out');
+  });
+
+  it('leaves every app option unset before parsing', () => {
+    const app = subcommand(createProgram(), 'app');
+
+    // But `--no-interactive`'s commander default, which the actions split off.
+    for (const command of leafCommands(app)) {
+      expect(command.opts(), command.name()).toStrictEqual({ interactive: true });
+    }
+  });
+});
+
+describe('--no-interactive', () => {
+  const commandsWithUI = (): Command[] => {
+    const program = createProgram();
+
+    return [
+      subcommand(subcommand(program, 'block'), 'push'),
+      subcommand(program, 'create'),
+      subcommand(program, 'encrypt'),
+      subcommand(program, 'login'),
+      ...leafCommands(subcommand(program, 'app')),
+    ];
+  };
+
+  it('is a negation of `interactive` on every command with an interactive UI', () => {
+    for (const command of commandsWithUI()) {
+      const flag = command.options.find((opt) => opt.flags === '--no-interactive');
+
+      expect(flag?.negate, command.name()).toBe(true);
+      expect(flag?.attributeName(), command.name()).toBe('interactive');
+      // No positive --interactive alongside it, which would change the default.
+      expect(command.options.some((opt) => opt.flags === '--interactive')).toBe(false);
+    }
+  });
+
+  it('is on no command without an interactive UI', () => {
+    const program = createProgram();
+    const without = [
+      subcommand(subcommand(program, 'block'), 'targets'),
+      subcommand(program, 'logout'),
+      subcommand(program, 'whoami'),
+      subcommand(program, 'auth-header'),
+      subcommand(program, 'setup-codex'),
+    ];
+
+    for (const command of without) {
+      expect(
+        command.options.some((opt) => opt.flags === '--no-interactive'),
+        command.name(),
+      ).toBe(false);
+    }
   });
 });
 
@@ -497,6 +831,42 @@ describe('icons command', () => {
 
     expect(lines).toContain('kizen-k');
     expect(lines).toContain('form-entity');
+  });
+});
+
+describe('setup-codex', () => {
+  it('runs in the current directory with the parsed flags', async () => {
+    await createProgram().parseAsync(['setup-codex', '--dry-run', '--include-lib'], {
+      from: 'user',
+    });
+
+    expect(vi.mocked(runSetupCodex)).toHaveBeenCalledWith(
+      process.cwd(),
+      { dryRun: true, includeLib: true },
+      expect.objectContaining({ fs: expect.any(Object) as unknown }),
+    );
+  });
+
+  it.each(['--mcp', '--force', '--env'])('has no %s', (flag) => {
+    expect(
+      subcommand(createProgram(), 'setup-codex').options.some((opt) => opt.long === flag),
+    ).toBe(false);
+  });
+});
+
+describe('whoami', () => {
+  it('passes --json to the whoami runner, with the other flags', async () => {
+    await createProgram().parseAsync(
+      ['whoami', '--json', '--env', 'staging', '--business', 'acme'],
+      {
+        from: 'user',
+      },
+    );
+
+    expect(vi.mocked(runWhoamiCommand)).toHaveBeenCalledWith(
+      { json: true, env: 'staging', business: 'acme' },
+      expect.objectContaining({ store: expect.any(Object) as unknown }),
+    );
   });
 });
 
@@ -658,14 +1028,17 @@ describe('(r) option parsing of other commands is unchanged', () => {
     return { out, code: undefined };
   }
 
-  it.each([[['dev', '-V']], [['block', 'push', '--version']], [['-V', 'admin']]])(
-    '%j still prints the version',
-    (args) => {
-      const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')) as {
-        version: string;
-      };
+  // `app merge` takes --release <n> rather than --version <n> because of this.
+  it.each([
+    [['dev', '-V']],
+    [['block', 'push', '--version']],
+    [['app', 'merge', '--version']],
+    [['-V', 'admin']],
+  ])('%j still prints the version', (args) => {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8')) as {
+      version: string;
+    };
 
-      expect(capture(args)).toStrictEqual({ out: `${pkg.version}\n`, code: 'commander.version' });
-    },
-  );
+    expect(capture(args)).toStrictEqual({ out: `${pkg.version}\n`, code: 'commander.version' });
+  });
 });

@@ -32,7 +32,8 @@ export type OAuthLocalErrorCode =
   | 'server_error'
   | 'invalid_callback'
   | 'timeout'
-  | 'login_required';
+  | 'login_required'
+  | 'session_store_unwritable';
 
 export class OAuthError extends Error {
   // `string & {}` keeps any server code while still suggesting the local ones.
@@ -42,6 +43,44 @@ export class OAuthError extends Error {
   ) {
     super(message);
     this.name = 'OAuthError';
+  }
+}
+
+/** The errno codes that mean the store is full: no space left, or over the user's quota. */
+const DISK_FULL_ERRNO_CODES: readonly string[] = ['ENOSPC', 'EDQUOT'];
+
+/**
+ * The errno codes that mean the session store can't be written here: a sandbox (EPERM, EACCES,
+ * EROFS), usually, or a full disk.
+ */
+export const UNWRITABLE_ERRNO_CODES: readonly string[] = [
+  'EPERM',
+  'EACCES',
+  'EROFS',
+  ...DISK_FULL_ERRNO_CODES,
+];
+
+/**
+ * The session store can't be written (one of `UNWRITABLE_ERRNO_CODES`), as under an agent's
+ * sandbox that only allows writes to the project, or on a full disk. `hint` says how to fix it.
+ */
+export class SessionStoreUnwritableError extends OAuthError {
+  readonly hint: string;
+
+  /** @param credentialsDir the directory that needs write access (the store's parent). */
+  constructor(storeDir: string, credentialsDir: string, errno: string) {
+    const full = DISK_FULL_ERRNO_CODES.includes(errno);
+
+    super(
+      'session_store_unwritable',
+      full
+        ? `Can't write to ${storeDir} (${errno}): the disk is full or over quota. appbuilder keeps its sign-in sessions there.`
+        : `Can't write to ${storeDir} (${errno}), where appbuilder keeps its sign-in sessions.`,
+    );
+    this.name = 'SessionStoreUnwritableError';
+    this.hint = full
+      ? `Free some disk space (or quota) for ${credentialsDir}, then run the command again.`
+      : `appbuilder needs write access to ${credentialsDir} to keep you signed in. Under Codex, re-run the command with sandbox_permissions: "require_escalated" (prefix_rule: ["appbuilder"]). Under the Claude Code sandbox, add "appbuilder *" to sandbox.excludedCommands in your user settings (~/.claude/settings.json); allowing writes to ${credentialsDir} alone isn't enough, since appbuilder also needs network access the sandbox blocks.`;
   }
 }
 

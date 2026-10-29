@@ -15,6 +15,12 @@ import {
   type ManifestDefaults,
 } from '../lib/encryptHelpers.js';
 import { runHeadless } from '../lib/encryptHeadless.js';
+import {
+  isProcessInteractive,
+  NO_INTERACTIVE_HELP,
+  takeInteractiveFlag,
+  type Interactive,
+} from '../lib/interactive.js';
 
 interface EncryptOptions {
   remote?: boolean;
@@ -38,7 +44,10 @@ export function encryptCommand(program: Command): void {
     .option('-v, --value <value>', 'plaintext secret value to encrypt')
     .option('-s, --stage <stage>', 'which encryption API to use: dev or prod (default: prod)')
     .option('-o, --out <path>', 'also write the encrypted envelope to a file')
-    .action(async (options: EncryptOptions) => {
+    .option('--no-interactive', NO_INTERACTIVE_HELP)
+    .action(async (parsed: EncryptOptions & Interactive) => {
+      const { noInteractive, options } = takeInteractiveFlag(parsed);
+
       if (options.stage !== undefined && !isValidStage(options.stage)) {
         console.error(invalidStageMessage(options.stage));
         process.exit(1);
@@ -59,10 +68,10 @@ export function encryptCommand(program: Command): void {
       };
 
       // ink's interactive UI needs a TTY for raw-mode input AND a TTY stdout to
-      // render into. If either is redirected/piped (CI, `> out.json`, `| jq`),
-      // fall back to the headless flow so stdout gets clean compact JSON instead
-      // of ANSI frames.
-      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      // render into. If either is redirected/piped (`> out.json`, `| jq`), or an
+      // agent or CI runs the command, fall back to the headless flow so stdout
+      // gets clean compact JSON instead of ANSI frames.
+      if (!isProcessInteractive({ noInteractive })) {
         try {
           await runHeadless(ctx, options, defaults, stageWasDefaulted, {
             loadCredentialsFromFile,

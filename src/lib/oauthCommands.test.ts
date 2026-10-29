@@ -29,6 +29,7 @@ import {
   type SavedAccount,
 } from './oauthStore.js';
 import { quoteArg } from './shellArg.js';
+import { runWhoamiCommand } from './whoamiCommand.js';
 import {
   ACCOUNT_A,
   ACCOUNT_B,
@@ -253,6 +254,135 @@ describe('whoami', () => {
     expect(rejected.exitCodes).toStrictEqual([1]);
     expect(rejected.stderr.join('')).toContain('appbuilder login --env staging');
     expectNoSecrets(rejected.all());
+  });
+
+  describe('--json', () => {
+    const json = (h: Harness): Record<string, unknown> => {
+      expect(h.stdout).toHaveLength(1);
+
+      return JSON.parse(h.stdout[0] ?? '') as Record<string, unknown>;
+    };
+
+    it('prints the identity as one JSON object, the text on stderr, and never a token', async () => {
+      await signIn(store, session('staging'));
+
+      const h = harness(() => jsonResponse(BOOTSTRAP));
+
+      await runWhoamiCommand({ json: true }, h.deps);
+
+      expect(json(h)).toStrictEqual({
+        ok: true,
+        environment: 'staging',
+        businessId: BIZ_9,
+        businessName: 'Acme Corp',
+        userId: USER_9,
+        fullName: 'Ada Lovelace',
+        email: 'ada@example.com',
+      });
+      expect(h.stderr.join('')).toBe(
+        `Environment: staging\nUser: Ada Lovelace <ada@example.com> (${USER_9})\nBusiness: Acme Corp (${BIZ_9})\n`,
+      );
+      expect(h.exitCodes).toStrictEqual([]);
+      expectNoSecrets(h.all());
+
+      // What the identity doesn't say is null.
+      const bare = harness(() =>
+        jsonResponse({ team: { id: 't1', user: USER_9 }, business: { id: BIZ_9 } }),
+      );
+
+      await runWhoamiCommand({ json: true }, bare.deps);
+
+      expect(json(bare)).toStrictEqual({
+        ok: true,
+        environment: 'staging',
+        businessId: BIZ_9,
+        businessName: null,
+        userId: USER_9,
+        fullName: null,
+        email: null,
+      });
+
+      // Without --json, the text as before, on stdout.
+      const text = harness(() => jsonResponse(BOOTSTRAP));
+
+      await runWhoamiCommand({}, text.deps);
+
+      expect(text.stdout.join('')).toBe(h.stderr.join(''));
+    });
+
+    it('not signed in: not_signed_in with the login to run, exit 1', async () => {
+      const h = harness(() => jsonResponse(BOOTSTRAP));
+
+      await runWhoamiCommand({ json: true, env: 'staging' }, h.deps);
+
+      expect(json(h)).toMatchObject({
+        ok: false,
+        code: 'not_signed_in',
+        login: { argv: ['appbuilder', 'login', '--env', 'staging'] },
+      });
+      expect(h.exitCodes).toStrictEqual([1]);
+      expect(h.fetchMock).not.toHaveBeenCalled();
+
+      // Kizen refusing the session is auth_failed, as the app commands report it.
+      await signIn(store, session('staging'));
+
+      const rejected = harness(() => jsonResponse({ detail: 'Invalid token.' }, 401));
+
+      await runWhoamiCommand({ json: true, env: 'staging' }, rejected.deps);
+
+      expect(json(rejected)).toMatchObject({ ok: false, code: 'auth_failed' });
+      expect(JSON.stringify(json(rejected))).toContain('appbuilder login --env staging');
+      expect(rejected.exitCodes).toStrictEqual([1]);
+      expectNoSecrets(rejected.all());
+    });
+
+    it('several sessions: needs_choice with a runnable whoami per environment, exit 2', async () => {
+      await signIn(store, session('staging'));
+      await signIn(store, session('integration'));
+
+      const h = harness(() => jsonResponse(BOOTSTRAP), {
+        processEnv: { APPBUILDER_BUSINESS: BIZ_9 },
+      });
+
+      await runWhoamiCommand({ json: true }, h.deps);
+
+      const result = json(h);
+
+      expect(result).toMatchObject({ ok: false, code: 'needs_choice', choice: 'environment' });
+      expect(
+        (result.choices as { value: string; argv: string[] }[]).map(({ value, argv }) => [
+          value,
+          argv,
+        ]),
+      ).toStrictEqual(
+        ['staging', 'integration'].map((environment) => [
+          environment,
+          ['appbuilder', 'whoami', '--env', environment, '--business', BIZ_9, '--json'],
+        ]),
+      );
+      expect(h.exitCodes).toStrictEqual([2]);
+      expect(h.fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('a bad flag or --env is a usage_error, exit 1', async () => {
+      await signIn(store, session('staging'));
+
+      const h = harness(() => jsonResponse(BOOTSTRAP));
+
+      await runWhoamiCommand({ json: true, user: USER_9 }, h.deps);
+      expect(json(h)).toStrictEqual({
+        ok: false,
+        code: 'usage_error',
+        message: '--user only applies with --business.',
+      });
+
+      const unknown = harness(() => jsonResponse(BOOTSTRAP));
+
+      await runWhoamiCommand({ json: true, env: 'prod' }, unknown.deps);
+      expect(json(unknown)).toMatchObject({ ok: false, code: 'usage_error' });
+      expect(h.exitCodes).toStrictEqual([1]);
+      expect(unknown.exitCodes).toStrictEqual([1]);
+    });
   });
 
   it('asks to log in when there is no session', async () => {

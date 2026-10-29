@@ -1,116 +1,35 @@
 import { spawn } from 'node:child_process';
-import { join } from 'node:path';
 import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
+import { AGENT_HARNESS_INFO } from './agentHarness.js';
+import { isAgentFilesStale, pluginAgentFiles, setupAgentFiles } from './agentSetup.js';
 import type { ScaffoldedFile } from './createArtifacts.js';
 import { parseEnvironment, type Environment } from './credentials.js';
-import { claudeFiles, kizenDataLibPath } from './createCopilotFiles.js';
-import { errorMessage, isErrnoCode, normalizeEntryDir } from './guards.js';
-import {
-  applyManagedFiles,
-  formatManagedFileLine,
-  nodeManagedFs,
-  planManagedFiles,
-  type ManagedFilePlan,
-  type ManagedFileStatus,
-  type ManagedFs,
-} from './managedFiles.js';
+import { errorMessage, isErrnoCode } from './guards.js';
+import { nodeManagedFs, type ManagedFs } from './managedFiles.js';
 import { DEFAULT_LOGIN_ENVIRONMENT, loginCommandFor } from './oauth.js';
 import { createOAuthStore } from './oauthStore.js';
 import { quoteArg } from './shellArg.js';
 
+export { entryDirsOf } from './agentSetup.js';
+
 export const CLAUDE_SKILL_PATH = '.claude/skills/kizen-custom-block/SKILL.md';
 
-export const STALE_CLAUDE_SKILL_WARNING =
-  'Claude files managed by appbuilder are out of date; run appbuilder setup-claude';
+export const STALE_CLAUDE_SKILL_WARNING = AGENT_HARNESS_INFO.claude.staleWarning;
 
 export type ClaudeFs = ManagedFs;
 
 export const nodeClaudeFs: ClaudeFs = nodeManagedFs;
 
-/** A kizen.json `entry` as a root-relative directory, or undefined when blank or outside the plugin. */
-const entryDirOf = (entry: unknown): string | undefined => {
-  if (typeof entry !== 'string' || entry.trim() === '') {
-    return undefined;
-  }
-
-  const normalized = normalizeEntryDir(entry);
-
-  if (normalized === '..' || normalized.startsWith('../') || normalized.startsWith('/')) {
-    return undefined;
-  }
-
-  return normalized;
-};
-
-export function entryDirsOf(manifest: unknown): string[] {
-  const manifests: unknown[] = Array.isArray(manifest) ? manifest : [manifest];
-  const entryDirs = manifests
-    .map((entry) =>
-      typeof entry === 'object' && entry !== null && 'entry' in entry
-        ? entryDirOf(entry.entry)
-        : undefined,
-    )
-    .filter((entryDir): entryDir is string => entryDir !== undefined);
-
-  return entryDirs.length > 0 ? [...new Set(entryDirs)] : ['src'];
-}
-
-const manifestEntryDirs = async (dir: string, fs: ClaudeFs): Promise<string[]> => {
-  try {
-    const manifest = await fs.readFile(join(dir, 'kizen.json'));
-
-    return manifest === undefined ? ['src'] : entryDirsOf(JSON.parse(manifest));
-  } catch {
-    return ['src'];
-  }
-};
-
-/**
- * The Claude files appbuilder manages in this plugin: always the skill and its design guide,
- * and the data lib under each entry directory when `includeLib` is set or that lib already exists.
- */
-export async function pluginClaudeFiles(
+/** The Claude files appbuilder manages in this plugin (`pluginAgentFiles` for Claude Code). */
+export const pluginClaudeFiles = (
   dir: string,
   fs: ClaudeFs = nodeClaudeFs,
   options: { includeLib?: boolean } = {},
-): Promise<ScaffoldedFile[]> {
-  const entryDirs = await manifestEntryDirs(dir, fs);
-  const libEntryDirs =
-    options.includeLib === true
-      ? entryDirs
-      : (
-          await Promise.all(
-            entryDirs.map(async (entryDir) =>
-              (await fs.exists(join(dir, kizenDataLibPath(entryDir)))) ? entryDir : undefined,
-            ),
-          )
-        ).filter((entryDir): entryDir is string => entryDir !== undefined);
+): Promise<ScaffoldedFile[]> => pluginAgentFiles(dir, 'claude', fs, options);
 
-  return claudeFiles(libEntryDirs);
-}
-
-export async function isClaudeSkillStale(
-  dir: string,
-  fs: ClaudeFs = nodeClaudeFs,
-): Promise<boolean> {
-  try {
-    const managed = await pluginClaudeFiles(dir, fs);
-
-    if (!managed.some((file) => file.path === CLAUDE_SKILL_PATH)) {
-      return false;
-    }
-
-    if ((await fs.readFile(join(dir, CLAUDE_SKILL_PATH))) === undefined) {
-      return false;
-    }
-
-    const plan = await planManagedFiles(dir, managed, fs);
-
-    return plan.some((entry) => entry.status !== 'unchanged');
-  } catch {
-    return false;
-  }
-}
+/** Whether the plugin's Claude files are out of date (`isAgentFilesStale` for Claude Code). */
+export const isClaudeSkillStale = (dir: string, fs: ClaudeFs = nodeClaudeFs): Promise<boolean> =>
+  isAgentFilesStale(dir, 'claude', fs);
 
 /** The published package name (package.json `name`; a test keeps them equal). */
 export const CLI_PACKAGE_NAME = '@kizenapps/cli';
@@ -180,9 +99,6 @@ export const createDefaultSetupClaudeDeps = (cliVersion: string): SetupClaudeDep
     process.exitCode = code;
   },
 });
-
-const count = (plan: readonly ManagedFilePlan[], status: ManagedFileStatus): string =>
-  `${String(plan.filter((entry) => entry.status === status).length)} ${status}`;
 
 export interface SetupClaudeOptions {
   dryRun?: boolean;
@@ -373,41 +289,14 @@ export async function runSetupClaude(
     return;
   }
 
-  if (!(await deps.fs.exists(join(dir, 'kizen.json')))) {
-    deps.error(
-      'Error: kizen.json not found. Run this command from a plugin directory, or pass --mcp to only register the MCP server.',
-    );
-    deps.setExitCode(1);
-
-    return;
-  }
-
-  let plan: ManagedFilePlan[];
-
-  try {
-    plan = await applyManagedFiles(
-      dir,
-      await pluginClaudeFiles(dir, deps.fs, { includeLib: options.includeLib === true }),
-      { dryRun },
-      deps.fs,
-    );
-  } catch (error) {
-    deps.error(`Error: ${errorMessage(error)}`);
-    deps.setExitCode(1);
-
-    return;
-  }
-
-  for (const entry of plan) {
-    deps.log(formatManagedFileLine(entry));
-  }
-
-  const counts = `${count(plan, 'created')}, ${count(plan, 'updated')}, ${count(plan, 'unchanged')}`;
-  const managed = 'these files are managed by appbuilder, so local edits to them are replaced';
-
-  deps.log(
-    dryRun
-      ? `Dry run: ${counts}; nothing written (${managed}).`
-      : `Claude files: ${counts} (${managed}).`,
+  await setupAgentFiles(
+    dir,
+    'claude',
+    {
+      dryRun,
+      includeLib: options.includeLib === true,
+      notFoundHint: ', or pass --mcp to only register the MCP server',
+    },
+    deps,
   );
 }

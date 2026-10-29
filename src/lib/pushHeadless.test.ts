@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { PluginValidationError } from '@kizenapps/packager';
 import type { Block, DeployablePlugin, RoutablePage, ValidationIssue } from '@kizenapps/packager';
 import { describe, expect, it, vi, type Mock } from 'vitest';
@@ -25,18 +25,16 @@ import type {
   WireDashlet,
 } from './kizenTypes.js';
 import { canonicalContentHash, pushKey, toCustomCodeContent } from './pushBlock.js';
+import { apiFailure, headlessWriteGate, resolveCredentials } from './commandCore.js';
 import {
-  apiFailure,
   buildBrowserRefresh,
   createOAuthPushDeps,
   buildPlan,
   buildTargetChoices,
-  headlessWriteGate,
   listPushableObjects,
   listTargets,
   loadPushContext,
   resolveBlock,
-  resolveCredentials,
   resolveTarget,
   runPushHeadless,
   runTargetsHeadless,
@@ -49,8 +47,9 @@ import {
   type ResolvedBlock,
   type ResolvedTarget,
 } from './pushHeadless.js';
+import { interrupt } from '../ui/commandSession.js';
 import { createPushFlow } from '../ui/PushUI.js';
-import { isClaudeSkillStale } from './setupClaude.js';
+import { staleAgentFileWarnings } from './agentSetup.js';
 import { makePlugin, routablePage } from '../test/fixtures.js';
 import { ACCOUNT_B, jsonResponse, oauthSession, signIn } from '../test/oauth.js';
 
@@ -243,7 +242,13 @@ const makeClient = (
     updateDashlet,
   };
 
-  return { client: mocks, ...mocks };
+  // block push never uses the generic primitives; a call is a bug.
+  const unused = (): Promise<never> => Promise.reject(new Error('unexpected generic request'));
+
+  return {
+    client: { ...mocks, requestJson: unused, postForm: unused, getBinary: unused },
+    ...mocks,
+  };
 };
 
 interface Harness {
@@ -353,7 +358,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
     ensureGitignore: vi.fn(() => {
       events.push('ensureGitignore');
     }),
-    isClaudeSkillStale: vi.fn(() => Promise.resolve(false)),
+    staleAgentFileWarnings: vi.fn(() => Promise.resolve([])),
     randomUUID: vi.fn(() => {
       uuid += 1;
 
@@ -490,7 +495,11 @@ describe('resolveCredentials', () => {
 
     expect(step).toStrictEqual({
       ok: true,
-      value: { credentials: makeCredentials(), client: fake.client, notices: [] },
+      value: {
+        credentials: { environment: 'staging', businessId: 'biz', userId: 'user' },
+        client: fake.client,
+        notices: [],
+      },
     });
     expect(deps.createClient).toHaveBeenCalledWith(makeCredentials());
     expect(deps.loadCredentialsDetailed).toHaveBeenCalledWith('/tmp/c.json');
@@ -1252,6 +1261,20 @@ describe('runPushHeadless', () => {
         },
       },
       warnings: [],
+      applyArgv: [
+        'appbuilder',
+        'block',
+        'push',
+        'chart',
+        '--profile',
+        'credentials',
+        '--dashboard',
+        'D1',
+        '--create',
+        '--yes',
+        '--json',
+      ],
+      requiresProductionConsent: false,
     });
     expect(harness.stderr.join('')).toContain('Dry run only: pass --yes to write.');
     expect(fake.createDashlet).not.toHaveBeenCalled();
@@ -1723,10 +1746,11 @@ describe('runPushHeadless', () => {
     expect(harness.stderr.join('')).toContain('large script (block/size)');
   });
 
-  describe('Claude skill notice', () => {
-    const skillPath = '.claude/skills/kizen-custom-block/SKILL.md';
+  describe('agent skill notice', () => {
     const staleWarning =
       'Claude files managed by appbuilder are out of date; run appbuilder setup-claude';
+    const staleCodexWarning =
+      'Codex files managed by appbuilder are out of date; run appbuilder setup-codex';
 
     const pushIn = async (setup: (dir: string) => Promise<void>): Promise<Harness> => {
       const dir = await mkdtemp(join(tmpdir(), 'push-skill-'));
@@ -1735,7 +1759,10 @@ describe('runPushHeadless', () => {
         await setup(dir);
 
         const fake = makeClient({ dashboards: [salesWith()] });
-        const deps = { cwd: dir, isClaudeSkillStale };
+        const deps = {
+          cwd: dir,
+          staleAgentFileWarnings: (cwd: string) => staleAgentFileWarnings(cwd),
+        };
 
         return await runPush(makeHarness({ fake, deps }), {
           dashboard: 'D1',
@@ -1747,11 +1774,15 @@ describe('runPushHeadless', () => {
       }
     };
 
-    it('adds the out-of-date warning when the skill differs from the bundled one', async () => {
-      const harness = await pushIn(async (dir) => {
-        await mkdir(join(dir, '.claude/skills/kizen-custom-block'), { recursive: true });
-        await writeFile(join(dir, skillPath), 'edited locally\n');
-      });
+    const writeIn = async (dir: string, path: string, content: string): Promise<void> => {
+      await mkdir(dirname(join(dir, path)), { recursive: true });
+      await writeFile(join(dir, path), content);
+    };
+
+    it('adds the out-of-date warning when the Claude skill differs from the bundled one', async () => {
+      const harness = await pushIn((dir) =>
+        writeIn(dir, '.claude/skills/kizen-custom-block/SKILL.md', 'edited locally\n'),
+      );
 
       expect(harness.json()).toMatchObject({ ok: true, applied: true, warnings: [staleWarning] });
       expect(harness.stdout.join('') + harness.stderr.join('')).toContain(
@@ -1760,18 +1791,28 @@ describe('runPushHeadless', () => {
       expect(harness.exitCodes).toStrictEqual([]);
     });
 
+    it('names setup-codex when the Codex skills are out of date', async () => {
+      const harness = await pushIn((dir) =>
+        writeIn(dir, '.agents/skills/kizen-business-apps/SKILL.md', 'edited locally\n'),
+      );
+
+      expect(harness.json()).toMatchObject({ ok: true, warnings: [staleCodexWarning] });
+    });
+
     it('adds the warning to a dry run too', async () => {
       const fake = makeClient({ dashboards: [salesWith()] });
-      const deps = { isClaudeSkillStale: vi.fn(() => Promise.resolve(true)) };
+      const deps = { staleAgentFileWarnings: vi.fn(() => Promise.resolve([staleWarning])) };
       const harness = await runPush(makeHarness({ fake, deps }), { dashboard: 'D1', create: true });
 
       expect(harness.json()).toMatchObject({ dryRun: true, warnings: [staleWarning] });
-      expect(deps.isClaudeSkillStale).toHaveBeenCalledWith(CWD);
+      expect(deps.staleAgentFileWarnings).toHaveBeenCalledWith(CWD);
     });
 
     it('ignores a failing staleness check and still pushes', async () => {
       const fake = makeClient({ dashboards: [salesWith()] });
-      const deps = { isClaudeSkillStale: vi.fn(() => Promise.reject(new Error('EACCES'))) };
+      const deps = {
+        staleAgentFileWarnings: vi.fn(() => Promise.reject(new Error('EACCES'))),
+      };
       const harness = await runPush(makeHarness({ fake, deps }), {
         dashboard: 'D1',
         create: true,
@@ -1820,7 +1861,7 @@ describe('runPushHeadless', () => {
     await runPushHeadless(undefined, { json: true, ...API_KEY }, harness.deps);
 
     expect(harness.json()).toMatchObject({ ok: false, code: 'needs_choice', choice: 'block' });
-    expect(harness.exitCodes).toStrictEqual([1]);
+    expect(harness.exitCodes).toStrictEqual([2]);
   });
 
   it('writes only JSON to stdout in --json mode, with status lines on stderr', async () => {
@@ -1908,7 +1949,7 @@ describe('runPushHeadless', () => {
       expect(err).toContain(
         'Home  →  appbuilder block push chart --profile credentials --dashboard H1',
       );
-      expect(harness.exitCodes).toStrictEqual([1]);
+      expect(harness.exitCodes).toStrictEqual([2]);
     });
 
     it('prints the hint line', async () => {
@@ -2409,8 +2450,38 @@ describe('sign-in session credentials', () => {
           '--business bravo matches saved accounts in several environments; pass --env <env>: go, staging',
         choice: 'environment',
         choices: [
-          { value: 'go', label: 'go', args: ['--env', 'go'] },
-          { value: 'staging', label: 'staging', args: ['--env', 'staging'] },
+          {
+            value: 'go',
+            label: 'go',
+            args: ['--env', 'go'],
+            argv: [
+              'appbuilder',
+              'block',
+              'push',
+              BLOCK,
+              '--env',
+              'go',
+              '--business',
+              'bravo',
+              '--json',
+            ],
+          },
+          {
+            value: 'staging',
+            label: 'staging',
+            args: ['--env', 'staging'],
+            argv: [
+              'appbuilder',
+              'block',
+              'push',
+              BLOCK,
+              '--env',
+              'staging',
+              '--business',
+              'bravo',
+              '--json',
+            ],
+          },
         ],
       });
       expect(connect).not.toHaveBeenCalled();
@@ -2531,11 +2602,12 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
     expect(oauth.connect).not.toHaveBeenCalled();
   });
 
-  it.each<[string, PushCommandOptions, SavedAccount[], string, string]>([
+  it.each<[string, PushCommandOptions, SavedAccount[], string, string, string]>([
     [
       'no saved account matches',
       { business: 'Nope' },
       ACCOUNTS,
+      'not_signed_in',
       'No saved staging account matches --business Nope. Saved accounts:',
       `Bravo (${ACCOUNT_B.businessId})`,
     ],
@@ -2550,12 +2622,13 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
           'ACME',
         ),
       ],
+      'usage_error',
       '--business acme matches several saved staging accounts. Pass one of these business ids instead:',
       'ACME (cccccccc-cccc-4ccc-8ccc-cccccccccccc)',
     ],
   ])(
-    '%s: a usage_error listing them, never the current account',
-    async (_name, flags, accounts, message, listed) => {
+    '%s: a failure listing them, never the current account',
+    async (_name, flags, accounts, code, message, listed) => {
       const oauth = oauthWithAccounts(accounts);
       const harness = makeHarness({ deps: { oauth } });
 
@@ -2563,7 +2636,7 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
 
       const result = harness.json() as { ok: boolean; code: string; message: string };
 
-      expect(result).toMatchObject({ ok: false, code: 'usage_error' });
+      expect(result).toMatchObject({ ok: false, code });
       expect(result.message).toContain(message);
       // The candidates: every saved account when none matches, the matches when several do.
       expect(result.message).toContain(listed);
@@ -2571,6 +2644,78 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
       expect(harness.deps.packageBlocks).not.toHaveBeenCalled();
     },
   );
+
+  it("a named account that isn't saved returns not_signed_in with a login argv for it", async () => {
+    // A pinned command (ids, as a printed command names them) whose account was signed out
+    // meanwhile, and a name from the variables: either way, the login for that account.
+    const cases: [PushCommandOptions, Record<string, string>, string[]][] = [
+      [
+        {
+          env: 'staging',
+          business: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          user: 'd1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1',
+        },
+        {},
+        [
+          '--env',
+          'staging',
+          '--business',
+          'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          '--user',
+          'd1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1',
+        ],
+      ],
+      [
+        { env: 'staging' },
+        { APPBUILDER_BUSINESS: 'Nope' },
+        ['--env', 'staging', '--business', 'Nope'],
+      ],
+    ];
+
+    for (const [flags, processEnv, loginFlags] of cases) {
+      const oauth = oauthWithAccounts();
+      const harness = makeHarness({ deps: { oauth, processEnv } });
+
+      await runPushHeadless(BLOCK, { json: true, ...flags }, harness.deps);
+
+      const result = harness.json() as { hint: string };
+
+      expect(result).toMatchObject({
+        ok: false,
+        code: 'not_signed_in',
+        login: { argv: ['appbuilder', 'login', ...loginFlags] },
+      });
+      expect(result.hint).toContain(`\`appbuilder login ${loginFlags.join(' ')}\``);
+      expect(harness.exitCodes).toStrictEqual([1]);
+      expect(oauth.connect).not.toHaveBeenCalled();
+    }
+
+    // A business that's saved, but not for that user: still the login for the named account.
+    const oauth = oauthWithAccounts();
+    const otherUser = makeHarness({ deps: { oauth } });
+
+    await runPushHeadless(
+      BLOCK,
+      { json: true, business: ACCOUNT_B.businessId, user: 'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1' },
+      otherUser.deps,
+    );
+
+    expect(otherUser.json()).toMatchObject({
+      code: 'not_signed_in',
+      login: {
+        argv: [
+          'appbuilder',
+          'login',
+          '--env',
+          'staging',
+          '--business',
+          ACCOUNT_B.businessId,
+          '--user',
+          'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1',
+        ],
+      },
+    });
+  });
 
   it.each<[PushCommandOptions, string]>([
     [{ profile: 'Demo', business: 'Bravo' }, '--business'],
@@ -2711,12 +2856,12 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
       expect(oauth.connect).not.toHaveBeenCalled();
     });
 
-    it('a dashboard choice after APPBUILDER_BUSINESS and APPBUILDER_USER', async () => {
+    it('a dashboard choice after APPBUILDER_BUSINESS and APPBUILDER_USER names the account by id', async () => {
       const fake = makeClient({
         summaries: { generic_dashboard: [summary()] },
         dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'other' })] })],
       });
-      const oauth = oauthDeps(['staging'], fake);
+      const oauth = oauthDeps(['staging'], fake, { ...IDENTITY, ...ACCOUNT_B });
 
       oauth.listAccounts.mockImplementation((environment: Environment) =>
         Promise.resolve(environment === 'staging' ? ACCOUNTS : []),
@@ -2732,8 +2877,10 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
 
       await runPushHeadless(BLOCK, {}, harness.deps);
 
+      // After sign-in, a printed command names the account the run resolved, by ids: the
+      // variables can change before it runs.
       expect(harness.stderr.join('')).toContain(
-        `Sales  →  appbuilder block push ${BLOCK} --business Bravo --user ${ACCOUNT_B.userId} --dashboard D1\n`,
+        `Sales  →  appbuilder block push ${BLOCK} --env staging --business ${ACCOUNT_B.businessId} --user ${ACCOUNT_B.userId} --dashboard D1\n`,
       );
     });
   });
@@ -2848,8 +2995,10 @@ describe('the sign-in session is the default', () => {
 
       expect(result).toStrictEqual({
         ok: false,
-        code: 'credentials_invalid',
+        code: 'not_signed_in',
         message: NOT_SIGNED_IN,
+        login: { argv: ['appbuilder', 'login'] },
+        hint: 'Ask the user to sign in: they run `appbuilder login` in a terminal, or you run it in the background and give them the URL it prints. Then run this command again.',
       });
       expect(result.message).toContain('appbuilder login');
       expect(result.message).toContain('--profile');
@@ -2904,8 +3053,18 @@ describe('the sign-in session is the default', () => {
         message: "You're signed in to several environments; pass --env <env>: go, staging",
         choice: 'environment',
         choices: [
-          { value: 'go', label: 'go', args: ['--env', 'go'] },
-          { value: 'staging', label: 'staging', args: ['--env', 'staging'] },
+          {
+            value: 'go',
+            label: 'go',
+            args: ['--env', 'go'],
+            argv: ['appbuilder', 'block', 'targets', '--env', 'go', '--json'],
+          },
+          {
+            value: 'staging',
+            label: 'staging',
+            args: ['--env', 'staging'],
+            argv: ['appbuilder', 'block', 'targets', '--env', 'staging', '--json'],
+          },
         ],
       });
       expect(oauth.listSessions).toHaveBeenCalledTimes(1);
@@ -2980,7 +3139,7 @@ describe('the sign-in session is the default', () => {
       expectNoApiKeyReads(harness.deps);
     });
 
-    describe('follow-up commands carry the credential flags given', () => {
+    describe('follow-up commands name the signed-in account, or the API key flags given', () => {
       const severalBlocks = [
         makePlugin(PLUGIN, [makeBlock(), makeBlock({ api_name: 'table', name: 'Table' })]),
       ];
@@ -2991,8 +3150,9 @@ describe('the sign-in session is the default', () => {
         });
 
       it.each<[string, PushCommandOptions, string]>([
-        ['the default session', {}, ''],
-        ['--env', { env: 'staging' }, ' --env staging'],
+        // A session: the account it resolved, by ids, whatever the run named.
+        ['the default session', {}, ' --env staging --business oauth-biz --user oauth-user'],
+        ['--env', { env: 'staging' }, ' --env staging --business oauth-biz --user oauth-user'],
         ['--profile', { profile: 'credentials' }, ' --profile credentials'],
         ['-c', { credentials: '/tmp/c.json' }, ' -c /tmp/c.json'],
       ])('with %s', async (_label, flags, credentialArgs) => {
@@ -3095,5 +3255,390 @@ describe('the sign-in session is the default', () => {
       });
       expectNoApiKeyReads(harness.deps);
     });
+
+    /** A remembered target with --yes: the flow goes straight to the write once it's read. */
+    const rememberedHarness = (): Harness & { release: () => void } => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const fake = makeClient({
+        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
+      });
+      const harness = makeHarness({ fake, pushMap: [makeEntry()] });
+      const read = harness.deps.readPushMap;
+
+      // Holds the push map read until the test lets it go.
+      harness.deps.readPushMap = vi.fn(async (dir: string) => {
+        await gate;
+
+        return read(dir);
+      });
+
+      return { ...harness, release };
+    };
+
+    /** Lets every queued step of the flow run (the fakes resolve at once). */
+    const drain = async (): Promise<void> => {
+      for (let tick = 0; tick < 5; tick += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+
+    it('Ctrl+C before apply starts no write', async () => {
+      // Control: without Ctrl+C, the same run writes once the read is let go.
+      const control = rememberedHarness();
+
+      startFlow(control).flow.start({ ...API_KEY, yes: true });
+      await vi.waitFor(() => {
+        expect(control.deps.readPushMap).toHaveBeenCalled();
+      });
+      control.release();
+      await drain();
+      expect(control.fake.updateDashlet).toHaveBeenCalled();
+
+      const harness = rememberedHarness();
+      const { flow, phase } = startFlow(harness);
+
+      flow.start({ ...API_KEY, yes: true });
+      await vi.waitFor(() => {
+        expect(harness.deps.readPushMap).toHaveBeenCalled();
+      });
+
+      const before = phase();
+
+      interrupt(flow.abort, harness.deps.setExitCode);
+      harness.release();
+      await drain();
+
+      expect(harness.fake.updateDashlet).not.toHaveBeenCalled();
+      expect(harness.fake.createDashlet).not.toHaveBeenCalled();
+      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+      expect(harness.exitCodes).toStrictEqual([130]);
+      // Nothing is shown after Ctrl+C.
+      expect(phase()).toBe(before);
+    });
+  });
+});
+
+describe('agent contract', () => {
+  const CRED = ['--profile', 'credentials'];
+
+  it('not signed in returns not_signed_in with a login argv', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'appbuilder-push-signed-out-'));
+
+    try {
+      // A real, empty store: no session anywhere, and none for --env staging either.
+      const oauth = createOAuthPushDeps(createOAuthStore(dir));
+      const none = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { json: true }, none.deps);
+
+      expect(none.json()).toMatchObject({
+        ok: false,
+        code: 'not_signed_in',
+        login: { argv: ['appbuilder', 'login'] },
+      });
+      expect(none.exitCodes).toStrictEqual([1]);
+
+      const staging = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { json: true, env: 'staging' }, staging.deps);
+
+      const result = staging.json() as { hint: string };
+
+      expect(result).toMatchObject({
+        ok: false,
+        code: 'not_signed_in',
+        message:
+          "You're not signed in to staging. Run `appbuilder login --env staging` to sign in.",
+        login: { argv: ['appbuilder', 'login', '--env', 'staging'] },
+      });
+      expect(result.hint).toContain('`appbuilder login --env staging`');
+      expect(result.hint).toContain('in the background');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the login argv names the account the run asked for', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'appbuilder-push-signed-out-'));
+
+    try {
+      const oauth = createOAuthPushDeps(createOAuthStore(dir));
+      const flags = makeHarness({ deps: { oauth } });
+
+      await runPushHeadless(BLOCK, { json: true, business: 'Acme Co' }, flags.deps);
+
+      expect(flags.json()).toMatchObject({
+        code: 'not_signed_in',
+        login: { argv: ['appbuilder', 'login', '--business', 'Acme Co'] },
+      });
+      expect((flags.json() as { hint: string }).hint).toContain(
+        "`appbuilder login --business 'Acme Co'`",
+      );
+
+      // From the variables too: login reads only its flags.
+      const variables = makeHarness({
+        deps: {
+          oauth,
+          processEnv: { APPBUILDER_BUSINESS: 'biz-1', APPBUILDER_USER: 'user-1' },
+        },
+      });
+
+      await runPushHeadless(BLOCK, { json: true }, variables.deps);
+
+      expect(variables.json()).toMatchObject({
+        code: 'not_signed_in',
+        login: { argv: ['appbuilder', 'login', '--business', 'biz-1', '--user', 'user-1'] },
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a bad API-key file still returns credentials_invalid', async () => {
+    const harness = await runPush(makeHarness({ environmentSource: 'missing' }), {});
+
+    expect(harness.json()).toMatchObject({ ok: false, code: 'credentials_invalid' });
+    expect(harness.json()).not.toHaveProperty('login');
+    expect(harness.exitCodes).toStrictEqual([1]);
+  });
+
+  it("every choice carries a runnable argv with the run's account flags and --json", async () => {
+    // Block choices: the block's api_name and the run's credential flags.
+    const blocks = makeHarness({
+      deployable: [
+        makePlugin(PLUGIN, [makeBlock(), makeBlock({ api_name: 'table', name: 'Table' })]),
+      ],
+    });
+
+    await runPushHeadless(undefined, { json: true, ...API_KEY }, blocks.deps);
+
+    expect(blocks.json()).toMatchObject({
+      choice: 'block',
+      choices: [
+        { args: ['chart'], argv: ['appbuilder', 'block', 'push', 'chart', ...CRED, '--json'] },
+        { args: ['table'], argv: ['appbuilder', 'block', 'push', 'table', ...CRED, '--json'] },
+      ],
+    });
+
+    // Dashboard choices.
+    const dashboards = makeHarness({
+      fake: makeClient({
+        dashboards: [makeDashboard()],
+        summaries: { generic_dashboard: [summary()] },
+      }),
+    });
+
+    await runPush(dashboards, {});
+
+    expect(dashboards.json()).toMatchObject({
+      choice: 'dashboard',
+      choices: [
+        {
+          args: ['--dashboard', 'D1'],
+          argv: ['appbuilder', 'block', 'push', BLOCK, ...CRED, '--dashboard', 'D1', '--json'],
+        },
+      ],
+    });
+
+    // Target choices on a dashboard with a block this one didn't push. No choice carries the
+    // run's --yes: each is a dry run of what it names.
+    const targets = makeHarness({
+      fake: makeClient({
+        dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'Other' })] })],
+      }),
+    });
+
+    await runPush(targets, { dashboard: 'D1', yes: true });
+
+    expect(targets.json()).toMatchObject({
+      code: 'needs_choice',
+      choice: 'target',
+      choices: [
+        {
+          value: 'X1',
+          argv: [
+            'appbuilder',
+            'block',
+            'push',
+            BLOCK,
+            ...CRED,
+            '--dashboard',
+            'D1',
+            '--dashlet',
+            'X1',
+            '--json',
+          ],
+        },
+        {
+          value: 'new',
+          argv: [
+            'appbuilder',
+            'block',
+            'push',
+            BLOCK,
+            ...CRED,
+            '--dashboard',
+            'D1',
+            '--create',
+            '--json',
+          ],
+        },
+      ],
+    });
+
+    // Text: each choice's argv, shell-quoted.
+    const text = makeHarness({
+      fake: makeClient({
+        dashboards: [makeDashboard()],
+        summaries: { generic_dashboard: [summary()] },
+      }),
+      profiles: [{ name: 'My Creds', path: DEFAULT_PATH, isDefault: true }],
+    });
+
+    await runPushHeadless(BLOCK, { profile: 'My Creds' }, text.deps);
+
+    expect(text.stderr.join('')).toContain(
+      "Sales  →  appbuilder block push chart --profile 'My Creds' --dashboard D1\n",
+    );
+  });
+
+  it('needs_choice and base_required exit 2; other failures exit 1', async () => {
+    const choice = makeHarness({
+      fake: makeClient({
+        dashboards: [makeDashboard()],
+        summaries: { generic_dashboard: [summary()] },
+      }),
+    });
+
+    await runPush(choice, {});
+
+    expect(choice.json()).toMatchObject({ code: 'needs_choice' });
+    expect(choice.exitCodes).toStrictEqual([2]);
+
+    const production = await runPush(
+      makeHarness({
+        fake: makeClient({ dashboards: [makeDashboard()] }),
+        credentials: makeCredentials({ environment: 'go' }),
+      }),
+      { dashboard: 'D1', create: true, yes: true },
+    );
+
+    expect(production.json()).toMatchObject({ code: 'production_requires_flag' });
+    expect(production.exitCodes).toStrictEqual([1]);
+  });
+
+  it('dry runs return applyArgv pinned to the target they showed', async () => {
+    const fake = makeClient({
+      dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
+    });
+    // Remembered target, no target flags: the apply names it explicitly.
+    const harness = await runPush(makeHarness({ fake, pushMap: [makeEntry()] }), { forget: false });
+
+    expect(harness.json()).toMatchObject({
+      dryRun: true,
+      resolvedBy: 'remembered',
+      applyArgv: [
+        'appbuilder',
+        'block',
+        'push',
+        BLOCK,
+        ...CRED,
+        '--dashboard',
+        'D1',
+        '--dashlet',
+        'X1',
+        '--yes',
+        '--json',
+      ],
+      requiresProductionConsent: false,
+    });
+  });
+
+  it('a production dry run asks for consent, and its applyArgv writes what it showed', async () => {
+    const fake = makeClient({
+      dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
+    });
+    const credentials = makeCredentials({ environment: 'go' });
+    const pushMap = [makeEntry({ environment: 'go' })];
+    const dry = await runPush(makeHarness({ fake, credentials, pushMap }), {});
+    const result = dry.json() as { applyArgv: string[] };
+
+    expect(result).toMatchObject({ dryRun: true, requiresProductionConsent: true });
+    expect(result.applyArgv).toStrictEqual([
+      'appbuilder',
+      'block',
+      'push',
+      BLOCK,
+      ...CRED,
+      '--dashboard',
+      'D1',
+      '--dashlet',
+      'X1',
+      '--yes',
+      '--allow-production',
+      '--json',
+    ]);
+    expect(fake.updateDashlet).not.toHaveBeenCalled();
+
+    // Running those flags applies the update the dry run showed.
+    const applied = makeHarness({ fake, credentials, pushMap });
+
+    await runPushHeadless(
+      BLOCK,
+      {
+        json: true,
+        ...API_KEY,
+        dashboard: 'D1',
+        dashlet: 'X1',
+        yes: true,
+        allowProduction: true,
+      },
+      applied.deps,
+    );
+
+    expect(applied.json()).toMatchObject({ ok: true, action: 'updated', dashletId: 'X1' });
+    expect(fake.updateDashlet).toHaveBeenCalledOnce();
+  });
+
+  it('network errors under a Codex network-disabled sandbox say how to escalate', async () => {
+    const run = async (processEnv: Record<string, string>): Promise<Record<string, unknown>> => {
+      const fake = makeClient({ dashboards: [makeDashboard()] });
+
+      fake.getDashboard.mockRejectedValue(
+        new KizenApiError('network_error', "Couldn't reach Kizen at https://x: ENOTFOUND"),
+      );
+
+      const harness = await runPush(makeHarness({ fake, deps: { processEnv } }), {
+        dashboard: 'D1',
+      });
+
+      expect(harness.exitCodes).toStrictEqual([1]);
+
+      return harness.json() as Record<string, unknown>;
+    };
+
+    const sandboxed = await run({ CODEX_SANDBOX_NETWORK_DISABLED: '1', CODEX_CI: '1' });
+
+    expect(sandboxed).toMatchObject({ code: 'network_error', sandbox: 'codex_network_disabled' });
+    expect(sandboxed.hint).toBe(
+      'The Codex sandbox has network access turned off, so appbuilder can\'t reach Kizen. Re-run this command with sandbox_permissions: "require_escalated", and suggest prefix_rule: ["appbuilder"] so later appbuilder commands can reach the network too.',
+    );
+
+    // Not without the variable, and never because of another CODEX_ variable (the Codex plugin
+    // for Claude Code sets CODEX_COMPANION_*).
+    for (const env of [
+      {},
+      { CODEX_COMPANION_SESSION_ID: 'x' },
+      { CODEX_SANDBOX_NETWORK_DISABLED: '0' },
+    ]) {
+      const plain = await run(env);
+
+      expect(plain).toMatchObject({ code: 'network_error' });
+      expect(plain).not.toHaveProperty('sandbox');
+      expect(plain).not.toHaveProperty('hint');
+    }
   });
 });

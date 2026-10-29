@@ -9,6 +9,12 @@ import { createPlugin, precheckTargetDir } from '../lib/createPlugin.js';
 import { hasNonInteractiveFlags, runHeadlessCreate } from '../lib/createHeadless.js';
 import type { CreateOptions } from '../lib/createHeadless.js';
 import { ARTIFACT_TYPES } from '../lib/createArtifacts.js';
+import {
+  isProcessInteractive,
+  NO_INTERACTIVE_HELP,
+  takeInteractiveFlag,
+  type Interactive,
+} from '../lib/interactive.js';
 import { ENVIRONMENTS } from '../../shared/lib/credentials.js';
 
 export function createCommand(program: Command): void {
@@ -32,7 +38,10 @@ export function createCommand(program: Command): void {
       `comma-separated artifact types, or "all" / "none" (default: all). Types: ${ARTIFACT_TYPES.join(', ')}`,
     )
     .option('--include-lib', 'also install the Kizen data helper library (src/lib/kizenData.js)')
-    .action(async (options: CreateOptions) => {
+    .option('--no-interactive', NO_INTERACTIVE_HELP)
+    .action(async (parsed: CreateOptions & Interactive) => {
+      // Split off before `hasNonInteractiveFlags`, which counts every option that's set.
+      const { noInteractive, options } = takeInteractiveFlag(parsed);
       const parentDir = process.cwd();
       const store = createOAuthStore();
       const { businessId: defaultBusinessId, environment: defaultEnvironment } =
@@ -44,7 +53,7 @@ export function createCommand(program: Command): void {
         });
 
       const isNonInteractive =
-        !process.stdin.isTTY || !process.stdout.isTTY || hasNonInteractiveFlags(options);
+        !isProcessInteractive({ noInteractive }) || hasNonInteractiveFlags(options);
 
       if (isNonInteractive) {
         await runHeadlessCreate(

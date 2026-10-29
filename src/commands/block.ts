@@ -12,6 +12,12 @@ import {
   type PushCommandOptions,
   type TargetsCommandOptions,
 } from '../lib/pushHeadless.js';
+import {
+  isProcessInteractive,
+  NO_INTERACTIVE_HELP,
+  takeInteractiveFlag,
+  type Interactive,
+} from '../lib/interactive.js';
 import { PushUI } from '../ui/PushUI.js';
 
 const errorLine = (error: unknown): string =>
@@ -84,6 +90,7 @@ export function blockCommand(program: Command): void {
     .option('--force', 'overwrite even if the block was edited in Kizen since the last push')
     .option('--forget', 'clear the remembered target for this block first')
     .option('--json', 'print a JSON result to stdout (always headless)')
+    .option('--no-interactive', NO_INTERACTIVE_HELP)
     .option('--env <env>', 'environment of the `appbuilder login` session to use')
     .option(
       '--business <id-or-name>',
@@ -93,11 +100,12 @@ export function blockCommand(program: Command): void {
       '--user <userId>',
       'with --business, use the saved account of this user id (default: $APPBUILDER_USER)',
     )
-    .action(async (apiName: string | undefined, options: PushCommandOptions) => {
+    .action(async (apiName: string | undefined, parsed: PushCommandOptions & Interactive) => {
       try {
         const deps = createDefaultPushDeps(process.cwd());
+        const { noInteractive, options } = takeInteractiveFlag(parsed);
 
-        if (!process.stdin.isTTY || !process.stdout.isTTY || options.json === true) {
+        if (!isProcessInteractive({ json: options.json === true, noInteractive })) {
           await runPushHeadless(apiName, options, deps);
 
           return;

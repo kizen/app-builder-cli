@@ -172,7 +172,7 @@ export async function runHeadlessCreate(
 
   if (input.developerBusinessId.trim() === '') {
     deps.writeStderr(
-      'Warning: no developer_business_id configured, so this plugin cannot be preview-published yet.\n',
+      "Warning: no developer_business_id configured, so this plugin can't be preview-published to the marketplace (plugin-wizard) yet. Business Apps (`appbuilder app push`) don't need it.\n",
     );
   }
 }

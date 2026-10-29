@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,7 @@ import {
   formatManagedFileLine,
   nodeManagedFs,
   planManagedFiles,
+  UnsafeManagedPathError,
   type ManagedFs,
 } from './managedFiles.js';
 
@@ -95,6 +96,97 @@ describe('applyManagedFiles', () => {
       { path: 'a/b/c/deep.md', status: 'created' },
     ]);
     expect(await read('a/b/c/deep.md')).toBe('deep\n');
+  });
+});
+
+describe('managed files never write outside the plugin', () => {
+  let outside: string;
+
+  beforeEach(async () => {
+    outside = await mkdtemp(join(tmpdir(), 'managed-outside-'));
+    await writeFile(join(outside, 'victim.md'), 'outside\n', 'utf-8');
+  });
+
+  afterEach(async () => {
+    await rm(outside, { recursive: true, force: true });
+  });
+
+  const SKILL = '.agents/skills/kizen-custom-block/SKILL.md';
+  const files = [
+    { path: 'first.md', content: 'bundled first\n' },
+    { path: SKILL, content: 'bundled skill\n' },
+  ];
+
+  /** Nothing new in the plugin folder but `kept`, and the outside file untouched. */
+  const expectNothingWritten = async (kept: string[]): Promise<void> => {
+    expect((await readdir(dir)).sort()).toStrictEqual(kept.sort());
+    expect(await readFile(join(outside, 'victim.md'), 'utf-8')).toBe('outside\n');
+    expect((await readdir(outside)).sort()).toStrictEqual(['victim.md']);
+  };
+
+  it('refuses a managed file that is a symlink, writing nothing', async () => {
+    await mkdir(join(dir, dirname(SKILL)), { recursive: true });
+    await symlink(join(outside, 'victim.md'), join(dir, SKILL));
+
+    const fs = spyFs();
+
+    await expect(applyManagedFiles(dir, files, {}, fs)).rejects.toThrow(
+      new UnsafeManagedPathError(SKILL, `${SKILL} is a symbolic link`),
+    );
+    expect(fs.writeFile).not.toHaveBeenCalled();
+    await expectNothingWritten(['.agents']);
+  });
+
+  it('refuses a symlinked parent directory, writing nothing', async () => {
+    await symlink(outside, join(dir, '.agents'));
+
+    const fs = spyFs();
+
+    await expect(applyManagedFiles(dir, files, {}, fs)).rejects.toThrow(
+      '.agents is a symbolic link',
+    );
+    expect(fs.writeFile).not.toHaveBeenCalled();
+    await expectNothingWritten(['.agents']);
+  });
+
+  it('refuses in a dry run too', async () => {
+    await symlink(outside, join(dir, '.agents'));
+
+    await expect(planManagedFiles(dir, files)).rejects.toBeInstanceOf(UnsafeManagedPathError);
+  });
+
+  it('refuses a directory where a managed file goes', async () => {
+    await mkdir(join(dir, SKILL), { recursive: true });
+
+    await expect(applyManagedFiles(dir, files)).rejects.toThrow(`${SKILL} is not a regular file`);
+    await expect(stat(join(dir, 'first.md'))).rejects.toThrow();
+  });
+
+  it('refuses a file where a managed directory goes', async () => {
+    await writeFile(join(dir, '.agents'), 'a file\n', 'utf-8');
+
+    await expect(applyManagedFiles(dir, files)).rejects.toThrow('.agents is not a directory');
+    await expect(stat(join(dir, 'first.md'))).rejects.toThrow();
+  });
+
+  it('refuses a path that climbs out of the plugin', async () => {
+    await expect(
+      applyManagedFiles(dir, [{ path: '../victim.md', content: 'x' }]),
+    ).rejects.toBeInstanceOf(UnsafeManagedPathError);
+  });
+
+  it('still writes through a plugin folder that is itself reached by a symlink', async () => {
+    const link = `${dir}-link`;
+
+    await symlink(dir, link);
+
+    try {
+      await applyManagedFiles(link, files);
+
+      expect(await read(SKILL)).toBe('bundled skill\n');
+    } finally {
+      await rm(link, { force: true });
+    }
   });
 });
 

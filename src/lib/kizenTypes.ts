@@ -40,6 +40,14 @@ export interface WireCustomObject {
   id: string;
   object_name: string;
   fetch_url: string;
+  /** The api name (`client_client`). */
+  name?: string;
+  entity_name?: string;
+}
+
+export interface ListCustomObjectsOptions {
+  /** false includes Contacts (`custom_only=false`); the server's default (true) leaves it out. */
+  customOnly?: boolean;
 }
 
 export interface EventScriptEntry {
@@ -102,7 +110,7 @@ export interface UpdateDashletBody {
 
 export interface KizenClient {
   listDashboards(type: DashboardType, customObjectId?: string): Promise<WireDashboardSummary[]>;
-  listCustomObjects(): Promise<WireCustomObject[]>;
+  listCustomObjects(options?: ListCustomObjectsOptions): Promise<WireCustomObject[]>;
   getCustomObject(id: string): Promise<WireCustomObject>;
   getClientObjectId(): Promise<string | null>;
   getDashboard(id: string): Promise<WireDashboard>;
@@ -112,14 +120,26 @@ export interface KizenClient {
     dashletId: string,
     body: UpdateDashletBody,
   ): Promise<WireDashlet>;
+  /**
+   * An authenticated JSON request to an API path (starting with `/`). Resolves to the parsed
+   * body, or undefined for an empty one (204). Fails with a `KizenApiError` carrying the body.
+   */
+  requestJson(method: KizenJsonMethod, path: string, body?: unknown): Promise<unknown>;
+  /** An authenticated form-urlencoded POST to an API path, resolving to the parsed JSON body. */
+  postForm(path: string, fields: Readonly<Record<string, string>>): Promise<unknown>;
+  /** An authenticated GET of an API path, resolving to the raw response bytes. */
+  getBinary(path: string): Promise<Uint8Array>;
 }
+
+export type KizenJsonMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 export type KizenApiErrorKind =
   | 'auth_failed'
   | 'forbidden'
   | 'not_found'
   | 'api_error'
-  | 'network_error';
+  | 'network_error'
+  | 'session_store_unwritable';
 
 export interface PushMapEntry {
   environment: string;

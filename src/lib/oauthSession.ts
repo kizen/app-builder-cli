@@ -169,6 +169,10 @@ export async function login(
   options: LoginOptions = {},
 ): Promise<OAuthSession> {
   const intro = urlIntro(environment, options.interactive ?? true);
+
+  // Before the browser: a sign-in the store can't save would be thrown away at the end.
+  await deps.store.probeWritable();
+
   const metadata = await discover(apiOriginFor(environment), deps.fetch);
   const cached = await deps.store.readClientId(metadata.issuer);
   const clientId = cached ?? (await registerClient(metadata, deps.fetch));
@@ -390,6 +394,14 @@ export function createTokenProvider(
     if (remainingMs <= 0) {
       return current.accessToken;
     }
+
+    // The request below spends the refresh token: Kizen rotates it, and the old one stops working
+    // after the grace window. A store this process can't write (an agent's sandbox, say) would
+    // lose the new pair at the commit, and the account would be signed out once the grace window
+    // passed. So the store has to prove it can be written first; if it can't, this throws
+    // (`session_store_unwritable` for EPERM, EACCES, EROFS, ENOSPC or EDQUOT) with the stored
+    // session untouched. The probe writes more than a session file, so a full disk fails here too.
+    await deps.store.probeWritable();
 
     let tokens: TokenResponse;
 
