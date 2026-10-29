@@ -2050,7 +2050,6 @@ describe('app pull', () => {
 
       const dir = join(tmp, 'acme-v2');
 
-      // Strict, so a key added to the release pull's result (like the preview pull's) fails here.
       expect(h.json()).toStrictEqual({
         ok: true,
         environment: 'staging',
@@ -2141,7 +2140,6 @@ describe('app pull --preview', () => {
 
   const PREVIEW_DIR = join('/work', 'acme-preview');
 
-  /** A harness for the folder the pull created, with the state it wrote there. */
   const pulledFolder = (h: Harness, files: Files): Harness => {
     const pulled = h.otherDirs.get(PREVIEW_DIR);
 
@@ -2489,7 +2487,6 @@ describe('app pull --preview', () => {
                 '.env': 'SECRET=1',
                 '.git/config': 'x',
               },
-              // Raw, so the safety-listed entries stay in the zip next to the lineage record.
               lineage: {
                 raw: JSON.stringify({ format: 1, ...lineageOf('3') }),
               },

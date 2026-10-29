@@ -2669,7 +2669,7 @@ export type AppPullPlan = AppPullSource & {
 const isInside = (parent: string, child: string): boolean => child.startsWith(parent + sep);
 
 const PREVIEW_HAS_NO_SOURCE_MESSAGE =
-  "Your preview has no source package, so there's nothing to pull. Push it again with `appbuilder app push`.";
+  'Your preview has no source package. Push it again with `appbuilder app push`.';
 
 export async function planPull(
   context: AppContext,
@@ -2736,7 +2736,6 @@ export async function planPull(
 
 export interface PulledPreview {
   sourcePackageId: string;
-  /** The base recorded for the new folder: the preview's lineage, when it checks out. */
   base: RecordedBase;
 }
 
@@ -2750,7 +2749,7 @@ export interface AppliedAppPull {
 }
 
 export const UNVERIFIED_PREVIEW_BASE_WARNING = (dir: string): string =>
-  `Your preview's source doesn't say which release it's based on, or that release has been replaced, so no base is recorded for ${dir}. A push from there finds one when it can, or stops with \`base_required\`.`;
+  `No base is recorded for ${dir}. A push from there finds one when it can, or stops with \`base_required\`.`;
 
 interface PulledSource {
   zip: Uint8Array;
@@ -2772,7 +2771,6 @@ async function pulledRelease(
     : source;
 }
 
-/** The new folder holds your preview, so it's based on what the preview's verified lineage says. */
 async function pulledPreview(context: PublishedContext): Promise<AppStep<PulledSource>> {
   let preview: BusinessAppDefinition;
 
