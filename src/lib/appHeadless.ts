@@ -35,6 +35,7 @@ import {
   planPush,
   planRollback,
   preparePush,
+  pullTargetOf,
   recordedFolderBase,
   requireDeleteAppConsent,
   type AppChoiceKind,
@@ -119,6 +120,7 @@ export interface AppMergeCommandOptions extends AppCommandOptions {
 
 export interface AppPullOptions extends AppCommandOptions {
   out?: string;
+  preview?: boolean;
 }
 
 interface Runner {
@@ -1211,17 +1213,48 @@ export async function runAppRollbackHeadless(
   }
 }
 
-export const formatPullLines = (plan: AppPullPlan, applied: AppliedAppPull): string[] => [
-  `✓ Extracted v${plan.version} of ${plan.summary.name ?? plan.summary.baseApiName} into ${applied.dir} (${String(applied.written.length)} files)`,
-  ...pathList('Left out (safety list)', applied.skipped),
-];
+export const formatPullLines = (plan: AppPullPlan, applied: AppliedAppPull): string[] => {
+  const name = plan.summary.name ?? plan.summary.baseApiName;
+  const files = `(${String(applied.written.length)} files)`;
+
+  return [
+    plan.source === 'release'
+      ? `✓ Extracted v${plan.version} of ${name} into ${applied.dir} ${files}`
+      : `✓ Extracted your preview of ${name} into ${applied.dir} ${files}`,
+    ...(applied.preview === undefined ? [] : [`Folder base: ${baseText(applied.preview.base)}`]),
+    ...pathList('Left out (safety list)', applied.skipped),
+  ];
+};
+
+const pullSourceJson = (plan: AppPullPlan, applied: AppliedAppPull): Record<string, unknown> =>
+  plan.source === 'release'
+    ? { version: plan.version }
+    : {
+        source: 'preview',
+        preview: {
+          updated: plan.updated,
+          sourcePackageId: applied.preview?.sourcePackageId ?? null,
+        },
+        base: applied.preview?.base ?? null,
+      };
 
 export async function runAppPullHeadless(
-  version: string,
+  version: string | undefined,
   options: AppPullOptions,
   deps: AppDeps,
 ): Promise<void> {
-  const rerun = [version, ...(options.out === undefined ? [] : ['--out', options.out])];
+  const target = pullTargetOf(version, options.preview === true);
+
+  if (!target.ok) {
+    runner('appbuilder app pull', [], options, deps).fail(target);
+
+    return;
+  }
+
+  const rerun = [
+    ...(target.value.kind === 'release' ? [target.value.version] : ['--preview']),
+    ...(options.out === undefined ? [] : ['--out', options.out]),
+  ];
   const run = runner('appbuilder app pull', rerun, options, deps);
   const { output, fail } = run;
 
@@ -1232,7 +1265,7 @@ export async function runAppPullHeadless(
       return;
     }
 
-    const planned = await planPull(context, version, options, deps);
+    const planned = await planPull(context, target.value, options, deps);
 
     if (!planned.ok) {
       fail(planned);
@@ -1261,7 +1294,7 @@ export async function runAppPullHeadless(
       {
         ok: true,
         ...appJson(plan.summary),
-        version: plan.version,
+        ...pullSourceJson(plan, applied.value),
         dir,
         written,
         skipped,

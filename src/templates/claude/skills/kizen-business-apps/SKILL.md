@@ -1,6 +1,6 @@
 ---
 name: kizen-business-apps
-description: Publish, preview, merge, roll back or pull this plugin as a Kizen Business App with `appbuilder app` (versions, push, publish, merge, rollback, pull, actions, preview). Use it when the user wants to release this plugin to their Kizen business, save, update or delete their preview, publish a new Live version, resolve a publish conflict or merge someone else's Live changes, restore an earlier release, download a released version's source, or link the app's JS actions to objects.
+description: Publish, preview, merge, roll back or pull this plugin as a Kizen Business App with `appbuilder app` (versions, push, publish, merge, rollback, pull, actions, preview). Use it when the user wants to release this plugin to their Kizen business, save, update or delete their preview, publish a new Live version, resolve a publish conflict or merge someone else's Live changes, restore an earlier release, download a released version's or their preview's source, or link the app's JS actions to objects.
 ---
 
 # Kizen Business Apps
@@ -68,6 +68,7 @@ Every push and rollback stores the preview's base inside the preview's source on
 
 - `appbuilder app rollback <n> --json` restores released version n as the user's preview (dry run, then `applyArgv`). Its `next` is the publish dry run that makes it Live.
 - `appbuilder app pull <n> --json` downloads release n into a new folder, `../<api_name>-v<n>` or `--out <dir>`, and records n as that folder's base. It never writes into an existing folder and needs no `--yes`. Continue in the folder it reports as `dir`.
+- `appbuilder app pull --preview --json` does the same with the user's own preview, into `../<api_name>-preview` or `--out <dir>`. Pass `<n>` or `--preview`, never both. The result has `source: "preview"`, `preview` and `base` instead of `version`. `base.recorded: true` means the folder's base is the preview's base, so you can push and publish from it as usual; `false` (with a warning) means the preview doesn't say what it's based on, and the first push from the folder may stop with `base_required`. `no_preview` means the user has no preview to pull.
 
 ### Delete a preview
 
@@ -113,9 +114,9 @@ Git's file list (tracked files, plus untracked ones `.gitignore` doesn't exclude
 | `base_required` | See "No recorded base" above. |
 | `publish_conflict` | Run `next[0].argv`: a merge dry run; a push dry run when `conflict.reason` is `base_unknown`; or, when your preview changed since the dry run, a new publish dry run. |
 | `unresolved_conflicts` | Resolve the markers in `files`, then push again. |
-| `no_preview` | Push first. |
+| `no_preview` | Push first. For `pull --preview`, the user has no preview: tell them, or pull a release instead. |
 | `preview_changed` | Nothing was deleted. Run `next[0].argv`, a new `preview delete` dry run, and show it to the user before going on. |
-| `preview_incomplete` | Push again, then publish. |
+| `preview_incomplete` | Push again, then publish (or pull). |
 | `thumbnail_required` | Add a thumbnail to the plugin, push, then publish. |
 | `source_invalid` | The folder can't be zipped (no `kizen.json`, an unreadable `.kizenignore`, a folder git ignores, or a file over 50 MiB or 200 MiB in all). Fix what `message` says, for example with a `.kizenignore` entry. |
 | `validation_failed` | Fix every item in `issues`, then run the command again. |

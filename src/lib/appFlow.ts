@@ -2634,36 +2634,80 @@ export async function applyRollback(
   });
 }
 
-export interface AppPullPlan {
+export type AppPullTarget = { kind: 'release'; version: string } | { kind: 'preview' };
+
+export function pullTargetOf(
+  version: string | undefined,
+  preview: boolean,
+): AppStep<AppPullTarget> {
+  if (version !== undefined && preview) {
+    return failure('usage_error', 'Pass either <version> or --preview, not both.');
+  }
+
+  if (version !== undefined) {
+    return success({ kind: 'release', version });
+  }
+
+  return preview
+    ? success({ kind: 'preview' })
+    : failure(
+        'usage_error',
+        'Missing argument <version>. Usage: appbuilder app pull <version>, or appbuilder app pull --preview for your preview.',
+      );
+}
+
+export type AppPullSource =
+  | { source: 'release'; version: string }
+  | { source: 'preview'; updated: string | null };
+
+export type AppPullPlan = AppPullSource & {
   summary: AppSummary;
-  version: string;
   dir: string;
   warnings: string[];
-}
+};
 
 const isInside = (parent: string, child: string): boolean => child.startsWith(parent + sep);
 
+const PREVIEW_HAS_NO_SOURCE_MESSAGE =
+  "Your preview has no source package, so there's nothing to pull. Push it again with `appbuilder app push`.";
+
 export async function planPull(
   context: AppContext,
-  versionArg: string,
+  target: AppPullTarget,
   options: { out?: string },
   deps: AppDeps,
 ): Promise<AppStep<AppPullPlan>> {
-  const parsed = parseVersionArg(versionArg);
+  let source: AppPullSource;
 
-  if (!parsed.ok) {
-    return parsed;
+  if (target.kind === 'release') {
+    const parsed = parseVersionArg(target.version);
+
+    if (!parsed.ok) {
+      return parsed;
+    }
+
+    if (context.app === null) {
+      return notPublished(context, 'pull');
+    }
+
+    source = { source: 'release', version: parsed.value };
+  } else {
+    if (context.app === null || context.yourPreview === null) {
+      return failure('no_preview', NO_PREVIEW_MESSAGE(context.baseApiName));
+    }
+
+    source = { source: 'preview', updated: context.yourPreview.updated };
   }
 
-  if (context.app === null) {
-    return notPublished(context, 'pull');
-  }
-
-  const version = parsed.value;
   const cwd = resolve(deps.cwd);
   const dir =
     options.out === undefined || options.out === ''
-      ? join(dirname(cwd), `${context.baseApiName}-v${version}`)
+      ? join(
+          dirname(cwd),
+          source.source === 'release'
+            ? `${context.baseApiName}-v${source.version}`
+            : `${context.baseApiName}-preview`,
+        )
       : resolve(cwd, options.out);
 
   if (dir === cwd || isInside(dir, cwd)) {
@@ -2687,7 +2731,13 @@ export async function planPull(
         ]
       : [];
 
-  return success({ summary: appSummary(context), version, dir, warnings });
+  return success({ summary: appSummary(context), ...source, dir, warnings });
+}
+
+export interface PulledPreview {
+  sourcePackageId: string;
+  /** The base recorded for the new folder: the preview's lineage, when it checks out. */
+  base: RecordedBase;
 }
 
 export interface AppliedAppPull {
@@ -2696,6 +2746,75 @@ export interface AppliedAppPull {
   skipped: string[];
   remembered: boolean;
   warnings: string[];
+  preview?: PulledPreview;
+}
+
+export const UNVERIFIED_PREVIEW_BASE_WARNING = (dir: string): string =>
+  `Your preview's source doesn't say which release it's based on, or that release has been replaced, so no base is recorded for ${dir}. A push from there finds one when it can, or stops with \`base_required\`.`;
+
+interface PulledSource {
+  zip: Uint8Array;
+  entry: AppStateEntry;
+  preview?: PulledPreview;
+}
+
+async function pulledRelease(
+  context: PublishedContext,
+  version: string,
+): Promise<AppStep<PulledSource>> {
+  const source = await fetchSourceZip(context, version);
+
+  return source.ok
+    ? success({
+        zip: source.value.zip,
+        entry: withFolderBase(blankEntry(context.stateKey), version, source.value.sourceId),
+      })
+    : source;
+}
+
+/** The new folder holds your preview, so it's based on what the preview's verified lineage says. */
+async function pulledPreview(context: PublishedContext): Promise<AppStep<PulledSource>> {
+  let preview: BusinessAppDefinition;
+
+  try {
+    preview = await context.api.getPreview(context.app.api_name, context.credentials.userId);
+  } catch (error) {
+    return isNotFound(error)
+      ? failure('no_preview', NO_PREVIEW_MESSAGE(context.baseApiName))
+      : appFailure(error);
+  }
+
+  const sourceId = preview.source_filesystem_package;
+
+  if (typeof sourceId !== 'string' || sourceId === '') {
+    return failure('preview_incomplete', PREVIEW_HAS_NO_SOURCE_MESSAGE);
+  }
+
+  const source = await downloadPreviewSource(context.api, sourceId);
+
+  if (!source.ok) {
+    return source;
+  }
+
+  const lineage = await verifiedLineage(context, source.value.lineage);
+
+  if (!lineage.ok) {
+    return lineage;
+  }
+
+  const blank = blankEntry(context.stateKey);
+  const base = lineage.value;
+
+  return success({
+    zip: source.value.zip,
+    entry: {
+      ...(base === null
+        ? blank
+        : withFolderBase(blank, base.baseLiveVersion, base.baseSourcePackageId)),
+      previewSourcePackageId: sourceId,
+    },
+    preview: { sourcePackageId: sourceId, base: recordedBase(base?.baseLiveVersion) },
+  });
 }
 
 export async function applyPull(
@@ -2707,10 +2826,15 @@ export async function applyPull(
   const target = withApp(context);
 
   if (target === null) {
-    return notPublished(context, 'pull');
+    return plan.source === 'release'
+      ? notPublished(context, 'pull')
+      : failure('no_preview', NO_PREVIEW_MESSAGE(context.baseApiName));
   }
 
-  const source = await fetchSourceZip(target, plan.version);
+  const source =
+    plan.source === 'release'
+      ? await pulledRelease(target, plan.version)
+      : await pulledPreview(target);
 
   if (!source.ok) {
     return source;
@@ -2736,29 +2860,32 @@ export async function applyPull(
   let problem: string | null;
 
   try {
-    await deps.writeAppState(
-      plan.dir,
-      upsertAppStateEntry(
-        emptyAppStateDoc(),
-        withFolderBase(blankEntry(context.stateKey), plan.version, source.value.sourceId),
-      ),
-    );
+    await deps.writeAppState(plan.dir, upsertAppStateEntry(emptyAppStateDoc(), source.value.entry));
     problem = null;
   } catch (error) {
     problem = errorMessage(error);
   }
+
+  const { preview } = source.value;
+  const acceptVersion = plan.source === 'release' ? plan.version : (preview?.base.version ?? null);
+  const unverified = preview !== undefined && !preview.base.recorded;
 
   return success({
     dir: plan.dir,
     written: extracted.written,
     skipped: extracted.skipped,
     remembered: problem === null,
-    warnings:
-      problem === null
+    warnings: [
+      ...(unverified ? [UNVERIFIED_PREVIEW_BASE_WARNING(plan.dir)] : []),
+      ...(problem === null
         ? []
         : [
-            `${STATE_NOT_SAVED(problem)} Before pushing from ${plan.dir}, run \`appbuilder app merge --accept-live-base --release ${plan.version} --yes\` there.`,
-          ],
+            acceptVersion === null
+              ? STATE_NOT_SAVED(problem)
+              : `${STATE_NOT_SAVED(problem)} Before pushing from ${plan.dir}, run \`appbuilder app merge --accept-live-base --release ${acceptVersion} --yes\` there.`,
+          ]),
+    ],
+    ...(preview === undefined ? {} : { preview }),
   });
 }
 

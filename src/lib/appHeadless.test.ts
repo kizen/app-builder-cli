@@ -15,6 +15,8 @@ import {
   PREVIEW_BASE_NOTICE,
   PREVIEW_CHANGED_BASE_NOTICE,
   PREVIEW_SOURCE_UNREADABLE_HINT,
+  BUSINESS_APP_FORBIDDEN_HINT,
+  UNVERIFIED_PREVIEW_BASE_WARNING,
   PROMOTED_PREVIEW_NOTICE,
   RELEASE_UNCONFIRMED_WARNING,
   REPLACED_BASE_NOTICE,
@@ -81,6 +83,8 @@ import {
   conflictsOutcome,
   lineageOf,
   sourceZipOf,
+  PREVIEW_FILES,
+  notFound,
   type LineageFixture,
 } from '../test/appHarness.js';
 
@@ -102,7 +106,7 @@ const rollback = (h: Harness, version: string, extra: Extra = {}): Promise<void>
 const merge = (h: Harness, extra: Extra = {}): Promise<void> =>
   runAppMergeHeadless({ json: true, ...API_KEY, ...extra }, h.deps);
 
-const pull = (h: Harness, version: string, extra: Extra = {}): Promise<void> =>
+const pull = (h: Harness, version: string | undefined, extra: Extra = {}): Promise<void> =>
   runAppPullHeadless(version, { json: true, ...API_KEY, ...extra }, h.deps);
 
 const versions = (h: Harness, extra: Extra = {}): Promise<void> =>
@@ -1112,6 +1116,7 @@ describe('every command', () => {
     ['merge', (h, extra) => merge(h, extra)],
     ['rollback', (h, extra) => rollback(h, '2', extra)],
     ['pull', (h, extra) => pull(h, '2', extra)],
+    ['pull --preview', (h, extra) => pull(h, undefined, { preview: true, ...extra })],
   ];
 
   it.each(commands)(
@@ -1297,6 +1302,7 @@ describe('app commands warn when managed agent skills are out of date', () => {
     ['rollback', {}, (h, extra) => rollback(h, '2', extra)],
     ['rollback', { yes: true }, (h, extra) => rollback(h, '2', extra)],
     ['pull', {}, (h, extra) => pull(h, '2', extra)],
+    ['pull --preview', {}, (h, extra) => pull(h, undefined, { preview: true, ...extra })],
   ];
 
   it.each(runs)(
@@ -2044,13 +2050,20 @@ describe('app pull', () => {
 
       const dir = join(tmp, 'acme-v2');
 
-      expect(h.json()).toMatchObject({
+      // Strict, so a key added to the release pull's result (like the preview pull's) fails here.
+      expect(h.json()).toStrictEqual({
         ok: true,
+        environment: 'staging',
+        businessId: BIZ,
+        userId: USER,
+        app: { baseApiName: BASE, apiName: APP_API, name: 'Acme', liveVersion: '3' },
         version: '2',
         dir,
         written: ['kizen.json', 'src/a.js'],
         skipped: expect.arrayContaining(['.env']) as unknown,
         remembered: true,
+        warnings: [],
+        next: [],
       });
       expect((await readdir(dir)).sort()).toStrictEqual(['.kizenapp', 'kizen.json', 'src']);
       expect(server.writes()).toStrictEqual([]);
@@ -2119,6 +2132,410 @@ describe('app pull', () => {
     await pull(h, '2', { out: '..' });
 
     expect(h.json()).toMatchObject({ ok: false, code: 'usage_error' });
+  });
+});
+
+describe('app pull --preview', () => {
+  const pullPreview = (h: Harness, extra: Extra = {}): Promise<void> =>
+    pull(h, undefined, { preview: true, ...extra });
+
+  const PREVIEW_DIR = join('/work', 'acme-preview');
+
+  /** A harness for the folder the pull created, with the state it wrote there. */
+  const pulledFolder = (h: Harness, files: Files): Harness => {
+    const pulled = h.otherDirs.get(PREVIEW_DIR);
+
+    expect(pulled).toBeDefined();
+
+    return makeHarness({
+      server: h.server,
+      files,
+      state: (pulled?.entries ?? []) as AppStateEntry[],
+    });
+  };
+
+  const EDITED = { ...PREVIEW_FILES, 'src/new.js': 'edited after the pull' };
+
+  it.each([
+    ['both <version> and --preview', '2', { preview: true }],
+    ['neither <version> nor --preview', undefined, {}],
+  ] as const)('refuses %s with usage_error before signing in', async (_name, version, extra) => {
+    const h = makeHarness({ server: makeServer({ previews: { [USER]: yourPreview() } }) });
+
+    await pull(h, version, extra);
+
+    expect(h.json()).toMatchObject({ ok: false, code: 'usage_error' });
+    expect(h.exitCodes).toStrictEqual([1]);
+    expect(h.mocks.businessApps).not.toHaveBeenCalled();
+    expect(h.server.calls).toStrictEqual([]);
+    expect(h.mocks.unzip).not.toHaveBeenCalled();
+    expect(h.mocks.writeAppState).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['you have no preview', makeServer({ previews: { [OTHER]: yourPreview() } })],
+    ["the app isn't on this business", makeServer({ exists: false })],
+  ])('fails with no_preview and creates no folder when %s', async (_name, server) => {
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    expect(h.json()).toMatchObject({
+      ok: false,
+      code: 'no_preview',
+      message:
+        'You have no preview of acme on this business. Push one first with `appbuilder app push`.',
+    });
+    expect(h.exitCodes).toStrictEqual([1]);
+    expect(server.calls.filter((call) => /^(getPreview|download)/.test(call))).toStrictEqual([]);
+    expect(h.mocks.unzip).not.toHaveBeenCalled();
+    expect(h.mocks.writeAppState).not.toHaveBeenCalled();
+  });
+
+  it('fails with no_preview when the preview is deleted between the list and the download', async () => {
+    const server = makeServer({ previews: { [USER]: yourPreview() } });
+
+    server.api.getPreview.mockImplementationOnce((apiName, owner) =>
+      Promise.reject(notFound(`/${apiName}/previews/${owner}`)),
+    );
+
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    expect(h.json()).toMatchObject({ ok: false, code: 'no_preview' });
+    expect(h.mocks.unzip).not.toHaveBeenCalled();
+    expect(h.mocks.writeAppState).not.toHaveBeenCalled();
+  });
+
+  it('fails with preview_incomplete when the preview has no source package', async () => {
+    const h = makeHarness({
+      server: makeServer({
+        previews: { [USER]: yourPreview({ def: definition(undefined, null) }) },
+      }),
+    });
+
+    await pullPreview(h);
+
+    expect(h.json()).toMatchObject({ ok: false, code: 'preview_incomplete' });
+    expect(h.mocks.unzip).not.toHaveBeenCalled();
+  });
+
+  it('maps a 403 reading the preview to forbidden with the permission hint', async () => {
+    const server = makeServer({ previews: { [USER]: yourPreview() } });
+
+    server.api.getPreview.mockRejectedValueOnce(
+      new KizenApiError('forbidden', 'GET /previews failed with 403', { status: 403 }),
+    );
+
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    expect(h.json()).toStrictEqual({
+      ok: false,
+      code: 'forbidden',
+      message: 'GET /previews failed with 403',
+      hint: BUSINESS_APP_FORBIDDEN_HINT,
+    });
+    expect(h.mocks.unzip).not.toHaveBeenCalled();
+  });
+
+  it('extracts your preview into ../<api_name>-preview and records its verified base and source package', async () => {
+    const server = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
+    const h = makeHarness({ server, state: [stateEntry({ folderBaseLiveVersion: '2' })] });
+
+    await pullPreview(h);
+
+    const result = h.json();
+
+    expect(result).toStrictEqual({
+      ok: true,
+      environment: 'staging',
+      businessId: BIZ,
+      userId: USER,
+      app: { baseApiName: BASE, apiName: APP_API, name: 'Acme', liveVersion: '3' },
+      source: 'preview',
+      preview: { updated: '2026-10-20T00:00:00.000Z', sourcePackageId: 'src-preview' },
+      base: { recorded: true, version: '3' },
+      dir: PREVIEW_DIR,
+      written: ['kizen.json'],
+      skipped: [],
+      remembered: true,
+      warnings: [],
+      next: [],
+    });
+    expect(h.mocks.unzip).toHaveBeenCalledWith(server.state.files.get('src-preview'), PREVIEW_DIR);
+    expect(server.writes()).toStrictEqual([]);
+    expect(h.store.writes).toBe(0);
+    expect(h.otherDirs.get(PREVIEW_DIR)?.entries).toStrictEqual([
+      {
+        ...KEY,
+        folderBaseLiveVersion: '3',
+        folderBaseSourcePackageId: 'src-v3',
+        previewSourcePackageId: 'src-preview',
+        lastPushedSourceHash: null,
+      },
+    ]);
+    expect(h.stderr.join('')).toContain(
+      '✓ Extracted your preview of Acme into /work/acme-preview (1 files)',
+    );
+    expect(h.stderr.join('')).toContain('Folder base: v3');
+  });
+
+  it('a push dry run from the pulled folder uses the recorded base, with no base_required and no merge', async () => {
+    const server = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    const pulled = pulledFolder(h, EDITED);
+
+    await push(pulled);
+
+    expect(pulled.exitCodes).toStrictEqual([]);
+    expect(pulled.json()).toMatchObject({
+      ok: true,
+      dryRun: true,
+      base: { version: '3', source: 'recorded', liveMoved: false },
+      warnings: [],
+    });
+
+    pulled.reset();
+    await versions(pulled);
+
+    expect(pulled.json()).toMatchObject({
+      ok: true,
+      base: { folder: { recorded: true, version: '3' }, liveMoved: false },
+    });
+
+    pulled.reset();
+    await publish(pulled);
+
+    expect(pulled.json()).toMatchObject({
+      ok: true,
+      dryRun: true,
+      conflictCheck: { conflict: false, previewSourceMatches: true },
+    });
+  });
+
+  it("publishing the pulled preview, from the folder or outside the CLI, advances the folder's base", async () => {
+    const server = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    const fromFolder = pulledFolder(h, PREVIEW_FILES);
+
+    await publish(fromFolder, { yes: true });
+
+    expect(fromFolder.json()).toMatchObject({ ok: true, liveVersion: '4' });
+    expect(fromFolder.entry()).toMatchObject({
+      folderBaseLiveVersion: '4',
+      folderBaseSourcePackageId: 'src-preview',
+    });
+    expect(fromFolder.entry()).not.toHaveProperty('previewSourcePackageId');
+
+    const outside = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
+    const other = makeHarness({ server: outside });
+
+    await pullPreview(other);
+    await outside.api.promotePreview(APP_API, USER);
+
+    const pulled = pulledFolder(other, PREVIEW_FILES);
+
+    await versions(pulled);
+
+    expect(pulled.json()).toMatchObject({
+      ok: true,
+      base: { folder: { recorded: true, version: '4' }, liveMoved: false },
+    });
+    expect(pulled.stderr.join('')).toContain(PROMOTED_PREVIEW_NOTICE('4'));
+  });
+
+  it('a preview pushed before the app had a Live version records that null base', async () => {
+    const server = makeServer({
+      live: null,
+      previews: { [USER]: yourPreview({ lineage: lineageOf(null) }) },
+    });
+    const h = makeHarness({ server });
+
+    await pullPreview(h);
+
+    expect(h.json()).toMatchObject({ ok: true, base: { recorded: true, version: null } });
+    expect(h.otherDirs.get(PREVIEW_DIR)?.entries).toStrictEqual([
+      {
+        ...KEY,
+        folderBaseLiveVersion: null,
+        previewSourcePackageId: 'src-preview',
+        lastPushedSourceHash: null,
+      },
+    ]);
+  });
+
+  it.each([
+    ['has no lineage', null],
+    ["has a lineage that can't be read", { raw: 'not json' }],
+    ['is based on a release that was replaced', lineageOf('3', 'src-gone')],
+    ['is based on a release that no longer exists', lineageOf('9')],
+  ] as [string, LineageFixture][])(
+    'records no base when your preview %s, so a push from the folder asks for one',
+    async (_name, lineage) => {
+      const server = makeServer({ live: '3', previews: { [USER]: yourPreview({ lineage }) } });
+      const h = makeHarness({ server });
+
+      await pullPreview(h);
+
+      expect(h.json()).toMatchObject({
+        ok: true,
+        source: 'preview',
+        base: { recorded: false, version: null },
+        remembered: true,
+        warnings: [UNVERIFIED_PREVIEW_BASE_WARNING(PREVIEW_DIR)],
+      });
+      expect(h.otherDirs.get(PREVIEW_DIR)?.entries).toStrictEqual([
+        { ...KEY, previewSourcePackageId: 'src-preview', lastPushedSourceHash: null },
+      ]);
+      expect(h.stderr.join('')).toContain('Folder base: not recorded');
+
+      const pulled = pulledFolder(h, EDITED);
+
+      await push(pulled);
+
+      expect(pulled.exitCodes).toStrictEqual([2]);
+      expect(pulled.json()).toMatchObject({ ok: false, code: 'base_required' });
+      expect(server.writes()).toStrictEqual([]);
+    },
+  );
+
+  it("says which merge records the base when the state file couldn't be written", async () => {
+    const h = makeHarness({
+      server: makeServer({ live: '3', previews: { [USER]: yourPreview() } }),
+    });
+
+    h.mocks.writeAppState.mockRejectedValueOnce(new Error('disk full'));
+
+    await pullPreview(h);
+
+    expect(h.json()).toMatchObject({
+      ok: true,
+      remembered: false,
+      warnings: [
+        ".kizenapp/apps.json couldn't be written, so this isn't remembered: disk full Before pushing from /work/acme-preview, run `appbuilder app merge --accept-live-base --release 3 --yes` there.",
+      ],
+    });
+  });
+
+  it('pull --preview --out follows the same --out rules as a release pull', async () => {
+    const server = makeServer({ previews: { [USER]: yourPreview() } });
+    const inside = makeHarness({ server });
+
+    await pullPreview(inside, { out: '..' });
+
+    expect(inside.json()).toMatchObject({ ok: false, code: 'usage_error' });
+
+    const taken = makeHarness({
+      server,
+      deps: { pathExists: vi.fn(() => Promise.resolve(true)) },
+    });
+
+    await pullPreview(taken, { out: '../taken' });
+
+    expect(taken.json()).toMatchObject({
+      ok: false,
+      code: 'usage_error',
+      message: '/work/taken already exists; pass --out <dir> to choose a new folder.',
+    });
+
+    const nested = makeHarness({ server });
+
+    await pullPreview(nested, { out: 'copy' });
+
+    expect(nested.mocks.unzip).toHaveBeenCalledWith(expect.any(Uint8Array), join(CWD, 'copy'));
+    expect(nested.json()).toMatchObject({
+      ok: true,
+      dir: join(CWD, 'copy'),
+      warnings: [expect.stringContaining('is inside the plugin folder')],
+    });
+    expect(server.calls.filter((call) => call.startsWith('download'))).toStrictEqual([
+      'download:src-preview',
+    ]);
+  });
+
+  describe('real extraction', () => {
+    let tmp: string | undefined;
+
+    afterEach(async () => {
+      if (tmp !== undefined) {
+        await rm(tmp, { recursive: true, force: true });
+        tmp = undefined;
+      }
+    });
+
+    it(
+      'refuses an existing folder and leaves out the safety list and the lineage record, as a release pull does',
+      async () => {
+        tmp = await mkdtemp(join(tmpdir(), 'appbuilder-pull-preview-'));
+
+        const pluginDir = join(tmp, 'acme');
+        const realDeps = createDefaultAppDeps(pluginDir);
+        const server = makeServer({
+          live: '3',
+          previews: {
+            [USER]: yourPreview({
+              files: {
+                'kizen.json': '{}',
+                'src/a.js': 'a',
+                '.env': 'SECRET=1',
+                '.git/config': 'x',
+              },
+              // Raw, so the safety-listed entries stay in the zip next to the lineage record.
+              lineage: {
+                raw: JSON.stringify({ format: 1, ...lineageOf('3') }),
+              },
+            }),
+          },
+        });
+
+        await mkdir(pluginDir);
+        await mkdir(join(tmp, 'taken'));
+
+        const deps = { cwd: pluginDir, pathExists: realDeps.pathExists, unzipToDir, writeAppState };
+        const refused = makeHarness({ server, deps });
+
+        await pullPreview(refused, { out: '../taken' });
+
+        expect(refused.json()).toMatchObject({ ok: false, code: 'usage_error' });
+        expect(server.calls.filter((call) => call.startsWith('download'))).toStrictEqual([]);
+        expect(await readdir(join(tmp, 'taken'))).toStrictEqual([]);
+
+        const h = makeHarness({ server, deps });
+
+        await pullPreview(h);
+
+        const dir = join(tmp, 'acme-preview');
+
+        expect(h.json()).toMatchObject({
+          ok: true,
+          source: 'preview',
+          dir,
+          written: ['kizen.json', 'src/a.js'],
+          skipped: expect.arrayContaining(['.env']) as unknown,
+          remembered: true,
+        });
+        expect((await readdir(dir)).sort()).toStrictEqual(['.kizenapp', 'kizen.json', 'src']);
+        expect(await readdir(join(dir, '.kizenapp'))).toStrictEqual(['apps.json']);
+        expect(findAppStateEntry((await readAppState(dir)).doc, KEY)).toMatchObject({
+          status: 'found',
+          entry: {
+            folderBaseLiveVersion: '3',
+            folderBaseSourcePackageId: 'src-v3',
+            previewSourcePackageId: 'src-preview',
+          },
+        });
+      },
+      REAL_IO_TIMEOUT,
+    );
   });
 });
 

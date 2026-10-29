@@ -634,6 +634,48 @@ describe('app UI flow', () => {
     expect(h.exitCodes).toStrictEqual([1]);
   });
 
+  it('pull --preview extracts your preview into a new folder and shows its base', async () => {
+    const server = makeServer({ live: '3', previews: { 'user-1': yourPreview() } });
+    const h = makeHarness({ server });
+    const done = await startFlow(h, {
+      command: 'pull',
+      options: { ...API_KEY, preview: true },
+    }).until('done');
+
+    expect(done.outcome).toStrictEqual({
+      title: '✓ Extracted your preview of Acme into /work/acme-preview (1 files)',
+      tone: 'success',
+      lines: ['Folder base: v3'],
+      warnings: [],
+      next: null,
+    });
+    expect(h.mocks.unzip).toHaveBeenCalledWith(
+      server.state.files.get('src-preview'),
+      '/work/acme-preview',
+    );
+    expect(h.otherDirs.get('/work/acme-preview')?.entries).toMatchObject([
+      { folderBaseLiveVersion: '3', previewSourcePackageId: 'src-preview' },
+    ]);
+  });
+
+  it.each([
+    ['both <version> and --preview', { version: '2', preview: true }],
+    ['neither <version> nor --preview', {}],
+  ])('pull with %s fails before signing in', async (_name, args) => {
+    const h = makeHarness({ server: makeServer({ previews: { 'user-1': yourPreview() } }) });
+    const { version, preview } = args as { version?: string; preview?: boolean };
+    const error = await startFlow(h, {
+      command: 'pull',
+      ...(version !== undefined && { version }),
+      options: { ...API_KEY, ...(preview === true && { preview }) },
+    }).until('error');
+
+    expect(error.view).toMatchObject({ code: 'usage_error' });
+    expect(h.exitCodes).toStrictEqual([1]);
+    expect(h.mocks.businessApps).not.toHaveBeenCalled();
+    nothingWritten(h);
+  });
+
   describe('Ctrl+C', () => {
     const gated = (h: Harness): (() => void) => {
       let release: () => void = () => undefined;

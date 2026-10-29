@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Command, Option } from 'commander';
 import { ALL_VALID_ICONS_LIST, CUSTOM_ICON_NAMES } from '../shared/lib/validIcons.js';
+import type * as AppHeadlessModule from './lib/appHeadless.js';
+import { runAppPullHeadless } from './lib/appHeadless.js';
 import type * as KizenAdminModule from './lib/kizenAdmin.js';
 import type * as SetupClaudeModule from './lib/setupClaude.js';
 import { mcpServerPlan, runSetupClaude } from './lib/setupClaude.js';
@@ -22,6 +24,11 @@ vi.mock('./lib/setupClaude.js', async (importOriginal) => ({
 vi.mock('./lib/setupCodex.js', async (importOriginal) => ({
   ...(await importOriginal<typeof SetupCodexModule>()),
   runSetupCodex: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock('./lib/appHeadless.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof AppHeadlessModule>()),
+  runAppPullHeadless: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock('./lib/whoamiCommand.js', async (importOriginal) => ({
@@ -661,9 +668,9 @@ describe('app command', () => {
     ],
     [
       'pull',
-      "Download a released version's source into a new folder",
-      [['version', true]],
-      [...APP_CREDENTIAL_FLAGS, '--out <dir>', ...APP_SESSION_FLAGS],
+      "Download a released version's source, or with --preview your preview's, into a new folder",
+      [['version', false]],
+      [...APP_CREDENTIAL_FLAGS, '--preview', '--out <dir>', ...APP_SESSION_FLAGS],
     ],
   ])(
     'describes %s and gives it its documented arguments and flags',
@@ -712,6 +719,36 @@ describe('app command', () => {
       'user',
     ]);
     expect(attributeNames('pull')).toContain('out');
+    expect(attributeNames('pull')).toContain('preview');
+  });
+
+  describe('pull argv', () => {
+    afterEach(() => {
+      vi.mocked(runAppPullHeadless).mockClear();
+    });
+
+    const pull = async (args: string[]): Promise<unknown[] | undefined> => {
+      await createProgram().parseAsync(['app', 'pull', ...args, '--json'], { from: 'user' });
+
+      return vi.mocked(runAppPullHeadless).mock.calls[0]?.slice(0, 2);
+    };
+
+    it('passes `pull <version>` to the runner as before, with no preview option', async () => {
+      expect(await pull(['3', '--out', '../copy'])).toStrictEqual([
+        '3',
+        { out: '../copy', json: true },
+      ]);
+    });
+
+    it('passes `pull --preview` to the runner with no version', async () => {
+      expect(await pull(['--preview'])).toStrictEqual([undefined, { preview: true, json: true }]);
+    });
+
+    it('leaves both and neither to the runner, which refuses them', async () => {
+      expect(await pull(['3', '--preview'])).toStrictEqual(['3', { preview: true, json: true }]);
+      vi.mocked(runAppPullHeadless).mockClear();
+      expect(await pull([])).toStrictEqual([undefined, { json: true }]);
+    });
   });
 
   it('leaves every app option unset before parsing', () => {

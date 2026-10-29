@@ -36,12 +36,14 @@ import {
   planPush,
   planRollback,
   preparePush,
+  pullTargetOf,
   recordedFolderBase,
   type AppContext,
   type AppDeps,
   type AppFailure,
   type AppMergeOptions,
   type ApplyControl,
+  type AppPullTarget,
   type AppStep,
   type PreparedPush,
   type ResolveFolderBaseOptions,
@@ -107,7 +109,7 @@ export type AppRequest =
   | { command: 'publish'; options: AppPublishOptions }
   | { command: 'merge'; options: AppMergeCommandOptions }
   | { command: 'rollback'; version: string; options: AppWriteOptions }
-  | { command: 'pull'; version: string; options: AppPullOptions }
+  | { command: 'pull'; version?: string; options: AppPullOptions }
   | { command: 'actions list'; options: AppCommandOptions }
   | { command: 'actions link'; action?: string; object?: string; options: AppActionsLinkOptions }
   | { command: 'actions unlink'; action?: string; object?: string; options: AppWriteOptions }
@@ -356,6 +358,10 @@ export function createAppFlow(
   showSession: Setter<Session>,
 ): AppFlow {
   const flags = writeFlagsOf(request);
+  const pullTarget =
+    request.command === 'pull'
+      ? pullTargetOf(request.version, request.options.preview === true)
+      : null;
   const expectPreview = request.command === 'publish' ? request.options.expectPreview : undefined;
   let signed: Signed | null = null;
 
@@ -956,14 +962,16 @@ export function createAppFlow(
     );
   };
 
-  const pull = async (context: AppContext, version: string, out?: string): Promise<void> => {
+  const pull = async (context: AppContext, target: AppPullTarget, out?: string): Promise<void> => {
     if (!writable()) {
       return;
     }
 
-    loading(`Downloading v${version}…`);
+    loading(
+      target.kind === 'release' ? `Downloading v${target.version}…` : 'Downloading your preview…',
+    );
 
-    const planned = await planPull(context, version, out === undefined ? {} : { out }, deps);
+    const planned = await planPull(context, target, out === undefined ? {} : { out }, deps);
 
     if (!planned.ok) {
       fail(planned);
@@ -1524,7 +1532,9 @@ export function createAppFlow(
 
         return;
       case 'pull':
-        await pull(context, request.version, request.options.out);
+        if (pullTarget?.ok === true) {
+          await pull(context, pullTarget.value, request.options.out);
+        }
 
         return;
       case 'actions list':
@@ -1563,6 +1573,12 @@ export function createAppFlow(
 
   return {
     start: () => {
+      if (pullTarget?.ok === false) {
+        fail(pullTarget);
+
+        return;
+      }
+
       guard(() => session.load(request.options));
     },
     pickEnvironment: (phase, choice) => {

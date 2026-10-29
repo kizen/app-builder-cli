@@ -300,17 +300,28 @@ export function appCommand(program: Command): void {
   const pull = withCredentialFlags(
     app
       .command('pull')
-      .description("Download a released version's source into a new folder")
-      .argument('<version>', 'the released version to download'),
-  ).option('--out <dir>', 'folder to create (default: ../<api_name>-v<version>)');
-
-  withSessionFlags(pull).action(async (version: string, parsed: AppPullOptions & Interactive) => {
-    const { noInteractive, options } = takeInteractiveFlag(parsed);
-
-    await runApp({ command: 'pull', version, options }, noInteractive, (deps) =>
-      runAppPullHeadless(version, options, deps),
+      .description(
+        "Download a released version's source, or with --preview your preview's, into a new folder",
+      )
+      .argument('[version]', 'the released version to download (or pass --preview instead)'),
+  )
+    .option('--preview', 'download your preview instead of a released version')
+    .option(
+      '--out <dir>',
+      'folder to create (default: ../<api_name>-v<version>, or ../<api_name>-preview)',
     );
-  });
+
+  withSessionFlags(pull).action(
+    async (version: string | undefined, parsed: AppPullOptions & Interactive) => {
+      const { noInteractive, options } = takeInteractiveFlag(parsed);
+
+      await runApp(
+        { command: 'pull', ...(version !== undefined && { version }), options },
+        noInteractive,
+        (deps) => runAppPullHeadless(version, options, deps),
+      );
+    },
+  );
 
   actionsCommand(app);
   previewCommand(app);
