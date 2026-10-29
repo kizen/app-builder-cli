@@ -312,6 +312,7 @@ export function createPushFlow(
         credentials,
         block,
         forget: options.forget === true,
+        isAborted: session.isAborted,
       },
       deps,
     );

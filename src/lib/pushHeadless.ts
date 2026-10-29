@@ -819,14 +819,20 @@ export async function forgetRemembered(
 
 /** Reads the push map, applies --forget, and finds this block's remembered target. */
 export async function loadPushContext(
-  args: { client: KizenClient; credentials: PushAccount; block: ResolvedBlock; forget?: boolean },
+  args: {
+    client: KizenClient;
+    credentials: PushAccount;
+    block: ResolvedBlock;
+    forget?: boolean;
+    isAborted?: () => boolean;
+  },
   deps: Pick<PushDeps, 'cwd' | 'readPushMap' | 'writePushMap'>,
 ): Promise<{ context: PushContext; forgotten: boolean }> {
   const { client, credentials, block } = args;
   let pushMap = await deps.readPushMap(deps.cwd);
   let forgotten = false;
 
-  if (args.forget) {
+  if (args.forget && args.isAborted?.() !== true) {
     const remaining = await forgetRemembered({ credentials, block, pushMap }, deps);
 
     if (remaining) {

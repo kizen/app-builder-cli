@@ -3306,6 +3306,28 @@ describe('the sign-in session is the default', () => {
       expect(harness.exitCodes).toStrictEqual([130]);
       expect(phase()).toBe(before);
     });
+
+    it('block push --forget does not remove the remembered target when cancelled during the read', async () => {
+      const harness = rememberedHarness();
+      const { flow, phase, state } = startFlow(harness);
+
+      flow.start({ ...API_KEY, forget: true });
+      await vi.waitFor(() => {
+        expect(harness.deps.readPushMap).toHaveBeenCalled();
+      });
+
+      const before = phase();
+
+      interrupt(flow.abort, harness.deps.setExitCode);
+      harness.release();
+      await drain();
+
+      expect(harness.deps.writePushMap).not.toHaveBeenCalled();
+      expect(harness.pushMap.entries).toStrictEqual([makeEntry()]);
+      expect(state.session.notices).toStrictEqual([]);
+      expect(harness.exitCodes).toStrictEqual([130]);
+      expect(phase()).toBe(before);
+    });
   });
 });
 
