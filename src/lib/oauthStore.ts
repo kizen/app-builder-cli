@@ -35,11 +35,16 @@ import {
   unlink,
   type FileHandle,
 } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ENVIRONMENTS, GLOBAL_CREDENTIALS_DIR, type Environment } from './credentials.js';
 import { ifExists, isErrnoCode, isRecord, nonEmptyString } from './guards.js';
-import { loginRequired, OAuthError } from './oauth.js';
+import {
+  loginRequired,
+  OAuthError,
+  SessionStoreUnwritableError,
+  UNWRITABLE_ERRNO_CODES,
+} from './oauth.js';
 
 /** Who a session acts as: a token is bound to one Kizen user in one business. */
 export interface OAuthAccount {
@@ -88,6 +93,7 @@ export interface OAuthStore {
   listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
   /** Writes this account's session file only, in place; never moves the pointer. */
   writeSession: (session: OAuthSession) => Promise<void>;
+  probeWritable: () => Promise<void>;
   /**
    * A refresh's write of `session`, under its account's lock: re-reads that account's own file and
    * writes only if it's still there holding `spentRefreshToken`, the token the refresh presented.
@@ -140,6 +146,8 @@ export interface OAuthStore {
 }
 
 const CLIENTS_FILE = 'clients.json';
+
+const PROBE_PAYLOAD = ' '.repeat(4096);
 
 /**
  * A `<env>.json.<ms>-<hex>.signout` file is a pointer a logout moved aside and crashed before
@@ -388,34 +396,62 @@ export function createOAuthStore(
 
   const listNames = async (): Promise<string[]> => (await ifExists(readdir(dir))) ?? [];
 
+  const writing = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      const errno = UNWRITABLE_ERRNO_CODES.find((code) => isErrnoCode(err, code));
+
+      if (errno !== undefined) {
+        throw new SessionStoreUnwritableError(dir, dirname(dir), errno);
+      }
+
+      throw err;
+    }
+  };
+
   const ensureDir = async (): Promise<void> => {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     // mkdir leaves an existing directory's mode alone.
     await chmod(dir, 0o700);
   };
 
-  /** Writes via a 0600 temp file and rename, so readers never see a partial file. */
-  const writeAtomic = async (path: string, data: unknown): Promise<void> => {
-    await ensureDir();
-
+  const writeThenRename = async (path: string, text: string, to: string): Promise<void> => {
     const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
 
     try {
       const handle = await open(tmp, 'wx', 0o600);
 
       try {
-        await handle.writeFile(JSON.stringify(data, null, 2), 'utf-8');
+        await handle.writeFile(text, 'utf-8');
         await handle.sync();
       } finally {
         await handle.close();
       }
 
-      await rename(tmp, path);
+      await rename(tmp, to);
     } catch (err) {
-      await rm(tmp, { force: true });
+      await rm(tmp, { force: true }).catch(() => undefined);
       throw err;
     }
   };
+
+  const writeAtomic = (path: string, data: unknown): Promise<void> =>
+    writing(async () => {
+      await ensureDir();
+      await writeThenRename(path, JSON.stringify(data, null, 2), path);
+    });
+
+  const probeWritable = (): Promise<void> =>
+    writing(async () => {
+      await ensureDir();
+
+      // Not a `<env>.<business>.<user>.json` name, so nothing lists it if a crash leaves it.
+      const probe = join(dir, `.write-probe.${randomBytes(6).toString('hex')}`);
+
+      await writeThenRename(probe, PROBE_PAYLOAD, probe);
+      await unlink(probe);
+    });
 
   const unreadable = (environment: Environment, path: string): OAuthError =>
     loginRequired(environment, `The saved ${environment} session at ${path} can't be read.`, {
@@ -548,7 +584,7 @@ export function createOAuthStore(
     // The time goes in the name: cleanUp ages it from this logout, not from the pointer's mtime.
     const moved = `${pointerPath}.${String(Date.now())}-${randomBytes(6).toString('hex')}.signout`;
 
-    if ((await ifExists(rename(pointerPath, moved).then(() => true))) !== true) {
+    if ((await writing(() => ifExists(rename(pointerPath, moved).then(() => true)))) !== true) {
       return undefined;
     }
 
@@ -570,7 +606,9 @@ export function createOAuthStore(
       environment,
       account,
       async () =>
-        (await ifExists(unlink(accountPath(environment, account)).then(() => true))) ?? false,
+        (await writing(() =>
+          ifExists(unlink(accountPath(environment, account)).then(() => true)),
+        )) ?? false,
     );
 
   return {
@@ -633,6 +671,8 @@ export function createOAuthStore(
     async writeSession(session) {
       await writeAtomic(accountPath(session.environment, session), session);
     },
+
+    probeWritable,
 
     async commitRefresh(session, spentRefreshToken) {
       const { environment } = session;

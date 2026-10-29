@@ -1,28 +1,38 @@
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
-import { PluginValidationError } from '@kizenapps/packager';
 import type { Block, DeployablePlugin, ValidationIssue } from '@kizenapps/packager';
 import { APP_URLS, isProductionEnvironment } from '../../shared/lib/kizenUrls.js';
-import { loadConfig, type AppBuilderConfig } from './config.js';
 import {
-  ENVIRONMENTS,
-  GLOBAL_CREDENTIALS_PATH,
-  listLoadableCredentialProfiles,
-  loadCredentialsDetailed,
-  type CredentialProfile,
-  type Credentials,
-  type DetailedCredentials,
-  type Environment,
-} from './credentials.js';
+  accountArgs,
+  apiFailure,
+  commandArgv,
+  createDefaultCommandDeps,
+  createOAuthCommandDeps,
+  credentialArgs,
+  DRY_RUN_NOTE,
+  errorMessage,
+  failure as coreFailure,
+  headlessWriteGate,
+  pinnedCredentialArgs,
+  resolveCredentials,
+  success,
+  warningLines,
+  writeFailure,
+  writeNotices,
+  writeResult,
+  type ChoiceArgv as CoreChoiceArgv,
+  type CommandChoice,
+  type CommandDeps,
+  type CommandErrorCode,
+  type CommandFailure,
+  type CommandOutput,
+  type CommandStep,
+  type OAuthCommandDeps,
+} from './commandCore.js';
+import type { Credentials, Environment } from './credentials.js';
 import { packageBlocks, resolvePackagedBlock, type PackagedBlocks } from './exportBlock.js';
 import { formatValidationIssues } from './formatValidationIssues.js';
 import { ensureGitignore } from './gitignore.js';
-import {
-  createKizenClient,
-  dashletPath,
-  KizenApiError,
-  type KizenIdentity,
-} from './kizenClient.js';
+import { dashletPath, KizenApiError } from './kizenClient.js';
 import type {
   CreateDashletBody,
   CustomCodeContent,
@@ -57,65 +67,22 @@ import {
   type PushMapKey,
   type TargetMatch,
 } from './pushBlock.js';
-import {
-  accountRequest,
-  notSignedInWithApiKeyHint,
-  pinnedProfileNotice,
-  selectAuth,
-  type AccountRequest,
-  type AuthFlags,
-} from './authSelection.js';
-import { requireNamedAccount, resolveAccountEnvironment } from './oauthCommands.js';
-import { createDefaultTokenProvider } from './oauthSession.js';
-import {
-  createOAuthStore,
-  type OAuthAccount,
-  type OAuthStore,
-  type SavedAccount,
-} from './oauthStore.js';
-import { isClaudeSkillStale, STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
-import { quoteArg } from './shellArg.js';
+import { staleAgentFileWarnings } from './agentSetup.js';
 
-export type PushErrorCode =
-  | 'needs_choice'
-  | 'validation_failed'
-  | 'invalid_block'
-  | 'auth_failed'
-  | 'forbidden'
-  | 'remembered_target_missing'
-  | 'drift_detected'
-  | 'network_error'
-  | 'credentials_invalid'
-  | 'production_requires_flag'
-  | 'not_found'
-  | 'usage_error'
-  | 'api_error'
-  | 'local_error';
+export type PushErrorCode = CommandErrorCode;
 
 export type ChoiceKind = 'environment' | 'block' | 'dashboard' | 'target';
 
-export interface PushChoice {
-  value: string;
-  label: string;
-  args: string[];
+export interface PushChoice extends CommandChoice {
   surface?: Surface;
   canEdit?: boolean | null;
   pushKey?: string | null;
   isFromThisPlugin?: boolean;
 }
 
-export interface PushFailure {
-  ok: false;
-  code: PushErrorCode;
-  message: string;
-  choice?: ChoiceKind;
-  choices?: PushChoice[];
-  issues?: ValidationIssue[];
-  field?: string;
-  hint?: string;
-}
+export type PushFailure = CommandFailure<ChoiceKind, PushChoice>;
 
-export type Step<T> = { ok: true; value: T } | PushFailure;
+export type Step<T> = CommandStep<T, PushFailure>;
 
 export interface PushCommandOptions {
   credentials?: string;
@@ -144,90 +111,28 @@ export interface TargetsCommandOptions {
   user?: string;
 }
 
-/** The stored `appbuilder login` sessions, which commands use unless -c or --profile is passed. */
-export interface OAuthPushDeps {
-  listSessions: () => Promise<Environment[]>;
-  /** The saved accounts `--business` / `APPBUILDER_BUSINESS` choose among. */
-  listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
-  /**
-   * The identity and the client that resolved it, so later requests are pinned to that login:
-   * `account` when given, else the current account at the first read.
-   */
-  connect: (
-    environment: Environment,
-    account?: OAuthAccount,
-  ) => Promise<{ identity: KizenIdentity; client: KizenClient }>;
-}
+export type OAuthPushDeps = OAuthCommandDeps;
 
-export interface PushDeps {
-  cwd: string;
-  loadCredentialsDetailed: (path: string) => Promise<DetailedCredentials>;
-  listLoadableCredentialProfiles: () => Promise<CredentialProfile[]>;
-  loadConfig: (outputDir: string) => Promise<AppBuilderConfig>;
+export const createOAuthPushDeps = createOAuthCommandDeps;
+
+export interface PushDeps extends CommandDeps {
   packageBlocks: (dir: string) => Promise<PackagedBlocks>;
-  /** The API-key client for -c / --profile; the sign-in session's client comes from `oauth.connect`. */
-  createClient: (credentials: Credentials) => KizenClient;
   readPushMap: (dir: string) => Promise<PushMapEntry[]>;
   writePushMap: (dir: string, entries: readonly PushMapEntry[]) => Promise<void>;
   ensureGitignore: (dir: string) => void;
-  isClaudeSkillStale: (dir: string) => Promise<boolean>;
+  staleAgentFileWarnings: (dir: string) => Promise<string[]>;
   randomUUID: () => string;
-  now: () => Date;
-  writeStdout: (text: string) => void;
-  writeStderr: (text: string) => void;
-  setExitCode: (code: number) => void;
-  /** Where `APPBUILDER_BUSINESS` / `APPBUILDER_USER` are read from. */
-  processEnv: Readonly<Record<string, string | undefined>>;
-  oauth: OAuthPushDeps;
-}
-
-export function createOAuthPushDeps(
-  store: OAuthStore,
-  options: { fetch?: typeof fetch } = {},
-): OAuthPushDeps {
-  const { fetch: fetchImpl } = options;
-
-  return {
-    listSessions: () => store.listSessions(),
-    listAccounts: (environment) => store.listAccounts(environment),
-    connect: async (environment, account) => {
-      const bearer = createDefaultTokenProvider(environment, store, {
-        ...(fetchImpl && { fetch: fetchImpl }),
-        ...(account !== undefined && { account }),
-      });
-      const client = createKizenClient({ bearer, ...(fetchImpl && { fetch: fetchImpl }) });
-
-      return { identity: await client.getIdentity(), client };
-    },
-  };
 }
 
 export function createDefaultPushDeps(cwd: string): PushDeps {
   return {
-    cwd,
-    loadCredentialsDetailed,
-    listLoadableCredentialProfiles,
-    loadConfig,
+    ...createDefaultCommandDeps(cwd),
     packageBlocks,
-    createClient: (credentials) => createKizenClient({ credentials }),
     readPushMap,
     writePushMap,
     ensureGitignore,
-    isClaudeSkillStale: (dir) => isClaudeSkillStale(dir),
+    staleAgentFileWarnings: (dir) => staleAgentFileWarnings(dir),
     randomUUID,
-    now: () => new Date(),
-    writeStdout: (text) => {
-      process.stdout.write(text);
-    },
-    writeStderr: (text) => {
-      process.stderr.write(text);
-    },
-    setExitCode: (code) => {
-      process.exitCode = code;
-    },
-    processEnv: process.env,
-    // Constructing the store does no IO; a -c / --profile push never touches it.
-    oauth: createOAuthPushDeps(createOAuthStore()),
   };
 }
 
@@ -236,201 +141,10 @@ const EDIT_ACCESS_LEVELS = new Set(['owner', 'admin', 'edit']);
 const CHART_GROUP_HINT =
   'Chart groups are not listed here; find them with `appbuilder block targets --object <id> --json` and pass --dashboard <id>.';
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : typeof error === 'string' ? error : 'Unknown error';
-
-function failure(
-  code: PushErrorCode,
-  message: string,
-  extra: Omit<PushFailure, 'ok' | 'code' | 'message'> = {},
-): PushFailure {
-  return { ok: false, code, message, ...extra };
-}
-
-const success = <T>(value: T): Step<T> => ({ ok: true, value });
-
-export function apiFailure(error: unknown): PushFailure {
-  if (error instanceof KizenApiError) {
-    return failure(error.kind, error.message, error.hint === undefined ? {} : { hint: error.hint });
-  }
-
-  if (error instanceof PluginValidationError) {
-    return failure('validation_failed', formatValidationIssues(error.issues), {
-      issues: error.issues,
-    });
-  }
-
-  return failure('local_error', errorMessage(error));
-}
+const failure = coreFailure<ChoiceKind, PushChoice>;
 
 /** What a push reads from the credentials: where it pushes, and the push map key. */
 export type PushAccount = Pick<Credentials, 'environment' | 'businessId'>;
-
-export interface ResolvedCredentials {
-  credentials: PushAccount;
-  /** The client every request of the command goes through. */
-  client: KizenClient;
-  /** One-line notices to show before continuing, such as an ignored profile pin. */
-  notices: string[];
-}
-
-async function loadCredentialFile(
-  path: string,
-  deps: PushDeps,
-): Promise<Step<ResolvedCredentials>> {
-  let detailed: DetailedCredentials;
-
-  try {
-    detailed = await deps.loadCredentialsDetailed(path);
-  } catch (error) {
-    return failure(
-      'credentials_invalid',
-      `Couldn't read credentials from ${path}: ${errorMessage(error)}`,
-    );
-  }
-
-  if (detailed.environmentSource !== 'explicit') {
-    const problem =
-      detailed.environmentSource === 'missing'
-        ? 'has no "environment"'
-        : 'has an invalid "environment"';
-
-    return failure(
-      'credentials_invalid',
-      `${path} ${problem}. Set it to one of: ${ENVIRONMENTS.join(', ')}. The CLI won't default to production.`,
-    );
-  }
-
-  const { credentials } = detailed;
-  const empty = (['apiKey', 'userId', 'businessId'] as const).filter(
-    (field) => credentials[field].trim() === '',
-  );
-
-  if (empty.length > 0) {
-    return failure(
-      'credentials_invalid',
-      `${path} is missing ${empty.map((field) => `"${field}"`).join(', ')}.`,
-    );
-  }
-
-  return success({ credentials, client: deps.createClient(credentials), notices: [] });
-}
-
-async function resolveProfile(name: string, deps: PushDeps): Promise<Step<ResolvedCredentials>> {
-  const profiles = await deps.listLoadableCredentialProfiles();
-  const profile = profiles.find((candidate) => candidate.name === name);
-
-  if (!profile) {
-    const names = profiles.map((candidate) => candidate.name);
-
-    return failure(
-      'credentials_invalid',
-      names.length === 0
-        ? `No loadable credential profile named "${name}". No profiles are loadable; create ${GLOBAL_CREDENTIALS_PATH} or pass -c <path>.`
-        : `No loadable credential profile named "${name}". Loadable profiles: ${names.join(', ')}`,
-    );
-  }
-
-  return loadCredentialFile(profile.path, deps);
-}
-
-/** A `.kizenapp/config.json` profile pin no longer opts into API keys; say so. */
-async function pinnedProfileNotices(deps: PushDeps): Promise<string[]> {
-  const { activeCredentialProfile } = await deps.loadConfig(join(deps.cwd, '.kizenapp'));
-
-  return activeCredentialProfile === undefined || activeCredentialProfile === ''
-    ? []
-    : [pinnedProfileNotice(activeCredentialProfile)];
-}
-
-async function resolveSessionCredentials(
-  env: string | undefined,
-  request: AccountRequest | undefined,
-  deps: PushDeps,
-): Promise<Step<ResolvedCredentials>> {
-  const resolved = await resolveAccountEnvironment(env, request, deps.oauth);
-
-  if (!resolved.ok) {
-    switch (resolved.problem) {
-      case 'not_signed_in':
-        return failure('credentials_invalid', notSignedInWithApiKeyHint(resolved.message));
-      case 'several_sessions':
-        return failure('needs_choice', resolved.message, {
-          choice: 'environment',
-          choices: resolved.environments.map((environment) => ({
-            value: environment,
-            label: environment,
-            args: ['--env', environment],
-          })),
-        });
-      case 'unknown_environment':
-        return failure('usage_error', resolved.message);
-    }
-  }
-
-  const { environment } = resolved;
-
-  let account: OAuthAccount | undefined;
-
-  if (request !== undefined) {
-    let accounts: SavedAccount[];
-
-    try {
-      accounts = await deps.oauth.listAccounts(environment);
-    } catch (error) {
-      return apiFailure(error);
-    }
-
-    // A name that matches no saved account, or several, is a bad argument: never the current one.
-    try {
-      account = requireNamedAccount(environment, accounts, request);
-    } catch (error) {
-      return failure('usage_error', errorMessage(error));
-    }
-  }
-
-  let connected: Awaited<ReturnType<OAuthPushDeps['connect']>>;
-
-  try {
-    connected = await deps.oauth.connect(environment, account);
-  } catch (error) {
-    return apiFailure(error);
-  }
-
-  // The token carries the user and business server-side; businessId is for the push map key.
-  return success({
-    credentials: { environment, businessId: connected.identity.businessId },
-    client: connected.client,
-    notices: await pinnedProfileNotices(deps),
-  });
-}
-
-/**
- * The `appbuilder login` session by default (--env picks its environment; --business / --user, or
- * APPBUILDER_BUSINESS / APPBUILDER_USER, a saved account in it); an API key only for -c or
- * --profile, which never read the sessions.
- */
-export async function resolveCredentials(
-  options: AuthFlags,
-  deps: PushDeps,
-): Promise<Step<ResolvedCredentials>> {
-  const selected = selectAuth(options, deps.processEnv);
-
-  if (!selected.ok) {
-    return failure('usage_error', selected.message);
-  }
-
-  const { selection } = selected;
-
-  if (selection.kind === 'oauth') {
-    return resolveSessionCredentials(selection.env, selection.account, deps);
-  }
-
-  return selection.credentials === undefined
-    ? resolveProfile(selection.profile, deps)
-    : loadCredentialFile(selection.credentials, deps);
-}
-
 export interface ResolvedBlock {
   block: Block;
   pluginApiName: string;
@@ -1105,14 +819,20 @@ export async function forgetRemembered(
 
 /** Reads the push map, applies --forget, and finds this block's remembered target. */
 export async function loadPushContext(
-  args: { client: KizenClient; credentials: PushAccount; block: ResolvedBlock; forget?: boolean },
+  args: {
+    client: KizenClient;
+    credentials: PushAccount;
+    block: ResolvedBlock;
+    forget?: boolean;
+    isAborted?: () => boolean;
+  },
   deps: Pick<PushDeps, 'cwd' | 'readPushMap' | 'writePushMap'>,
 ): Promise<{ context: PushContext; forgotten: boolean }> {
   const { client, credentials, block } = args;
   let pushMap = await deps.readPushMap(deps.cwd);
   let forgotten = false;
 
-  if (args.forget) {
+  if (args.forget && args.isAborted?.() !== true) {
     const remaining = await forgetRemembered({ credentials, block, pushMap }, deps);
 
     if (remaining) {
@@ -1133,35 +853,6 @@ export async function loadPushContext(
   };
 }
 
-export type WriteGate = { kind: 'dry-run'; reason: 'flag' | 'no_yes' } | { kind: 'apply' };
-
-export function headlessWriteGate(
-  options: PushCommandOptions,
-  environment: Environment,
-): Step<WriteGate> {
-  if (options.dryRun) {
-    return success({ kind: 'dry-run', reason: 'flag' });
-  }
-
-  if (!options.yes) {
-    return success({ kind: 'dry-run', reason: 'no_yes' });
-  }
-
-  if (isProductionEnvironment(environment) && !options.allowProduction) {
-    return failure(
-      'production_requires_flag',
-      `${environment} is a production environment. Pass --allow-production with --yes to write to it.`,
-    );
-  }
-
-  return success({ kind: 'apply' });
-}
-
-export const DRY_RUN_NOTE = 'Dry run only: pass --yes to write.';
-
-export const warningLines = (warnings: readonly string[]): string[] =>
-  warnings.map((warning) => `Warning: ${warning}`);
-
 export function formatSummaryLines(summary: PushSummary): string[] {
   return [
     `Environment: ${summary.environment}${summary.isProduction ? ' (production)' : ''}`,
@@ -1179,100 +870,10 @@ export function formatSummaryLines(summary: PushSummary): string[] {
 const formatIssueWarning = (issue: ValidationIssue): string =>
   `${issue.path === undefined ? '' : `${issue.path}: `}${issue.message} (${issue.rule})`;
 
-type ChoiceArgs = (choice: PushChoice, kind: ChoiceKind | undefined) => string[];
-
-function formatFailureText(result: PushFailure, command: string, choiceArgs: ChoiceArgs): string {
-  const lines = [`Error: ${result.message}`];
-
-  if (result.hint !== undefined) {
-    lines.push(`Hint: ${result.hint}`);
-  }
-
-  if (result.choices && result.choices.length > 0) {
-    lines.push('Choices:');
-
-    for (const choice of result.choices) {
-      const args = choiceArgs(choice, result.choice).map(quoteArg).join(' ');
-
-      lines.push(`  ${choice.label}  →  ${command} ${args}`);
-    }
-  }
-
-  return `${lines.join('\n')}\n`;
-}
-
-interface Output {
-  json: boolean;
-  deps: PushDeps;
-}
-
-function writeFailure(
-  output: Output,
-  result: PushFailure,
-  command: string,
-  choiceArgs: ChoiceArgs,
-): void {
-  if (output.json) {
-    output.deps.writeStdout(`${JSON.stringify(result, null, 2)}\n`);
-  } else {
-    output.deps.writeStderr(formatFailureText(result, command, choiceArgs));
-  }
-
-  output.deps.setExitCode(1);
-}
-
-// --json puts the result on stdout and the human-readable lines on stderr.
-function writeResult(output: Output, result: unknown, text: string, jsonText = text): void {
-  if (output.json) {
-    output.deps.writeStdout(`${JSON.stringify(result, null, 2)}\n`);
-    output.deps.writeStderr(jsonText);
-  } else {
-    output.deps.writeStdout(text);
-  }
-}
-
-/**
- * The account the run asked for (`--business` / `--user`, else `APPBUILDER_BUSINESS` /
- * `APPBUILDER_USER`), as flags for the commands a choice prints: a one-command variable
- * assignment doesn't survive being copied. Empty when no account was named, or the request is
- * invalid (that run already failed with the usage error).
- */
-const accountArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
-  const result = accountRequest(options, processEnv);
-
-  if (!result.ok || result.request === undefined) {
-    return [];
-  }
-
-  const { business, user } = result.request;
-
-  return ['--business', business, ...(user === undefined ? [] : ['--user', user])];
-};
-
-const credentialArgs = (options: AuthFlags, processEnv: PushDeps['processEnv']): string[] => {
-  if (options.credentials !== undefined) {
-    return ['-c', options.credentials];
-  }
-
-  if (options.profile !== undefined) {
-    return ['--profile', options.profile];
-  }
-
-  return [
-    ...(options.env === undefined ? [] : ['--env', options.env]),
-    ...accountArgs(options, processEnv),
-  ];
-};
-
-const writeNotices = (deps: PushDeps, notices: readonly string[]): void => {
-  for (const notice of notices) {
-    deps.writeStderr(`${notice}\n`);
-  }
-};
-
-async function claudeSkillWarnings(deps: PushDeps): Promise<string[]> {
+type ChoiceArgv = CoreChoiceArgv<ChoiceKind, PushChoice>;
+async function agentSkillWarnings(deps: PushDeps): Promise<string[]> {
   try {
-    return (await deps.isClaudeSkillStale(deps.cwd)) ? [STALE_CLAUDE_SKILL_WARNING] : [];
+    return await deps.staleAgentFileWarnings(deps.cwd);
   } catch {
     return [];
   }
@@ -1283,23 +884,27 @@ export async function runPushHeadless(
   options: PushCommandOptions,
   deps: PushDeps,
 ): Promise<void> {
-  const output: Output = { json: options.json === true, deps };
+  const output: CommandOutput = { json: options.json === true, deps };
   const command = 'appbuilder block push';
   let blockArgs = apiName === undefined ? [] : [apiName];
-  const choiceArgs: ChoiceArgs = (choice, kind) => {
+  let credentialFlags = credentialArgs(options, deps.processEnv);
+  const choiceArgs = (choice: PushChoice, kind: ChoiceKind | undefined): string[] => {
     if (kind === 'environment') {
       return [...blockArgs, ...choice.args, ...accountArgs(options, deps.processEnv)];
     }
 
     if (kind === 'block') {
-      return [...choice.args, ...credentialArgs(options, deps.processEnv)];
+      return [...choice.args, ...credentialFlags];
     }
 
-    return [...blockArgs, ...credentialArgs(options, deps.processEnv), ...choice.args];
+    return [...blockArgs, ...credentialFlags, ...choice.args];
   };
 
+  const choiceArgv: ChoiceArgv = (choice, kind) =>
+    commandArgv(command, choiceArgs(choice, kind), output);
+
   const fail = (result: PushFailure): void => {
-    writeFailure(output, result, command, choiceArgs);
+    writeFailure(output, result, choiceArgv);
   };
 
   try {
@@ -1313,6 +918,7 @@ export async function runPushHeadless(
 
     const { credentials, client, notices } = credentialStep.value;
 
+    credentialFlags = pinnedCredentialArgs(options, credentials);
     writeNotices(deps, notices);
 
     const blockStep = await resolveBlock(apiName, deps);
@@ -1377,12 +983,27 @@ export async function runPushHeadless(
     };
     const issueWarnings = [
       ...block.warnings.map(formatIssueWarning),
-      ...(await claudeSkillWarnings(deps)),
+      ...(await agentSkillWarnings(deps)),
     ];
     const gate = gateStep.value;
 
     if (gate.kind === 'dry-run') {
       const warnings = [...issueWarnings, ...plan.warnings];
+      const production = plan.summary.isProduction;
+      const applyArgv = commandArgv(
+        command,
+        [
+          block.block.api_name,
+          ...credentialFlags,
+          '--dashboard',
+          plan.dashboard.id,
+          ...(plan.action === 'update' ? ['--dashlet', plan.dashletId] : ['--create']),
+          ...(options.force === true ? ['--force'] : []),
+          '--yes',
+          ...(production ? ['--allow-production'] : []),
+        ],
+        output,
+      );
       const result = {
         ok: true as const,
         applied: false as const,
@@ -1399,6 +1020,8 @@ export async function runPushHeadless(
         body: plan.body,
         warnings,
         ...(forgotten ? { forgotten: true as const } : {}),
+        applyArgv,
+        requiresProductionConsent: production,
       };
 
       writeResult(
@@ -1523,16 +1146,17 @@ export async function runTargetsHeadless(
   options: TargetsCommandOptions,
   deps: PushDeps,
 ): Promise<void> {
-  const output: Output = { json: options.json === true, deps };
+  const output: CommandOutput = { json: options.json === true, deps };
   const command = 'appbuilder block targets';
   const objectArgs = options.object === undefined ? [] : ['--object', options.object];
-  const choiceArgs: ChoiceArgs = (choice) => [
-    ...choice.args,
-    ...accountArgs(options, deps.processEnv),
-    ...objectArgs,
-  ];
+  const choiceArgv: ChoiceArgv = (choice) =>
+    commandArgv(
+      command,
+      [...choice.args, ...accountArgs(options, deps.processEnv), ...objectArgs],
+      output,
+    );
   const fail = (result: PushFailure): void => {
-    writeFailure(output, result, command, choiceArgs);
+    writeFailure(output, result, choiceArgv);
   };
 
   try {

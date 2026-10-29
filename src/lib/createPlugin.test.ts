@@ -2,6 +2,8 @@ import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { staleAgentFileWarnings } from './agentSetup.js';
+import { claudeFiles, codexFiles } from './createCopilotFiles.js';
 import {
   buildManifest,
   createPlugin,
@@ -277,6 +279,21 @@ describe('createPlugin', () => {
     );
 
     expect(design).toContain('# Designing a Kizen custom block');
+  });
+
+  it('create writes the Claude and Codex skill sets', async () => {
+    const input = validInput({ includeLib: true });
+
+    await createPlugin(input);
+
+    for (const file of [...claudeFiles(['src']), ...codexFiles(['src'])]) {
+      expect(
+        await readFile(join(input.targetDir, ...file.path.split('/')), 'utf-8'),
+        file.path,
+      ).toBe(file.content);
+    }
+
+    expect(await staleAgentFileWarnings(input.targetDir)).toStrictEqual([]);
   });
 
   it('createPlugin without includeLib writes no kizenData.js', async () => {

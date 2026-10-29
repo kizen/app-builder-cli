@@ -1,68 +1,53 @@
-import {
-  useEffect,
-  useState,
-  type Dispatch,
-  type FC,
-  type ReactNode,
-  type SetStateAction,
-} from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
-import { type ValidationIssue } from '@kizenapps/packager';
-import { formatValidationIssues } from '../lib/formatValidationIssues.js';
+import { useEffect, useState, type FC, type ReactNode } from 'react';
+import { Box, Text } from 'ink';
+import { warningLines, type ResolvedCredentials } from '../lib/commandCore.js';
 import { type Surface } from '../lib/kizenTypes.js';
 import { surfaceToDashboardType } from '../lib/pushBlock.js';
 import {
-  apiFailure,
   applyPlan,
   buildBrowserRefresh,
   buildPlan,
   buildTargetChoices,
   formatSummaryLines,
-  headlessWriteGate,
   listPushableObjects,
   loadPushContext,
   matchContextTarget,
   resolveBlock,
-  resolveCredentials,
   resolveTarget,
   toTargetRow,
-  warningLines,
   type AppliedPush,
-  type PushAccount,
   type PushChoice,
   type PushCommandOptions,
   type PushContext,
   type PushDeps,
   type PushPlan,
   type ResolvedBlock,
-  type ResolvedCredentials,
   type ResolvedTarget,
   type TargetCustomObject,
   type TargetRow,
 } from '../lib/pushHeadless.js';
-import { AppHeader } from './AppHeader.js';
+import { ChoiceList, pick } from './ChoiceList.js';
+import {
+  createSessionStep,
+  DRY_RUN_TITLE,
+  EMPTY_SESSION,
+  LOADING_CREDENTIALS,
+  writeDecision,
+  type EnvironmentSelectPhase,
+  type Session,
+  type Setter,
+} from './commandSession.js';
+import { ConfirmPrompt, ProductionConfirm } from './ConfirmPrompt.js';
+import { ErrorFrame, type ErrorView } from './ErrorFrame.js';
+import { Lines } from './Lines.js';
 import { SelectList, type SelectItem } from './SelectList.js';
-import { Spinner } from './Spinner.js';
+import { SessionFrame, useCommandExit } from './SessionFrame.js';
+import { Working } from './Working.js';
 
 export interface PushUIProps {
   apiName?: string;
   options: PushCommandOptions;
   deps: PushDeps;
-}
-
-interface ErrorView {
-  message: string;
-  hint?: string;
-  choices?: PushChoice[];
-  issues?: ValidationIssue[];
-}
-
-interface Session {
-  credentials: PushAccount | null;
-  /** Notices about how the command signed in, such as an ignored profile pin. */
-  credentialNotices: string[];
-  warnings: ValidationIssue[];
-  notices: string[];
 }
 
 interface Resolving {
@@ -72,7 +57,7 @@ interface Resolving {
 
 type Phase =
   | { type: 'loading'; label: string }
-  | { type: 'environment-select'; options: PushCommandOptions; choices: PushChoice[] }
+  | EnvironmentSelectPhase<PushCommandOptions>
   | { type: 'packaging' }
   | {
       type: 'block-select';
@@ -105,8 +90,6 @@ type Phase =
   | { type: 'done'; plan: PushPlan; applied: AppliedPush | null }
   | { type: 'error'; view: ErrorView };
 
-type Setter<T> = Dispatch<SetStateAction<T>>;
-
 const SURFACE_ITEMS: readonly (SelectItem & { key: Surface })[] = [
   { key: 'dashboard', label: 'Dashboard' },
   { key: 'homepage', label: 'Homepage' },
@@ -132,20 +115,6 @@ function orderTargetChoices(choices: PushChoice[], matchedId: string | null): Pu
   const rest = choices.filter((choice) => choice.value !== matchedId && !isCreateChoice(choice));
 
   return matched.length > 0 ? [...matched, ...rest, ...creates] : [...creates, ...rest];
-}
-
-// A SelectList onSelect that hands the picked element of `list` to `fn`.
-function pick<T>(
-  list: readonly T[],
-  fn: (value: T) => void,
-): (item: SelectItem, index: number) => void {
-  return (_item, index) => {
-    const value = list[index];
-
-    if (value !== undefined) {
-      fn(value);
-    }
-  };
 }
 
 function targetItem(choice: PushChoice, matchedId: string | null): SelectItem {
@@ -198,8 +167,8 @@ function withTarget(
 export function createPushFlow(
   apiName: string | undefined,
   deps: PushDeps,
-  setPhase: Setter<Phase>,
-  setSession: Setter<Session>,
+  showPhase: Setter<Phase>,
+  showSession: Setter<Session>,
 ): {
   start: (options: PushCommandOptions) => void;
   pickEnvironment: (
@@ -217,19 +186,23 @@ export function createPushFlow(
   acceptDrift: (phase: Extract<Phase, { type: 'confirm'; kind: 'drift' }>) => void;
   acceptPush: (phase: Extract<Phase, { type: 'confirm'; kind: 'push' }>) => void;
   cancel: () => void;
+  abort: () => void;
 } {
-  const fail = (view: ErrorView): void => {
-    deps.setExitCode(1);
-    setPhase({ type: 'error', view });
-  };
-
-  const guard = (task: () => Promise<void>): void => {
-    task().catch((error: unknown) => {
-      fail(apiFailure(error));
-    });
-  };
+  const session = createSessionStep<PushCommandOptions>({
+    deps,
+    setPhase: showPhase,
+    setSession: showSession,
+    next: (options, resolved) => packageBlock(options, resolved, apiName),
+  });
+  const { fail, guard } = session;
+  const setPhase = session.whileRunning(showPhase);
+  const setSession = session.whileRunning(showSession);
 
   const apply = async (context: PushContext, plan: PushPlan): Promise<void> => {
+    if (session.isAborted()) {
+      return;
+    }
+
     setPhase({ type: 'applying', plan });
 
     const step = await applyPlan(context, plan, deps);
@@ -271,23 +244,18 @@ export function createPushFlow(
       return;
     }
 
-    if (options.dryRun) {
-      setPhase({ type: 'done', plan: step.value, applied: null });
+    switch (writeDecision(options, context.credentials.environment)) {
+      case 'dry-run':
+        setPhase({ type: 'done', plan: step.value, applied: null });
 
-      return;
-    }
-
-    if (options.yes) {
-      const gate = headlessWriteGate(options, context.credentials.environment);
-
-      if (gate.ok && gate.value.kind === 'apply') {
+        return;
+      case 'apply':
         await apply(context, step.value);
 
         return;
-      }
+      case 'confirm':
+        setPhase({ type: 'confirm', kind: 'push', plan: step.value, options, context });
     }
-
-    setPhase({ type: 'confirm', kind: 'push', plan: step.value, options, context });
   };
 
   const resolve = async (
@@ -334,20 +302,25 @@ export function createPushFlow(
     { credentials, client }: ResolvedCredentials,
     block: ResolvedBlock,
   ): Promise<void> => {
+    if (session.isAborted()) {
+      return;
+    }
+
     const { context, forgotten } = await loadPushContext(
       {
         client,
         credentials,
         block,
         forget: options.forget === true,
+        isAborted: session.isAborted,
       },
       deps,
     );
 
     if (forgotten) {
-      setSession((session) => ({
-        ...session,
-        notices: [...session.notices, `Forgot the remembered target for ${block.block.api_name}.`],
+      setSession((current) => ({
+        ...current,
+        notices: [...current.notices, `Forgot the remembered target for ${block.block.api_name}.`],
       }));
     }
 
@@ -381,33 +354,8 @@ export function createPushFlow(
       return;
     }
 
-    setSession((session) => ({ ...session, warnings: step.value.warnings }));
+    setSession((current) => ({ ...current, warnings: step.value.warnings }));
     await prepare(options, resolved, step.value);
-  };
-
-  const loadCredentials = async (options: PushCommandOptions): Promise<void> => {
-    setPhase({ type: 'loading', label: 'Loading credentials…' });
-
-    const step = await resolveCredentials(options, deps);
-
-    if (!step.ok) {
-      if (step.choice === 'environment' && step.choices) {
-        setPhase({ type: 'environment-select', options, choices: step.choices });
-
-        return;
-      }
-
-      fail(step);
-
-      return;
-    }
-
-    setSession((session) => ({
-      ...session,
-      credentials: step.value.credentials,
-      credentialNotices: step.value.notices,
-    }));
-    await packageBlock(options, step.value, apiName);
   };
 
   const listDashboards = async (
@@ -449,10 +397,10 @@ export function createPushFlow(
 
   return {
     start: (options) => {
-      guard(() => loadCredentials(options));
+      guard(() => session.load(options));
     },
     pickEnvironment: (phase, choice) => {
-      guard(() => loadCredentials({ ...phase.options, env: choice.value }));
+      guard(() => session.pickEnvironment(phase, choice));
     },
     pickBlock: (phase, choice) => {
       guard(() => packageBlock(phase.options, phase.resolved, choice.value));
@@ -531,73 +479,14 @@ export function createPushFlow(
     cancel: () => {
       fail({ message: 'Cancelled.' });
     },
+    abort: session.abort,
   };
 }
-
-interface ConfirmPromptProps {
-  prompt: string;
-  strict: boolean;
-  onAccept: () => void;
-  onCancel: () => void;
-}
-
-const ConfirmPrompt: FC<ConfirmPromptProps> = ({ prompt, strict, onAccept, onCancel }) => {
-  useInput((input, key) => {
-    if (key.ctrl) {
-      return;
-    }
-
-    const answer = input.toLowerCase();
-
-    if (answer === 'y' || (!strict && key.return)) {
-      onAccept();
-    } else if (strict || answer === 'n' || key.escape) {
-      onCancel();
-    }
-  });
-
-  return <Text bold>{prompt}</Text>;
-};
-
-const Lines: FC<{ lines: readonly string[]; color?: 'yellow' | 'red' }> = ({ lines, color }) => (
-  <Box flexDirection="column">
-    {lines.map((line, index) => (
-      <Text key={`${String(index)}-${line}`} {...(color && { color })}>
-        {line}
-      </Text>
-    ))}
-  </Box>
-);
 
 const PlanSummary: FC<{ plan: PushPlan }> = ({ plan }) => (
   <Box flexDirection="column">
     <Lines lines={formatSummaryLines(plan.summary)} />
     <Text>URL: {plan.url}</Text>
-  </Box>
-);
-
-const Working: FC<{ label: string }> = ({ label }) => (
-  <Box gap={1}>
-    <Spinner />
-    <Text dimColor>{label}</Text>
-  </Box>
-);
-
-const ErrorFrame: FC<{ view: ErrorView }> = ({ view }) => (
-  <Box flexDirection="column" gap={1}>
-    <Box gap={1}>
-      <Text color="red">✗</Text>
-      <Text color="red">
-        {view.issues && view.issues.length > 0 ? formatValidationIssues(view.issues) : view.message}
-      </Text>
-    </Box>
-    {view.hint !== undefined && <Text dimColor>Hint: {view.hint}</Text>}
-    {view.choices && view.choices.length > 0 && (
-      <Box flexDirection="column">
-        <Text>Choices:</Text>
-        <Lines lines={view.choices.map((choice) => `  ${choice.label}`)} />
-      </Box>
-    )}
   </Box>
 );
 
@@ -607,7 +496,7 @@ const DoneFrame: FC<{ plan: PushPlan; applied: AppliedPush | null }> = ({ plan, 
   if (applied === null) {
     return (
       <Box flexDirection="column" gap={1}>
-        <Text color="yellow">Dry run: nothing was written.</Text>
+        <Text color="yellow">{DRY_RUN_TITLE}</Text>
         <PlanSummary plan={plan} />
         {plan.warnings.length > 0 && <Lines lines={warningLines(plan.warnings)} color="yellow" />}
         <Box flexDirection="column">
@@ -641,14 +530,8 @@ const DoneFrame: FC<{ plan: PushPlan; applied: AppliedPush | null }> = ({ plan, 
 };
 
 export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
-  const app = useApp();
-  const [phase, setPhase] = useState<Phase>({ type: 'loading', label: 'Loading credentials…' });
-  const [session, setSession] = useState<Session>({
-    credentials: null,
-    credentialNotices: [],
-    warnings: [],
-    notices: [],
-  });
+  const [phase, setPhase] = useState<Phase>({ type: 'loading', label: LOADING_CREDENTIALS });
+  const [session, setSession] = useState<Session>(EMPTY_SESSION);
   const [flow] = useState(() => createPushFlow(apiName, deps, setPhase, setSession));
   const [initialOptions] = useState(options);
 
@@ -656,37 +539,10 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
     flow.start(initialOptions);
   }, [flow, initialOptions]);
 
-  useEffect(() => {
-    if (phase.type === 'done' || phase.type === 'error') {
-      app.exit();
-    }
-  }, [phase, app]);
-
-  useInput((input, key) => {
-    if (key.ctrl && input === 'c' && phase.type !== 'done' && phase.type !== 'error') {
-      deps.setExitCode(130);
-      app.exit();
-    }
-  });
+  useCommandExit(phase.type === 'done' || phase.type === 'error', deps.setExitCode, flow.abort);
 
   const frame = (children: ReactNode): ReactNode => (
-    <Box flexDirection="column" paddingY={1} paddingX={2} gap={1}>
-      <AppHeader />
-      {session.credentials && (
-        <Text dimColor>
-          Environment: {session.credentials.environment} · Business:{' '}
-          {session.credentials.businessId}
-        </Text>
-      )}
-      {session.credentialNotices.length > 0 && (
-        <Lines lines={session.credentialNotices} color="yellow" />
-      )}
-      {session.warnings.length > 0 && (
-        <Text dimColor>{formatValidationIssues(session.warnings)}</Text>
-      )}
-      {session.notices.length > 0 && <Lines lines={session.notices} />}
-      {children}
-    </Box>
+    <SessionFrame session={session}>{children}</SessionFrame>
   );
 
   switch (phase.type) {
@@ -702,25 +558,25 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
       );
     case 'environment-select':
       return frame(
-        <SelectList
+        <ChoiceList
           key="environment"
           title="Environment"
-          items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
-          onSelect={pick(phase.choices, (choice) => {
+          choices={phase.choices}
+          onPick={(choice) => {
             flow.pickEnvironment(phase, choice);
-          })}
+          }}
           onCancel={flow.cancel}
         />,
       );
     case 'block-select':
       return frame(
-        <SelectList
+        <ChoiceList
           key="block"
           title="Block to push"
-          items={phase.choices.map((choice) => ({ key: choice.value, label: choice.label }))}
-          onSelect={pick(phase.choices, (choice) => {
+          choices={phase.choices}
+          onPick={(choice) => {
             flow.pickBlock(phase, choice);
-          })}
+          }}
           onCancel={flow.cancel}
         />,
       );
@@ -817,17 +673,11 @@ export const PushUI: FC<PushUIProps> = ({ apiName, options, deps }) => {
           {phase.plan.warnings.length > 0 && (
             <Lines lines={warningLines(phase.plan.warnings)} color="yellow" />
           )}
-          {phase.plan.summary.isProduction && (
-            <Text color="red" bold>
-              PRODUCTION
-            </Text>
-          )}
-          <ConfirmPrompt
+          <ProductionConfirm
             key="push"
-            prompt={
-              phase.plan.summary.isProduction ? 'Type y to push to production (y/N)' : 'Push? (Y/n)'
-            }
-            strict={phase.plan.summary.isProduction}
+            isProduction={phase.plan.summary.isProduction}
+            prompt="Push? (Y/n)"
+            productionPrompt="Type y to push to production (y/N)"
             onAccept={() => {
               flow.acceptPush(phase);
             }}

@@ -34,6 +34,17 @@ describe('ensureGitignore', () => {
     expect(lines).toContain('.copilot-docs/');
   });
 
+  it('returns true only when it wrote the file', async () => {
+    await writeFile(gitignorePath, 'node_modules/\n', 'utf-8');
+
+    expect(ensureGitignore(root)).toBe(true);
+
+    const written = await read();
+
+    expect(ensureGitignore(root)).toBe(false);
+    expect(await read()).toBe(written);
+  });
+
   it('appends to an existing gitignore without dropping its entries', async () => {
     await writeFile(gitignorePath, 'node_modules/\ndist/\n', 'utf-8');
 

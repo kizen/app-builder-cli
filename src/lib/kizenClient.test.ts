@@ -1,3 +1,5 @@
+import { createServer, type IncomingHttpHeaders, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Credentials } from '../../shared/lib/credentials.js';
 import {
@@ -152,6 +154,23 @@ describe('createKizenClient requests', () => {
     expect(call(0).url).toBe(`${BASE}/custom-objects?page_size=200`);
     expect(call(1).url).toBe(next);
     expect(call(1).init.headers).toEqual(AUTH_HEADERS);
+  });
+
+  it('lists every object, Contacts included, only when asked (custom_only=false)', async () => {
+    const { client, call } = setup(
+      API_KEY,
+      jsonResponse({ next: null, results: [] }),
+      jsonResponse({ next: null, results: [] }),
+      jsonResponse({ next: null, results: [] }),
+    );
+
+    await client.listCustomObjects({ customOnly: false });
+    await client.listCustomObjects();
+    await client.listCustomObjects({ customOnly: true });
+
+    expect(call(0).url).toBe(`${BASE}/custom-objects?page_size=200&custom_only=false`);
+    expect(call(1).url).toBe(`${BASE}/custom-objects?page_size=200`);
+    expect(call(2).url).toBe(`${BASE}/custom-objects?page_size=200`);
   });
 
   it.each([
@@ -623,5 +642,374 @@ describe('bearer auth', () => {
       email: 'ada@example.com',
     });
     expect(call(0).url).toBe(`${STAGING}/auth/bootstrap`);
+  });
+});
+
+describe('generic primitives', () => {
+  const tokens = (): BearerTokenProvider & { refreshes: string[] } => {
+    let current = 1;
+    const refreshes: string[] = [];
+
+    return {
+      environment: 'integration',
+      refreshes,
+      getAccessToken: () => Promise.resolve(`tok-${String(current)}`),
+      refreshAccessToken: (rejected) => {
+        refreshes.push(rejected);
+        current += 1;
+
+        return Promise.resolve(`tok-${String(current)}`);
+      },
+    };
+  };
+
+  const BINARY = new Uint8Array([0x00, 0xff, 0xfe, 0x80, 0xc3, 0x28, 0x0a, 0x7b]);
+
+  it('requestJson sends method, path and JSON body with auth, and resolves 204 to undefined', async () => {
+    const { client, call } = setup(
+      API_KEY,
+      jsonResponse({ ok: true }, 201),
+      new Response(null, { status: 204 }),
+    );
+
+    await expect(client.requestJson('POST', '/things?x=1', { a: 1 })).resolves.toStrictEqual({
+      ok: true,
+    });
+    expect(call(0).url).toBe(`${BASE}/things?x=1`);
+    expect(call(0).init.method).toBe('POST');
+    expect(call(0).init.headers).toStrictEqual({
+      ...AUTH_HEADERS,
+      'Content-Type': 'application/json',
+    });
+    expect(call(0).init.body).toBe('{"a":1}');
+
+    await expect(client.requestJson('DELETE', '/things/1')).resolves.toBeUndefined();
+    expect(call(1).init.method).toBe('DELETE');
+    expect(call(1).init.body).toBeUndefined();
+  });
+
+  it.each(['https://evil.test/x', '//evil.test/x', 'relative/path'])(
+    'refuses a target that is not an API path (%s) without sending credentials',
+    async (target) => {
+      const { client, fetchMock } = setup(API_KEY);
+
+      await expect(rejection(client.requestJson('GET', target))).resolves.toMatchObject({
+        kind: 'api_error',
+      });
+      await expect(rejection(client.postForm(target, {}))).resolves.toMatchObject({
+        kind: 'api_error',
+      });
+      await expect(rejection(client.getBinary(target))).resolves.toMatchObject({
+        kind: 'api_error',
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('postForm sends a form-urlencoded body with auth', async () => {
+    const { client, call } = setup(API_KEY, jsonResponse({ id: 'f1' }));
+
+    await expect(
+      client.postForm('/s3/success?source=public_image', { uuid: 'u 1', key: 'a/b&c' }),
+    ).resolves.toStrictEqual({ id: 'f1' });
+    expect(call(0).init.headers).toStrictEqual({
+      ...AUTH_HEADERS,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    });
+    expect(call(0).init.body).toBe('uuid=u+1&key=a%2Fb%26c');
+  });
+
+  it('getBinary returns raw bytes without JSON parsing', async () => {
+    const { client, call } = setup(API_KEY, new Response(BINARY));
+    const bytes = await client.getBinary('/files/f1/download');
+
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect([...bytes]).toStrictEqual([...BINARY]);
+    expect(call(0).init.headers).toStrictEqual({ ...AUTH_HEADERS, Accept: '*/*' });
+  });
+
+  it('getBinary maps a failed response to KizenApiError with its body', async () => {
+    const { client } = setup(API_KEY, jsonResponse({ detail: 'Not found.' }, 404));
+    const error = await rejection(client.getBinary('/files/f1/download'));
+
+    expect(error.kind).toBe('not_found');
+    expect(error.details).toStrictEqual({ detail: 'Not found.' });
+  });
+
+  it('binary and form requests retry once after a 401 refresh like JSON requests', async () => {
+    const binaryTokens = tokens();
+    const binary = setup(
+      { bearer: binaryTokens },
+      jsonResponse({ detail: 'expired' }, 401),
+      new Response(BINARY),
+    );
+
+    expect([...(await binary.client.getBinary('/files/f1/download'))]).toStrictEqual([...BINARY]);
+    expect(binaryTokens.refreshes).toStrictEqual(['tok-1']);
+    expect(binary.call(1).init.headers).toMatchObject({ Authorization: 'Bearer tok-2' });
+
+    const formTokens = tokens();
+    const form = setup(
+      { bearer: formTokens },
+      jsonResponse({ detail: 'expired' }, 401),
+      jsonResponse({ id: 'f1' }),
+    );
+
+    await expect(form.client.postForm('/s3/success', { uuid: 'u1' })).resolves.toStrictEqual({
+      id: 'f1',
+    });
+    expect(formTokens.refreshes).toStrictEqual(['tok-1']);
+    expect(form.call(1).init.headers).toMatchObject({
+      Authorization: 'Bearer tok-2',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    });
+    expect(form.call(1).init.body).toBe('uuid=u1');
+
+    const jsonTokens = tokens();
+    const json = setup(
+      { bearer: jsonTokens },
+      jsonResponse({ detail: 'expired' }, 401),
+      new Response(null, { status: 204 }),
+    );
+
+    await expect(json.client.requestJson('DELETE', '/x')).resolves.toBeUndefined();
+    expect(jsonTokens.refreshes).toStrictEqual(['tok-1']);
+
+    const deniedTokens = tokens();
+    const denied = setup(
+      { bearer: deniedTokens },
+      jsonResponse({ detail: 'no' }, 401),
+      jsonResponse({ detail: 'still no' }, 401),
+    );
+
+    await expect(rejection(denied.client.getBinary('/files/f1/download'))).resolves.toMatchObject({
+      kind: 'auth_failed',
+      status: 401,
+    });
+    expect(denied.fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('KizenApiError carries the 400 body', async () => {
+    const body = {
+      base_config: {
+        setup_assistant: { actions: [{}, ['[structure/setup-assistant-action-ref] x']] },
+      },
+    };
+    const { client } = setup(API_KEY, jsonResponse(body, 400));
+    const error = await rejection(client.requestJson('POST', '/publish', {}));
+
+    expect(error.kind).toBe('api_error');
+    expect(error.status).toBe(400);
+    expect(error.details).toStrictEqual(body);
+  });
+});
+
+describe('redirects', () => {
+  interface Recorded {
+    method: string;
+    url: string;
+    headers: IncomingHttpHeaders;
+    body: string;
+  }
+
+  interface TestServer {
+    origin: string;
+    requests: Recorded[];
+    close: () => Promise<void>;
+  }
+
+  const servers: TestServer[] = [];
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((server) => server.close()));
+  });
+
+  const startServer = async (
+    respond: (req: Recorded, res: ServerResponse) => void,
+  ): Promise<TestServer> => {
+    const requests: Recorded[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const recorded = {
+          method: req.method ?? '',
+          url: req.url ?? '',
+          headers: req.headers,
+          body: Buffer.concat(chunks).toString('utf-8'),
+        };
+
+        requests.push(recorded);
+        respond(recorded, res);
+      });
+    });
+
+    await new Promise<void>((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
+
+    const { port } = server.address() as AddressInfo;
+    const handle: TestServer = {
+      origin: `http://127.0.0.1:${String(port)}`,
+      requests,
+      close: () =>
+        new Promise<void>((resolveClose) => {
+          server.closeAllConnections();
+          server.close(() => {
+            resolveClose();
+          });
+        }),
+    };
+
+    servers.push(handle);
+
+    return handle;
+  };
+
+  const redirectTo =
+    (location: () => string, status = 302) =>
+    (_req: Recorded, res: ServerResponse): void => {
+      res.writeHead(status, { Location: location() });
+      res.end();
+    };
+
+  const json =
+    (body: unknown) =>
+    (_req: Recorded, res: ServerResponse): void => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+
+  const BEARER_PROVIDER: BearerTokenProvider = {
+    environment: 'integration',
+    getAccessToken: () => Promise.resolve('tok-1'),
+    refreshAccessToken: () => Promise.resolve('tok-2'),
+  };
+
+  const AUTH_MODES: [string, KizenClientAuth][] = [
+    ['api key', { credentials: CREDENTIALS }],
+    ['bearer', { bearer: BEARER_PROVIDER }],
+  ];
+
+  it.each(AUTH_MODES)(
+    'authenticated requests never follow a cross-origin redirect (%s)',
+    async (_mode, auth) => {
+      const elsewhere = await startServer(json({ stolen: true }));
+      const kizen = await startServer(redirectTo(() => `${elsewhere.origin}/collect`));
+      const client = createKizenClient({ ...auth, baseUrl: `${kizen.origin}/api`, fetch });
+
+      for (const invoke of [
+        () => client.requestJson('POST', '/publish', { a: 1 }),
+        () => client.postForm('/s3/success', { uuid: 'u1' }),
+        () => client.getBinary('/files/f1/download'),
+        () => client.getDashboard('d1'),
+      ]) {
+        const error = await rejection(invoke());
+
+        expect(error.kind).toBe('api_error');
+        expect(error.message).toContain('outside the Kizen API');
+      }
+
+      expect(kizen.requests).toHaveLength(4);
+      expect(elsewhere.requests).toStrictEqual([]);
+    },
+  );
+
+  it.each(AUTH_MODES)('same-origin redirects are followed with auth (%s)', async (_mode, auth) => {
+    const kizen = await startServer((req, res) => {
+      if (req.url === '/api/old') {
+        redirectTo(() => '/api/new', 307)(req, res);
+      } else {
+        json({ ok: true })(req, res);
+      }
+    });
+    const client = createKizenClient({ ...auth, baseUrl: `${kizen.origin}/api`, fetch });
+
+    await expect(client.requestJson('POST', '/old', { a: 1 })).resolves.toStrictEqual({ ok: true });
+
+    const [first, second] = kizen.requests;
+
+    expect(second?.url).toBe('/api/new');
+    expect(second?.method).toBe('POST');
+    expect(second?.body).toBe('{"a":1}');
+
+    for (const request of [first, second]) {
+      if (auth.bearer) {
+        expect(request?.headers.authorization).toBe('Bearer tok-1');
+      } else {
+        expect(request?.headers['x-api-key']).toBe('key-123');
+        expect(request?.headers['x-business-id']).toBe('biz-123');
+      }
+    }
+  });
+
+  it('a malformed redirect location fails as api_error', async () => {
+    const kizen = await startServer((_req, res) => {
+      res.writeHead(302, { Location: 'http://[::1' });
+      res.end();
+    });
+    const client = createKizenClient({ ...API_KEY, baseUrl: `${kizen.origin}/api`, fetch });
+    const error = await rejection(client.requestJson('GET', '/x'));
+
+    expect(error.kind).toBe('api_error');
+    expect(error.message).toBe(`GET ${kizen.origin}/api/x was redirected to an invalid location`);
+    expect(error.status).toBe(302);
+  });
+
+  it('a redirect then a 401 refreshes and retries from the original URL and method', async () => {
+    const refreshes: string[] = [];
+    const bearer: BearerTokenProvider = {
+      environment: 'integration',
+      getAccessToken: () => Promise.resolve('tok-1'),
+      refreshAccessToken: (rejected) => {
+        refreshes.push(rejected);
+
+        return Promise.resolve('tok-2');
+      },
+    };
+    const kizen = await startServer((req, res) => {
+      if (req.url === '/api/old') {
+        redirectTo(() => '/api/new', 307)(req, res);
+      } else if (req.headers.authorization === 'Bearer tok-1') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ detail: 'expired' }));
+      } else {
+        json({ ok: true })(req, res);
+      }
+    });
+    const client = createKizenClient({ bearer, baseUrl: `${kizen.origin}/api`, fetch });
+
+    await expect(client.requestJson('POST', '/old', { a: 1 })).resolves.toStrictEqual({ ok: true });
+    expect(refreshes).toStrictEqual(['tok-1']);
+    expect(
+      kizen.requests.map((r) => [r.method, r.url, r.headers.authorization, r.body]),
+    ).toStrictEqual([
+      ['POST', '/api/old', 'Bearer tok-1', '{"a":1}'],
+      ['POST', '/api/new', 'Bearer tok-1', '{"a":1}'],
+      ['POST', '/api/old', 'Bearer tok-2', '{"a":1}'],
+      ['POST', '/api/new', 'Bearer tok-2', '{"a":1}'],
+    ]);
+  });
+
+  it('a 303 continues as a bodiless GET and a redirect loop stops', async () => {
+    const kizen = await startServer((req, res) => {
+      if (req.url === '/api/submit') {
+        redirectTo(() => '/api/result', 303)(req, res);
+      } else if (req.url === '/api/loop') {
+        redirectTo(() => '/api/loop')(req, res);
+      } else {
+        json({ done: true })(req, res);
+      }
+    });
+    const client = createKizenClient({ ...API_KEY, baseUrl: `${kizen.origin}/api`, fetch });
+
+    await expect(client.requestJson('POST', '/submit', { a: 1 })).resolves.toStrictEqual({
+      done: true,
+    });
+    expect(kizen.requests[1]).toMatchObject({ method: 'GET', url: '/api/result', body: '' });
+
+    await expect(rejection(client.requestJson('GET', '/loop'))).resolves.toMatchObject({
+      kind: 'api_error',
+    });
+    expect(kizen.requests.filter((r) => r.url === '/api/loop')).toHaveLength(6);
   });
 });

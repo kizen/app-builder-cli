@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Environment } from './credentials.js';
 import type { KizenIdentity } from './kizenClient.js';
-import { startLoopbackServer } from './oauth.js';
+import { createOAuthCommandDeps, resolveCredentials, type CommandDeps } from './commandCore.js';
+import { SessionStoreUnwritableError, startLoopbackServer } from './oauth.js';
 import {
   createDefaultTokenProvider,
   createTokenProvider,
@@ -48,11 +49,34 @@ const hooks = vi.hoisted(() => ({
     | { matches: (to: string) => boolean; reached: () => void; gate: Promise<void> }
     | undefined,
   onCreateTaken: undefined as ((path: string) => void) | undefined,
+  denyWritesUnder: undefined as string | undefined,
+  diskFree: undefined as { root: string; bytes: number } | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const fs = await importOriginal<typeof FsPromisesModule>();
+  const deny = (operation: string, path: unknown): void => {
+    const root = hooks.denyWritesUnder;
+
+    if (root !== undefined && String(path).startsWith(root)) {
+      throw Object.assign(
+        new Error(`EPERM: operation not permitted, ${operation} '${String(path)}'`),
+        { code: 'EPERM' },
+      );
+    }
+  };
+
+  const denied =
+    <A extends unknown[], R>(operation: string, run: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      deny(operation, args[0]);
+
+      return run(...args);
+    };
+
   const rename = async (...args: Parameters<typeof fs.rename>): Promise<void> => {
+    deny('rename', args[0]);
+
     const pause = hooks.pauseRename;
 
     if (pause?.matches(String(args[1])) === true) {
@@ -67,8 +91,31 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const open = async (
     ...args: Parameters<typeof fs.open>
   ): Promise<FsPromisesModule.FileHandle> => {
+    if (args[1] !== undefined && args[1] !== 'r') {
+      deny('open', args[0]);
+    }
+
     try {
-      return await fs.open(...args);
+      const handle = await fs.open(...args);
+      const disk = hooks.diskFree;
+
+      if (disk !== undefined && String(args[0]).startsWith(disk.root)) {
+        const writeFile = handle.writeFile.bind(handle);
+
+        handle.writeFile = (data, options) => {
+          if (Buffer.byteLength(data as string) > disk.bytes) {
+            return Promise.reject(
+              Object.assign(new Error('ENOSPC: no space left on device, write'), {
+                code: 'ENOSPC',
+              }),
+            );
+          }
+
+          return writeFile(data, options);
+        };
+      }
+
+      return handle;
     } catch (err) {
       if (args[1] === 'wx' && (err as { code?: unknown }).code === 'EEXIST') {
         hooks.onCreateTaken?.(String(args[0]));
@@ -78,7 +125,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     }
   };
 
-  const mocked = { ...fs, rename, open };
+  const mocked = {
+    ...fs,
+    rename,
+    open,
+    chmod: denied('chmod', fs.chmod),
+    mkdir: denied('mkdir', fs.mkdir),
+    unlink: denied('unlink', fs.unlink),
+    rm: denied('rm', fs.rm),
+  };
 
   return { ...mocked, default: mocked };
 });
@@ -94,6 +149,8 @@ beforeEach(async () => {
 afterEach(async () => {
   hooks.pauseRename = undefined;
   hooks.onCreateTaken = undefined;
+  hooks.denyWritesUnder = undefined;
+  hooks.diskFree = undefined;
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -1365,5 +1422,138 @@ describe('createDefaultTokenProvider', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe("a session store this process can't write", () => {
+  const accountBytes = (): Promise<string> =>
+    readFile(store.accountPath('staging', ACCOUNT_A), 'utf-8');
+
+  it('a refresh never spends the refresh token when the session store is unwritable', async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const before = await accountBytes();
+    const server = fakeAuthServer();
+
+    hooks.denyWritesUnder = dir;
+
+    const expiring = await rejectionOf(
+      provider(server).getAccessToken(),
+      SessionStoreUnwritableError,
+    );
+    const rejected = await rejectionOf(
+      provider(server).refreshAccessToken('access-0'),
+      SessionStoreUnwritableError,
+    );
+
+    expect(expiring.code).toBe('session_store_unwritable');
+    expect(rejected.code).toBe('session_store_unwritable');
+    expect(server.tokenRequests()).toHaveLength(0);
+    expect(server.fetch).toHaveBeenCalledTimes(0);
+
+    hooks.denyWritesUnder = undefined;
+
+    expect(await accountBytes()).toBe(before);
+    await expect(provider(server).getAccessToken()).resolves.toBe('access-1');
+    expect(server.tokenRequests()[0]?.get('refresh_token')).toBe('refresh-0');
+  });
+
+  it('an unwritable session store fails with session_store_unwritable and the fix in the hint', async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const server = fakeAuthServer();
+    const deps = {
+      cwd: dir,
+      loadConfig: vi.fn(() => Promise.resolve({})),
+      processEnv: {},
+      oauth: createOAuthCommandDeps(store, { fetch: server.fetch }),
+    } as unknown as CommandDeps;
+
+    hooks.denyWritesUnder = dir;
+
+    const step = await resolveCredentials({ env: 'staging' }, deps);
+
+    expect(step).toStrictEqual({
+      ok: false,
+      code: 'session_store_unwritable',
+      message: `Can't write to ${store.dir} (EPERM), where appbuilder keeps its sign-in sessions.`,
+      hint: `appbuilder needs write access to ${dir} to keep you signed in. Under Codex, re-run the command with sandbox_permissions: "require_escalated" (prefix_rule: ["appbuilder"]). Under the Claude Code sandbox, add "appbuilder *" to sandbox.excludedCommands in your user settings (~/.claude/settings.json); allowing writes to ${dir} alone isn't enough, since appbuilder also needs network access the sandbox blocks.`,
+    });
+    expect(server.fetch).toHaveBeenCalledTimes(0);
+  });
+
+  it('a nearly full disk stops a refresh before it spends the refresh token', async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const before = await accountBytes();
+    const server = fakeAuthServer();
+
+    hooks.diskFree = { root: dir, bytes: 2048 };
+
+    const error = await rejectionOf(provider(server).getAccessToken(), SessionStoreUnwritableError);
+
+    expect(error.code).toBe('session_store_unwritable');
+    expect(error.message).toBe(
+      `Can't write to ${store.dir} (ENOSPC): the disk is full or over quota. appbuilder keeps its sign-in sessions there.`,
+    );
+    expect(error.hint).toBe(
+      `Free some disk space (or quota) for ${dir}, then run the command again.`,
+    );
+    expect(server.tokenRequests()).toHaveLength(0);
+
+    hooks.diskFree = undefined;
+
+    expect(await accountBytes()).toBe(before);
+  });
+
+  it('refresh still works normally when the store is writable, and leaves no probe behind', async () => {
+    await signIn(store, oauthSession({ expiresAt: EXPIRING }));
+
+    const before = await readdir(store.dir);
+    const server = fakeAuthServer();
+
+    await expect(provider(server).getAccessToken()).resolves.toBe('access-1');
+    expect(server.tokenRequests()).toHaveLength(1);
+    expect(await store.readSession('staging')).toMatchObject({ refreshToken: 'refresh-1' });
+    expect((await readdir(store.dir)).sort()).toStrictEqual(before.sort());
+  });
+
+  it('login stops before the browser when the session store is unwritable', async () => {
+    const server = fakeAuthServer();
+    const browser = fakeBrowser(approve);
+
+    hooks.denyWritesUnder = dir;
+
+    const error = await rejectionOf(
+      login('staging', loginDeps(server, browser)),
+      SessionStoreUnwritableError,
+    );
+
+    expect(error.code).toBe('session_store_unwritable');
+    expect(error.hint).toContain('require_escalated');
+    expect(server.fetch).toHaveBeenCalledTimes(0);
+    expect(browser.authorizeUrls).toStrictEqual([]);
+  });
+
+  it("the store's writes and deletes fail with session_store_unwritable", async () => {
+    await signIn(store, oauthSession());
+
+    hooks.denyWritesUnder = dir;
+
+    for (const write of [
+      () => store.writeSession(oauthSession({ accessToken: 'access-9' })),
+      () => store.setCurrent('staging', ACCOUNT_A),
+      () => store.writeClientId(ISSUER, 'client-9'),
+      () => store.signOut('staging'),
+      () => store.deleteSession('staging', ACCOUNT_A),
+    ]) {
+      const error = await rejectionOf(write(), SessionStoreUnwritableError);
+
+      expect(error.code).toBe('session_store_unwritable');
+    }
+
+    hooks.denyWritesUnder = undefined;
+
+    expect(await store.readSession('staging')).toMatchObject({ accessToken: 'access-0' });
   });
 });

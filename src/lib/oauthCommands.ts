@@ -3,8 +3,9 @@
  * token, and only the access token, to stdout.
  *
  * `login` is headless unless a person is at a terminal: `--list` and `--business` never prompt,
- * and without them the account picker appears only when both stdin and stdout are TTYs and the
- * environment has saved accounts. Otherwise it runs the browser sign-in.
+ * and without them the account picker appears only when `isInteractive` says a person is there
+ * (both streams TTYs, no `--no-interactive`, no agent or CI environment) and the environment has
+ * saved accounts. Otherwise it runs the browser sign-in.
  */
 import { apiOriginFor } from '../../shared/lib/kizenUrls.js';
 import {
@@ -16,8 +17,13 @@ import {
 } from './authSelection.js';
 import { ENVIRONMENTS, parseEnvironment, type Environment } from './credentials.js';
 import { errorMessage } from './guards.js';
+import { isProcessInteractive } from './interactive.js';
 import { createKizenClient, KizenApiError, type KizenIdentity } from './kizenClient.js';
-import { DEFAULT_LOGIN_ENVIRONMENT, loginCommandFor } from './oauth.js';
+import {
+  DEFAULT_LOGIN_ENVIRONMENT,
+  loginCommandFor,
+  SessionStoreUnwritableError,
+} from './oauth.js';
 import {
   createDefaultLoginDeps,
   createDefaultTokenProvider,
@@ -64,7 +70,6 @@ export interface AuthCommandDeps {
   /** `/auth/bootstrap` through `bearer`. */
   identify: Identify;
   tokenProvider: (environment: Environment, options?: TokenProviderOptions) => BearerTokenProvider;
-  /** Whether a person can answer a prompt: stdin and stdout are both TTYs. */
   isInteractive: () => boolean;
   /** The terminal account picker; without one, `login` never prompts. */
   pickAccount?: PickAccount;
@@ -75,16 +80,10 @@ export interface AuthCommandDeps {
   setExitCode: (code: number) => void;
 }
 
-/**
- * Both streams must be terminals for a prompt: a piped stdout means a script is reading it. Node
- * types `isTTY` as boolean, but it's undefined on a stream that isn't a TTY.
- */
-const isInteractiveTerminal = (stdin: { isTTY?: boolean }, stdout: { isTTY?: boolean }): boolean =>
-  stdin.isTTY === true && stdout.isTTY === true;
-
 export function createDefaultAuthCommandDeps(
   store: OAuthStore = createOAuthStore(),
   pickAccount?: PickAccount,
+  noInteractive = false,
 ): AuthCommandDeps {
   const tokenProvider = (
     environment: Environment,
@@ -107,7 +106,7 @@ export function createDefaultAuthCommandDeps(
     ),
     identify,
     tokenProvider,
-    isInteractive: () => isInteractiveTerminal(process.stdin, process.stdout),
+    isInteractive: () => isProcessInteractive({ noInteractive }),
     ...(pickAccount !== undefined && { pickAccount }),
     authHeaderTimeouts: { requestTimeoutMs: AUTH_HEADER_REQUEST_TIMEOUT_MS },
     processEnv: process.env,
@@ -150,7 +149,7 @@ async function sessionEnvironment(
 const businessLabel = (name: string | undefined, id: string): string =>
   name ? `${name} (${id})` : id;
 
-const identityLines = (environment: Environment, identity: KizenIdentity): string => {
+export const identityLines = (environment: Environment, identity: KizenIdentity): string => {
   const who = [identity.fullName, identity.email && `<${identity.email}>`]
     .filter(Boolean)
     .join(' ');
@@ -168,7 +167,11 @@ function report(
   { prefix = 'Error', oneLine = false } = {},
 ): void {
   const message = errorMessage(error);
-  const hint = error instanceof KizenApiError && error.hint !== undefined ? `\n${error.hint}` : '';
+  const hint =
+    (error instanceof KizenApiError || error instanceof SessionStoreUnwritableError) &&
+    error.hint !== undefined
+      ? `\n${error.hint}`
+      : '';
 
   deps.writeStderr(
     `${prefix}: ${oneLine ? message.replace(/\s+/g, ' ').trim() : `${message}${hint}`}\n`,

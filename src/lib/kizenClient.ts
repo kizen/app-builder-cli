@@ -6,13 +6,20 @@ import type {
   DashboardType,
   KizenApiErrorKind,
   KizenClient,
+  KizenJsonMethod,
+  ListCustomObjectsOptions,
   UpdateDashletBody,
   WireCustomObject,
   WireDashboard,
   WireDashboardSummary,
   WireDashlet,
 } from './kizenTypes.js';
-import { loginRequired, OAuthError, type OAuthLocalErrorCode } from './oauth.js';
+import {
+  loginRequired,
+  OAuthError,
+  SessionStoreUnwritableError,
+  type OAuthLocalErrorCode,
+} from './oauth.js';
 import type { BearerTokenProvider } from './oauthSession.js';
 import { getProxyEnvStatus, PROXY_UNAVAILABLE_HINT } from './proxyEnv.js';
 
@@ -63,23 +70,29 @@ interface ListPage {
 
 const MAX_PAGES = 100;
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+const MAX_REDIRECTS = 5;
+
 const UNPREFIXED_KEYS = new Set(['detail', 'non_field_errors']);
 
 export class KizenApiError extends Error {
   readonly kind: KizenApiErrorKind;
   readonly status: number | undefined;
   readonly hint: string | undefined;
+  readonly details: unknown;
 
   constructor(
     kind: KizenApiErrorKind,
     message: string,
-    options: { status?: number; hint?: string } = {},
+    options: { status?: number; hint?: string; details?: unknown; cause?: unknown } = {},
   ) {
-    super(message);
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'KizenApiError';
     this.kind = kind;
     this.status = options.status;
     this.hint = options.hint;
+    this.details = options.details;
   }
 }
 
@@ -176,20 +189,21 @@ function statusError(
 ): KizenApiError {
   const detail = formatDrfError(body);
   const message = `${method} ${path} failed with ${String(status)}${detail === undefined ? '' : `: ${detail}`}`;
+  const details = body;
 
   if (status === 401) {
-    return new KizenApiError('auth_failed', message, { status, hint: hints.authFailed });
+    return new KizenApiError('auth_failed', message, { status, hint: hints.authFailed, details });
   }
 
   if (status === 403) {
-    return new KizenApiError('forbidden', message, { status, hint: hints.forbidden });
+    return new KizenApiError('forbidden', message, { status, hint: hints.forbidden, details });
   }
 
   if (status === 404) {
-    return new KizenApiError('not_found', message, { status });
+    return new KizenApiError('not_found', message, { status, details });
   }
 
-  return new KizenApiError('api_error', message, { status });
+  return new KizenApiError('api_error', message, { status, details });
 }
 
 function listResults(method: string, path: string, data: unknown): ListPage {
@@ -220,6 +234,7 @@ function bootstrapParts(data: unknown): {
 const TOKEN_ERROR_KINDS = new Map<OAuthLocalErrorCode, KizenApiErrorKind>([
   ['login_required', 'auth_failed'],
   ['network_error', 'network_error'],
+  ['session_store_unwritable', 'session_store_unwritable'],
 ]);
 
 function tokenError(err: unknown, environment: Environment): KizenApiError {
@@ -228,14 +243,20 @@ function tokenError(err: unknown, environment: Environment): KizenApiError {
     err instanceof OAuthError ? TOKEN_ERROR_KINDS.get(err.code as OAuthLocalErrorCode) : undefined;
 
   return kind === undefined
-    ? new KizenApiError('api_error', `Couldn't refresh the ${environment} session: ${message}`)
-    : new KizenApiError(kind, message);
+    ? new KizenApiError('api_error', `Couldn't refresh the ${environment} session: ${message}`, {
+        cause: err,
+      })
+    : new KizenApiError(kind, message, {
+        cause: err,
+        ...(err instanceof SessionStoreUnwritableError && { hint: err.hint }),
+      });
 }
 
 export function createKizenClient(options: KizenClientOptions): KizenSessionClient {
   const fetchImpl = options.fetch ?? fetch;
   const environment = options.bearer ? options.bearer.environment : options.credentials.environment;
   const baseUrl = options.baseUrl ?? BASE_URLS[environment];
+  const apiOrigin = new URL(baseUrl).origin;
 
   const hints: StatusHints = options.bearer
     ? { authFailed: bearerAuthFailedHint(environment), forbidden: BEARER_FORBIDDEN_HINT }
@@ -268,21 +289,29 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     };
   };
 
-  const request = async (method: string, target: string, body?: unknown): Promise<unknown> => {
-    const url = /^https?:\/\//.test(target) ? target : `${baseUrl}${target}`;
-    const path = url.startsWith(baseUrl) ? url.slice(baseUrl.length) : url;
+  // fetch would forward the auth headers to whatever host a redirect names.
+  const send = async (
+    method: string,
+    url: string,
+    accept: string,
+    body?: { contentType: string; payload: string },
+  ): Promise<Response> => {
+    const fetchOnce = async (
+      target: string,
+      hopMethod: string,
+      hopBody: { contentType: string; payload: string } | undefined,
+      authHeaders: Record<string, string>,
+    ): Promise<Response> => {
+      const headers: Record<string, string> = { ...authHeaders, Accept: accept };
+      const init: RequestInit = { method: hopMethod, headers, redirect: 'manual' };
 
-    const send = async (authHeaders: Record<string, string>): Promise<Response> => {
-      const headers: Record<string, string> = { ...authHeaders, Accept: 'application/json' };
-      const init: RequestInit = { method, headers };
-
-      if (body !== undefined) {
-        headers['Content-Type'] = 'application/json';
-        init.body = JSON.stringify(body);
+      if (hopBody !== undefined) {
+        headers['Content-Type'] = hopBody.contentType;
+        init.body = hopBody.payload;
       }
 
       try {
-        return await fetchImpl(url, init);
+        return await fetchImpl(target, init);
       } catch (err) {
         throw new KizenApiError(
           'network_error',
@@ -291,14 +320,99 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
       }
     };
 
-    const { headers: authHeaders, retry } = await authorize();
-    let res = await send(authHeaders);
+    const attempt = async (authHeaders: Record<string, string>): Promise<Response> => {
+      let target = url;
+      let hopMethod = method;
+      let hopBody = body;
 
-    // One refresh and retry; a second 401 falls through to the auth error below.
+      for (let hops = 0; ; hops += 1) {
+        const res = await fetchOnce(target, hopMethod, hopBody, authHeaders);
+
+        if (res.type === 'opaqueredirect') {
+          throw new KizenApiError(
+            'api_error',
+            `${method} ${url} was redirected to an unknown location`,
+          );
+        }
+
+        const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
+
+        if (location === null) {
+          return res;
+        }
+
+        await res.body?.cancel().catch(() => undefined);
+
+        let next: URL;
+
+        try {
+          next = new URL(location, target);
+        } catch {
+          throw new KizenApiError(
+            'api_error',
+            `${method} ${url} was redirected to an invalid location`,
+            { status: res.status },
+          );
+        }
+
+        if (next.origin !== apiOrigin) {
+          throw new KizenApiError(
+            'api_error',
+            `${method} ${url} was redirected to ${next.origin}, outside the Kizen API; the request was not sent there.`,
+            { status: res.status },
+          );
+        }
+
+        if (hops >= MAX_REDIRECTS) {
+          throw new KizenApiError('api_error', `${method} ${url} redirected too many times`, {
+            status: res.status,
+          });
+        }
+
+        // As fetch does: 303, and 301/302 after a POST, continue as a bodiless GET.
+        if (
+          res.status === 303 ||
+          ((res.status === 301 || res.status === 302) && hopMethod === 'POST')
+        ) {
+          hopMethod = 'GET';
+          hopBody = undefined;
+        }
+
+        target = next.toString();
+      }
+    };
+
+    const { headers: authHeaders, retry } = await authorize();
+    let res = await attempt(authHeaders);
+
     if (res.status === 401 && retry) {
       await res.body?.cancel().catch(() => undefined);
-      res = await send(await retry());
+      res = await attempt(await retry());
     }
+
+    return res;
+  };
+
+  const unreadable = (method: string, path: string, status: number, err: unknown): KizenApiError =>
+    new KizenApiError(
+      'network_error',
+      `${method} ${path}: couldn't read the response: ${errorCause(err)}. The request may have been applied; check Kizen before retrying.`,
+      { status },
+    );
+
+  const resolveTarget = (target: string): { url: string; path: string } => {
+    const url = /^https?:\/\//.test(target) ? target : `${baseUrl}${target}`;
+
+    return { url, path: url.startsWith(baseUrl) ? url.slice(baseUrl.length) : url };
+  };
+
+  const request = async (
+    method: string,
+    target: string,
+    body?: { contentType: string; payload: string },
+  ): Promise<unknown> => {
+    const { url, path } = resolveTarget(target);
+    const res = await send(method, url, 'application/json', body);
 
     let text: string;
     let json: unknown;
@@ -306,11 +420,7 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     try {
       ({ text, json } = await readBody(res));
     } catch (err) {
-      throw new KizenApiError(
-        'network_error',
-        `${method} ${path}: couldn't read the response: ${errorCause(err)}. The request may have been applied; check Kizen before retrying.`,
-        { status: res.status },
-      );
+      throw unreadable(method, path, res.status, err);
     }
 
     if (!res.ok) {
@@ -326,6 +436,22 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     }
 
     return json;
+  };
+
+  const jsonBody = (body: unknown): { contentType: string; payload: string } | undefined =>
+    body === undefined
+      ? undefined
+      : { contentType: 'application/json', payload: JSON.stringify(body) };
+
+  const apiPath = (method: string, path: string): string => {
+    if (!path.startsWith('/') || path.startsWith('//')) {
+      throw new KizenApiError(
+        'api_error',
+        `${method} ${path}: expected a path under the Kizen API`,
+      );
+    }
+
+    return path;
   };
 
   // Only the API origin is followed, on the base scheme and port (a proxy may emit http).
@@ -369,10 +495,11 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
       return listResults('GET', path, await request('GET', path)).results as WireDashboardSummary[];
     },
 
-    async listCustomObjects() {
+    async listCustomObjects(options: ListCustomObjectsOptions = {}) {
       const all: WireCustomObject[] = [];
       const seen = new Set<string>();
-      let target: string | undefined = '/custom-objects?page_size=200';
+      let target: string | undefined =
+        `/custom-objects?page_size=200${options.customOnly === false ? '&custom_only=false' : ''}`;
 
       while (target !== undefined && !seen.has(target) && seen.size < MAX_PAGES) {
         seen.add(target);
@@ -434,11 +561,49 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     },
 
     async createDashlet(dashboardId: string, body: CreateDashletBody) {
-      return (await request('POST', dashletPath(dashboardId), body)) as WireDashlet;
+      return (await request('POST', dashletPath(dashboardId), jsonBody(body))) as WireDashlet;
     },
 
     async updateDashlet(dashboardId: string, dashletId: string, body: UpdateDashletBody) {
-      return (await request('PATCH', dashletPath(dashboardId, dashletId), body)) as WireDashlet;
+      return (await request(
+        'PATCH',
+        dashletPath(dashboardId, dashletId),
+        jsonBody(body),
+      )) as WireDashlet;
+    },
+
+    async requestJson(method: KizenJsonMethod, path: string, body?: unknown) {
+      return request(method, apiPath(method, path), jsonBody(body));
+    },
+
+    async postForm(path: string, fields: Readonly<Record<string, string>>) {
+      return request('POST', apiPath('POST', path), {
+        contentType: 'application/x-www-form-urlencoded',
+        payload: new URLSearchParams(fields).toString(),
+      });
+    },
+
+    async getBinary(path: string) {
+      const { url, path: shown } = resolveTarget(apiPath('GET', path));
+      const res = await send('GET', url, '*/*');
+
+      if (!res.ok) {
+        let json: unknown;
+
+        try {
+          ({ json } = await readBody(res));
+        } catch (err) {
+          throw unreadable('GET', shown, res.status, err);
+        }
+
+        throw statusError('GET', shown, res.status, json, hints);
+      }
+
+      try {
+        return new Uint8Array(await res.arrayBuffer());
+      } catch (err) {
+        throw unreadable('GET', shown, res.status, err);
+      }
     },
   };
 }

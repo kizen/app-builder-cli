@@ -32,7 +32,8 @@ export type OAuthLocalErrorCode =
   | 'server_error'
   | 'invalid_callback'
   | 'timeout'
-  | 'login_required';
+  | 'login_required'
+  | 'session_store_unwritable';
 
 export class OAuthError extends Error {
   // `string & {}` keeps any server code while still suggesting the local ones.
@@ -42,6 +43,34 @@ export class OAuthError extends Error {
   ) {
     super(message);
     this.name = 'OAuthError';
+  }
+}
+
+const DISK_FULL_ERRNO_CODES: readonly string[] = ['ENOSPC', 'EDQUOT'];
+
+export const UNWRITABLE_ERRNO_CODES: readonly string[] = [
+  'EPERM',
+  'EACCES',
+  'EROFS',
+  ...DISK_FULL_ERRNO_CODES,
+];
+
+export class SessionStoreUnwritableError extends OAuthError {
+  readonly hint: string;
+
+  constructor(storeDir: string, credentialsDir: string, errno: string) {
+    const full = DISK_FULL_ERRNO_CODES.includes(errno);
+
+    super(
+      'session_store_unwritable',
+      full
+        ? `Can't write to ${storeDir} (${errno}): the disk is full or over quota. appbuilder keeps its sign-in sessions there.`
+        : `Can't write to ${storeDir} (${errno}), where appbuilder keeps its sign-in sessions.`,
+    );
+    this.name = 'SessionStoreUnwritableError';
+    this.hint = full
+      ? `Free some disk space (or quota) for ${credentialsDir}, then run the command again.`
+      : `appbuilder needs write access to ${credentialsDir} to keep you signed in. Under Codex, re-run the command with sandbox_permissions: "require_escalated" (prefix_rule: ["appbuilder"]). Under the Claude Code sandbox, add "appbuilder *" to sandbox.excludedCommands in your user settings (~/.claude/settings.json); allowing writes to ${credentialsDir} alone isn't enough, since appbuilder also needs network access the sandbox blocks.`;
   }
 }
 

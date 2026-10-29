@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ import {
 } from './setupClaude.js';
 
 const DESIGN_PATH = '.claude/skills/kizen-custom-block/design.md';
+const BUSINESS_PATH = '.claude/skills/kizen-business-apps/SKILL.md';
 const LIB_PATH = 'src/lib/kizenData.js';
 
 const bundled = (path: string): string =>
@@ -29,6 +30,7 @@ const bundled = (path: string): string =>
 const BUNDLED = bundled(CLAUDE_SKILL_PATH);
 const BUNDLED_DESIGN = bundled(DESIGN_PATH);
 const BUNDLED_LIB = bundled(LIB_PATH);
+const BUNDLED_BUSINESS = bundled(BUSINESS_PATH);
 
 let dir: string;
 
@@ -67,9 +69,19 @@ const writeLib = async (content: string): Promise<void> => {
 
 const readLib = (): Promise<string> => readFile(libFile(), 'utf-8');
 
-const writeBundled = async (): Promise<void> => {
+const writeBusiness = async (content: string): Promise<void> => {
+  await mkdir(dirname(join(dir, BUSINESS_PATH)), { recursive: true });
+  await writeFile(join(dir, BUSINESS_PATH), content, 'utf-8');
+};
+
+const writeBundledSkills = async (): Promise<void> => {
   await writeSkill(BUNDLED);
   await writeDesign(BUNDLED_DESIGN);
+  await writeBusiness(BUNDLED_BUSINESS);
+};
+
+const writeBundled = async (): Promise<void> => {
+  await writeBundledSkills();
   await writeLib(BUNDLED_LIB);
 };
 
@@ -144,28 +156,41 @@ describe('isClaudeSkillStale', () => {
   });
 
   it('is true when the skill differs from the bundled one', async () => {
+    await writeBundledSkills();
     await writeSkill('edited locally\n');
-    await writeDesign(BUNDLED_DESIGN);
 
     expect(await isClaudeSkillStale(dir)).toBe(true);
   });
 
   it('is true when the skill matches but the design guide is missing', async () => {
     await writeSkill(BUNDLED);
+    await writeBusiness(BUNDLED_BUSINESS);
 
     expect(await isClaudeSkillStale(dir)).toBe(true);
   });
 
   it('is true when the skill matches but the design guide differs', async () => {
-    await writeSkill(BUNDLED);
+    await writeBundledSkills();
     await writeDesign('edited locally\n');
 
     expect(await isClaudeSkillStale(dir)).toBe(true);
   });
 
-  it('isClaudeSkillStale ignores an absent kizenData.js', async () => {
+  it('is true for an install from before the business-apps skill existed', async () => {
     await writeSkill(BUNDLED);
     await writeDesign(BUNDLED_DESIGN);
+
+    expect(await isClaudeSkillStale(dir)).toBe(true);
+  });
+
+  it('counts the business-apps skill alone as installed', async () => {
+    await writeBusiness('edited locally\n');
+
+    expect(await isClaudeSkillStale(dir)).toBe(true);
+  });
+
+  it('isClaudeSkillStale ignores an absent kizenData.js', async () => {
+    await writeBundledSkills();
 
     expect(await isClaudeSkillStale(dir)).toBe(false);
     await expect(stat(libFile())).rejects.toThrow();
@@ -180,8 +205,7 @@ describe('isClaudeSkillStale', () => {
 
   it('checks the data lib under the kizen.json entry directory', async () => {
     await writeFile(join(dir, 'kizen.json'), JSON.stringify({ entry: 'app/' }), 'utf-8');
-    await writeSkill(BUNDLED);
-    await writeDesign(BUNDLED_DESIGN);
+    await writeBundledSkills();
     // A lib outside the entry directory is not a managed file.
     await writeLib('export const mine = 1;\n');
     await mkdir(join(dir, 'app', 'lib'), { recursive: true });
@@ -232,7 +256,8 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `created   ${CLAUDE_SKILL_PATH}`,
       `created   ${DESIGN_PATH}`,
-      'Claude files: 2 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+      `created   ${BUSINESS_PATH}`,
+      'Claude files: 3 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(errors).toStrictEqual([]);
     expect(exitCodes).toStrictEqual([]);
@@ -243,8 +268,7 @@ describe('runSetupClaude', () => {
 
   it('setup-claude without --include-lib refreshes an existing kizenData.js', async () => {
     await inPlugin();
-    await writeSkill(BUNDLED);
-    await writeDesign(BUNDLED_DESIGN);
+    await writeBundledSkills();
     await writeLib('export const old = 1;\n');
 
     const { deps, logs, exitCodes } = makeDeps();
@@ -254,8 +278,9 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `unchanged ${CLAUDE_SKILL_PATH}`,
       `unchanged ${DESIGN_PATH}`,
+      `unchanged ${BUSINESS_PATH}`,
       `updated   ${LIB_PATH}`,
-      'Claude files: 0 created, 1 updated, 2 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+      'Claude files: 0 created, 1 updated, 3 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(exitCodes).toStrictEqual([]);
     expect(await readLib()).toBe(BUNDLED_LIB);
@@ -275,9 +300,10 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `created   ${CLAUDE_SKILL_PATH}`,
       `created   ${DESIGN_PATH}`,
+      `created   ${BUSINESS_PATH}`,
       'created   src/googleAds/lib/kizenData.js',
       'created   src/outlookInbox/lib/kizenData.js',
-      'Claude files: 4 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
+      'Claude files: 5 created, 0 updated, 0 unchanged (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(exitCodes).toStrictEqual([]);
 
@@ -297,7 +323,7 @@ describe('runSetupClaude', () => {
 
     await runSetupClaude(dir, { includeLib: true }, deps);
 
-    expect(logs[2]).toBe('created   app/lib/kizenData.js');
+    expect(logs[3]).toBe('created   app/lib/kizenData.js');
     expect(await readFile(join(dir, 'app', 'lib', 'kizenData.js'), 'utf-8')).toBe(BUNDLED_LIB);
     await expect(stat(libFile())).rejects.toThrow();
   });
@@ -315,8 +341,9 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `updated   ${CLAUDE_SKILL_PATH}`,
       `unchanged ${DESIGN_PATH}`,
+      `created   ${BUSINESS_PATH}`,
       `created   ${LIB_PATH}`,
-      'Dry run: 1 created, 1 updated, 1 unchanged; nothing written (these files are managed by appbuilder, so local edits to them are replaced).',
+      'Dry run: 2 created, 1 updated, 1 unchanged; nothing written (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(fs.writeFile).not.toHaveBeenCalled();
     expect(exitCodes).toStrictEqual([]);
@@ -335,9 +362,33 @@ describe('runSetupClaude', () => {
     expect(logs).toStrictEqual([
       `created   ${CLAUDE_SKILL_PATH}`,
       `created   ${DESIGN_PATH}`,
-      'Dry run: 2 created, 0 updated, 0 unchanged; nothing written (these files are managed by appbuilder, so local edits to them are replaced).',
+      `created   ${BUSINESS_PATH}`,
+      'Dry run: 3 created, 0 updated, 0 unchanged; nothing written (these files are managed by appbuilder, so local edits to them are replaced).',
     ]);
     expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('refuses to overwrite a managed file that is a symlink out of the plugin', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'setup-claude-outside-'));
+
+    try {
+      await inPlugin();
+      await writeFile(join(outside, 'victim.md'), 'outside\n', 'utf-8');
+      await mkdir(dirname(skillFile()), { recursive: true });
+      await symlink(join(outside, 'victim.md'), skillFile());
+
+      const { deps, logs, errors, exitCodes } = makeDeps();
+
+      await runSetupClaude(dir, {}, deps);
+
+      expect(exitCodes).toStrictEqual([1]);
+      expect(logs).toStrictEqual([]);
+      expect(errors[0]).toContain(`${CLAUDE_SKILL_PATH} is a symbolic link`);
+      expect(await readFile(join(outside, 'victim.md'), 'utf-8')).toBe('outside\n');
+      await expect(stat(designFile())).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('fails with exit code 1 when a write fails', async () => {
@@ -388,17 +439,18 @@ describe('entryDirsOf', () => {
 });
 
 describe('pluginClaudeFiles', () => {
-  it('manages only the skill and design guide when no data lib exists and none is requested', async () => {
+  it('manages only the skills when no data lib exists and none is requested', async () => {
     expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toStrictEqual([
       CLAUDE_SKILL_PATH,
       DESIGN_PATH,
+      BUSINESS_PATH,
     ]);
   });
 
   it('places the data lib under src when kizen.json is missing', async () => {
     expect(
       (await pluginClaudeFiles(dir, nodeClaudeFs, { includeLib: true })).map((file) => file.path),
-    ).toStrictEqual([CLAUDE_SKILL_PATH, DESIGN_PATH, LIB_PATH]);
+    ).toStrictEqual([CLAUDE_SKILL_PATH, DESIGN_PATH, BUSINESS_PATH, LIB_PATH]);
   });
 
   it('places the data lib under src when kizen.json is not valid JSON', async () => {
@@ -421,6 +473,7 @@ describe('pluginClaudeFiles', () => {
     expect((await pluginClaudeFiles(dir)).map((file) => file.path)).toStrictEqual([
       CLAUDE_SKILL_PATH,
       DESIGN_PATH,
+      BUSINESS_PATH,
       'src/outlookInbox/lib/kizenData.js',
     ]);
   });
@@ -437,10 +490,11 @@ describe('pluginClaudeFiles', () => {
     expect(files.map((file) => file.path)).toStrictEqual([
       CLAUDE_SKILL_PATH,
       DESIGN_PATH,
+      BUSINESS_PATH,
       'src/googleAds/lib/kizenData.js',
       'src/outlookInbox/lib/kizenData.js',
     ]);
-    expect(files[3]?.content).toBe(BUNDLED_LIB);
+    expect(files[4]?.content).toBe(BUNDLED_LIB);
   });
 });
 

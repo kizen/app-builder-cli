@@ -169,6 +169,9 @@ export async function login(
   options: LoginOptions = {},
 ): Promise<OAuthSession> {
   const intro = urlIntro(environment, options.interactive ?? true);
+
+  await deps.store.probeWritable();
+
   const metadata = await discover(apiOriginFor(environment), deps.fetch);
   const cached = await deps.store.readClientId(metadata.issuer);
   const clientId = cached ?? (await registerClient(metadata, deps.fetch));
@@ -390,6 +393,9 @@ export function createTokenProvider(
     if (remainingMs <= 0) {
       return current.accessToken;
     }
+
+    // Kizen rotates the refresh token; the old one stops working after a grace window.
+    await deps.store.probeWritable();
 
     let tokens: TokenResponse;
 

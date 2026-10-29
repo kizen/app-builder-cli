@@ -5,7 +5,7 @@ import * as path from 'node:path';
 // .github/workflows/copilot-code-review.yml at review time. It is never committed.
 const ENTRIES = ['.kizenapp/', '.copilot-docs/'];
 
-export function ensureGitignore(projectDir: string): void {
+export function ensureGitignore(projectDir: string): boolean {
   const gitignorePath = path.join(projectDir, '.gitignore');
 
   let contents = '';
@@ -20,11 +20,13 @@ export function ensureGitignore(projectDir: string): void {
   );
 
   if (missing.length === 0) {
-    return;
+    return false;
   }
 
   const block = missing.join('\n') + '\n';
   const addition = contents === '' || contents.endsWith('\n') ? block : '\n' + block;
 
   fs.writeFileSync(gitignorePath, contents + addition);
+
+  return true;
 }

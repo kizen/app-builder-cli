@@ -4,10 +4,11 @@ import {
   runAuthHeader,
   runLogin,
   runLogout,
-  runWhoami,
   type AuthCommand,
   type AuthCommandOptions,
 } from '../lib/oauthCommands.js';
+import { runWhoamiCommand } from '../lib/whoamiCommand.js';
+import { NO_INTERACTIVE_HELP, takeInteractiveFlag, type Interactive } from '../lib/interactive.js';
 import { pickInTerminal } from '../ui/AccountPicker.js';
 
 interface AuthCommandSpec {
@@ -34,6 +35,7 @@ const AUTH_COMMANDS: AuthCommandSpec[] = [
       ['--user <userId>', 'with --business, pick the saved account of this user id'],
       ['--list', 'list the saved accounts for the environment and exit'],
       ['--json', 'with --list, print the accounts as JSON'],
+      ['--no-interactive', NO_INTERACTIVE_HELP],
     ],
     run: runLogin,
   },
@@ -64,8 +66,9 @@ const AUTH_COMMANDS: AuthCommandSpec[] = [
         '--user <userId>',
         'with --business, check the saved account of this user id (default: $APPBUILDER_USER)',
       ],
+      ['--json', 'print the identity as JSON'],
     ],
-    run: runWhoami,
+    run: runWhoamiCommand,
   },
   {
     name: 'auth-header',
@@ -88,8 +91,10 @@ export function authCommands(program: Command): void {
       command.option(flags, text);
     }
 
-    command.action(async (parsed: AuthCommandOptions & Record<string, unknown>) => {
-      await run(parsed, createDefaultAuthCommandDeps(undefined, pickInTerminal));
+    command.action(async (parsed: AuthCommandOptions & Interactive & Record<string, unknown>) => {
+      const { noInteractive, options } = takeInteractiveFlag(parsed);
+
+      await run(options, createDefaultAuthCommandDeps(undefined, pickInTerminal, noInteractive));
     });
   }
 }

@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { adminCommand } from './commands/admin.js';
+import { appCommand } from './commands/app.js';
 import { authCommands } from './commands/auth.js';
 import { blockCommand } from './commands/block.js';
 import { buildCommand } from './commands/build.js';
@@ -12,6 +13,7 @@ import { encryptCommand } from './commands/encrypt.js';
 import { iconsCommand } from './commands/icons.js';
 import { reportCommand } from './commands/report.js';
 import { setupClaudeCommand } from './commands/setupClaude.js';
+import { setupCodexCommand } from './commands/setupCodex.js';
 import { setupCopilotCommand } from './commands/setupCopilot.js';
 
 function readVersion(): string {
@@ -31,6 +33,8 @@ export function createProgram(): Command {
 
   setupClaudeCommand(program, version);
 
+  setupCodexCommand(program);
+
   setupCopilotCommand(program);
 
   buildCommand(program);
@@ -44,6 +48,8 @@ export function createProgram(): Command {
   iconsCommand(program);
 
   blockCommand(program);
+
+  appCommand(program);
 
   authCommands(program);
 

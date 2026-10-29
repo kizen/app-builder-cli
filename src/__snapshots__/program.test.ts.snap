@@ -13,6 +13,8 @@ Commands:
   create [options]         Scaffold a new Kizen plugin project
   setup-claude [options]   Install or refresh the Claude Code files in a plugin,
                            or with --mcp only register the Kizen MCP server
+  setup-codex [options]    Install or refresh the Codex skills (.agents/skills)
+                           in a plugin
   setup-copilot [options]  Add or refresh the Copilot code-review setup in an
                            existing plugin repo
   build                    Bundle the plugin app into .kizenapp directory
@@ -23,6 +25,8 @@ Commands:
   icons                    List all valid icon names accepted by toolbar items,
                            pages, and adornments
   block                    Work with plugin content blocks
+  app                      Publish the plugin as a Business App: previews,
+                           releases, merges and rollbacks
   login [options]          Sign in to Kizen in the browser, or switch to a saved
                            account, and store the session on this machine
   logout [options]         Remove the stored session from this machine

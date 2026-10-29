@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { claudeFiles, copilotFiles } from './createCopilotFiles.js';
+import { claudeFiles, codexFiles, copilotFiles } from './createCopilotFiles.js';
 import { STALE_CLAUDE_SKILL_WARNING } from './setupClaude.js';
 
 const WORKFLOW_PATH = '.github/workflows/copilot-code-review.yml';
@@ -32,13 +32,18 @@ describe('copilotFiles', () => {
 
 const SKILL_PATH = '.claude/skills/kizen-custom-block/SKILL.md';
 const DESIGN_PATH = '.claude/skills/kizen-custom-block/design.md';
+const BUSINESS_PATH = '.claude/skills/kizen-business-apps/SKILL.md';
 
 const claudeContent = (path: string): string =>
   claudeFiles().find((file) => file.path === path)?.content ?? '';
 
 describe('claudeFiles', () => {
-  it('scaffolds only the kizen-custom-block skill and its design guide by default', () => {
-    expect(claudeFiles().map((file) => file.path)).toStrictEqual([SKILL_PATH, DESIGN_PATH]);
+  it('scaffolds only the managed skills by default', () => {
+    expect(claudeFiles().map((file) => file.path)).toStrictEqual([
+      SKILL_PATH,
+      DESIGN_PATH,
+      BUSINESS_PATH,
+    ]);
   });
 
   it('adds the data lib, verbatim, when given an entry directory', () => {
@@ -51,15 +56,17 @@ describe('claudeFiles', () => {
     expect(files.map((file) => file.path)).toStrictEqual([
       SKILL_PATH,
       DESIGN_PATH,
+      BUSINESS_PATH,
       'src/lib/kizenData.js',
     ]);
-    expect(files[2]?.content).toBe(template);
+    expect(files[3]?.content).toBe(template);
   });
 
   it('places the data lib under each entry directory it is given', () => {
     expect(claudeFiles(['app', 'src/a', 'app', '']).map((file) => file.path)).toStrictEqual([
       SKILL_PATH,
       DESIGN_PATH,
+      BUSINESS_PATH,
       'app/lib/kizenData.js',
       'src/a/lib/kizenData.js',
       'lib/kizenData.js',
@@ -128,5 +135,43 @@ describe('claudeFiles', () => {
 
     expect(frontmatter).toMatch(/^name: kizen-custom-block$/m);
     expect(frontmatter).toMatch(/^description: Use this skill when .*custom block/m);
+  });
+});
+
+describe('codexFiles', () => {
+  it('writes the same skills under .agents/skills', () => {
+    expect(codexFiles().map((file) => file.path)).toStrictEqual([
+      '.agents/skills/kizen-custom-block/SKILL.md',
+      '.agents/skills/kizen-custom-block/design.md',
+      '.agents/skills/kizen-business-apps/SKILL.md',
+    ]);
+  });
+
+  it('puts the data lib at the same plugin path as the Claude set', () => {
+    expect(codexFiles(['src']).at(-1)).toStrictEqual(claudeFiles(['src']).at(-1));
+  });
+
+  it('renders the block skill for Codex: its own setup command, folder and warning', () => {
+    const skill =
+      codexFiles().find((file) => file.path === '.agents/skills/kizen-custom-block/SKILL.md')
+        ?.content ?? '';
+
+    expect(skill).toContain('`appbuilder setup-codex --include-lib`');
+    expect(skill).toContain('`.agents/skills/kizen-custom-block/SKILL.md`');
+    expect(skill).toContain(
+      '`Codex files managed by appbuilder are out of date; run appbuilder setup-codex`',
+    );
+    expect(skill).toContain('sandbox_permissions: "require_escalated"');
+    expect(skill).not.toContain('setup-claude');
+    expect(skill).not.toContain('.claude/');
+    expect(skill).not.toContain('sandbox.excludedCommands');
+  });
+
+  it('keeps the Codex sandbox steps out of the Claude render', () => {
+    const skill = claudeContent(SKILL_PATH);
+
+    expect(skill).toContain('sandbox.excludedCommands');
+    expect(skill).not.toContain('require_escalated');
+    expect(skill).not.toContain('setup-codex');
   });
 });

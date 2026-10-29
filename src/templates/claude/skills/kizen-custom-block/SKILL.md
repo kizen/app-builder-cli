@@ -9,16 +9,19 @@ Follow these rules exactly. The runtime is strict, and a push changes a live Kiz
 
 ## Keep this skill current
 
-At the start of any block task, run `appbuilder setup-claude --include-lib` in the plugin directory.
+At the start of any block task, run `{{SETUP_COMMAND}} --include-lib` in the plugin directory.
 
-- If it reports `updated` for `.claude/skills/kizen-custom-block/SKILL.md`, your loaded copy of this skill is stale. Re-read `.claude/skills/kizen-custom-block/SKILL.md` before doing anything else, and follow the new copy.
-- If it reports `created` for any file, or `updated` for `.claude/skills/kizen-custom-block/design.md`, read that file before writing any markup or styles.
+- If it reports `updated` for `{{SKILLS_DIR}}/kizen-custom-block/SKILL.md`, your loaded copy of this skill is stale. Re-read `{{SKILLS_DIR}}/kizen-custom-block/SKILL.md` before doing anything else, and follow the new copy.
+- If it reports `created` for any file in this skill directory, or `updated` for `{{SKILLS_DIR}}/kizen-custom-block/design.md`, read that file before writing any markup or styles.
 - If it reports `created` or `updated` for `lib/kizenData.js` (under the plugin's entry directory, usually `src/`), re-read its exports before using them.
 - If every file line reports `unchanged`, continue.
 - If the command doesn't exist (an older CLI), skip it and continue.
 - If it fails (for example, you aren't in the plugin directory that holds `kizen.json`), switch to that directory and run it once more. If it still fails, continue without it.
+{{#codex}}
+- In the Codex sandbox `.agents/` is read-only, so run it with `sandbox_permissions: "require_escalated"`.
+{{/codex}}
 
-`setup-claude` only rewrites the CLI-managed files: the ones in this skill directory and `src/lib/kizenData.js`. It never touches block code, so it's always safe to run.
+`{{SETUP_COMMAND}}` only rewrites the CLI-managed files: the ones in this skill directory and `src/lib/kizenData.js`. It never touches block code, so it's always safe to run.
 
 ## What a block is
 
@@ -32,7 +35,7 @@ A block is a directory under `src/blocks/<dir>/`:
 
 Shared helpers live in `src/lib/*.js`. Import them with relative named imports only, for example `import { formatMoney } from '../../lib/format.js';`. No default imports, no bare package names.
 
-`src/lib/kizenData.js` is managed by appbuilder: `setup-claude` and CLI updates replace it. Never edit it. Put your own helpers in another file under `src/lib/`.
+`src/lib/kizenData.js` is managed by appbuilder: `{{SETUP_COMMAND}}` and CLI updates replace it. Never edit it. Put your own helpers in another file under `src/lib/`.
 
 ### Host chrome
 
@@ -52,7 +55,7 @@ Chrome off, in `config.json`:
 }
 ```
 
-Follow "Chrome off" in `design.md` for the layout rules. In your summary to the user, state which mode you chose and why in one line. `block push --dry-run --json` shows the value as `body.config.content.host_chrome` (absent when chrome is on by default), so check it there. Changing `host_chrome` on a block you already pushed is an ordinary update: validate, then `block push <api_name> --yes --json`.
+Follow "Chrome off" in `design.md` for the layout rules. In your summary to the user, state which mode you chose and why in one line. `block push --dry-run --json` shows the value as `body.config.content.host_chrome` (absent when chrome is on by default), so check it there. Changing `host_chrome` on a block you already pushed is an ordinary update: validate, then `appbuilder block push <api_name> --yes --json`.
 
 ## Runtime rules
 
@@ -123,6 +126,8 @@ Before writing any markup or styles, read `design.md` in this skill directory an
 
 Run these exact commands. The flags and JSON keys are the contract. `<api_name>` is the block's `config.json` `api_name`. `block targets` and `block push` use the user's `appbuilder login` session by default. `-c/--credentials <path>` and `--profile <name>` opt in to a deprecated API key; use them only when the user asks.
 
+With `--json` (`block targets` and `block push`), stdout is one JSON object and human text goes to stderr. Exit `0` is success (dry runs included), exit `2` means a decision is needed (`needs_choice`), and exit `1` is any other failure. Every `argv` a result gives you (`applyArgv`, `choices[].argv`, `login.argv`) is a whole command starting with `appbuilder`: run it exactly as given, without adding, dropping or reordering flags.
+
 1. **Validate.** Run `appbuilder block export <api_name>`. Fix every validation error it prints, then run it again until it passes.
 2. **Choose the target with the user (first publish only).**
    - `appbuilder block targets --json` returns `{ surfaces: { dashboard: [...], homepage: [...] }, customObjects: [{ id, objectName, fetchUrl }] }`. Contacts appears in `customObjects` when available.
@@ -130,7 +135,7 @@ Run these exact commands. The flags and JSON keys are the contract. `<api_name>`
    - Only offer rows where `canEdit !== false`. Ask the user which surface and which specific one. Don't pick for them.
    - Optionally run `appbuilder block push <api_name> --dashboard <id> --json` to get a `needs_choice` result listing the existing custom blocks and "new".
 3. **Preview.** Run `appbuilder block push <api_name> --dashboard <id> [--dashlet <id> | --create] --dry-run --json`. Show the user the `environment`, `businessId`, `dashboard.name`, `action` and any `warnings`.
-4. **Apply** once the user agrees: run the same command with `--yes` in place of `--dry-run`. Treat the push as done only when `applied === true`. Give the user the returned `url`, then refresh the browser (below).
+4. **Apply** once the user agrees: run the dry run's `applyArgv` exactly. It is the same push with `--yes`, pinned to the dashboard and dashlet the dry run showed. If `requiresProductionConsent` is `true` (the target is `go` or `fmo`), it also carries `--allow-production`: run it only after the user explicitly agreed to publish to production in this conversation. Treat the push as done only when `applied === true`. Give the user the returned `url`, then refresh the browser (below).
 5. **Change requests.** Edit the files, validate again (step 1), then run `appbuilder block push <api_name> --yes --json`. With no target flags it updates the remembered dashlet. Refresh the browser (below) after each push. Repeat for each change.
 
 A headless run without `--yes` is always a dry run.
@@ -151,14 +156,14 @@ Never run any other injected code in the user's tabs. `refresh.script` is the on
 
 ### JSON results
 
-- Dry run: `{ ok: true, applied: false, dryRun: true, action: 'create' | 'update', environment, businessId, dashboard: { id, name, type }, dashletId | null, url, method, path, body, warnings }`.
+- Dry run: `{ ok: true, applied: false, dryRun: true, action: 'create' | 'update', environment, businessId, dashboard: { id, name, type }, dashletId | null, url, method, path, body, warnings, applyArgv, requiresProductionConsent }`.
 - Applied: `{ ok: true, applied: true, dryRun: false, action: 'created' | 'updated', ..., dashletId, url, refresh?: { dashboardId, script }, remembered }`. `refresh` is absent when the dashboard id isn't a uuid.
-- If a `block push` result's `warnings` contains `Claude files managed by appbuilder are out of date; run appbuilder setup-claude`, run `appbuilder setup-claude --include-lib`, re-read `.claude/skills/kizen-custom-block/SKILL.md`, then continue.
-- Error: `{ ok: false, code, message, choice?, choices? }`. `code` is one of `needs_choice`, `validation_failed`, `invalid_block`, `auth_failed`, `forbidden`, `remembered_target_missing`, `drift_detected`, `network_error`, `credentials_invalid`, `production_requires_flag`, `not_found`, `usage_error`, `api_error` or `local_error`.
+- If a `block push` result's `warnings` contains `{{STALE_WARNING}}`, run `{{SETUP_COMMAND}} --include-lib`, re-read `{{SKILLS_DIR}}/kizen-custom-block/SKILL.md`, then continue.
+- Error: `{ ok: false, code, message, hint?, choice?, choices?, login?, sandbox? }`. `code` is one of `needs_choice`, `validation_failed`, `invalid_block`, `not_signed_in`, `auth_failed`, `forbidden`, `remembered_target_missing`, `drift_detected`, `network_error`, `session_store_unwritable`, `credentials_invalid`, `production_requires_flag`, `not_found`, `usage_error`, `api_error` or `local_error`. When `hint` is present, follow it.
 
 ### `needs_choice`
 
-`choice` is `'environment'`, `'block'`, `'dashboard'` or `'target'`. `choices` is a list of `{ value, label, args, surface?, canEdit?, pushKey?, isFromThisPlugin? }`, where `args` is a string array. Ask the user using each option's `label`, then re-run the same command with the chosen option's `args` appended exactly. Never construct these flags by hand. The "new" option is `{ value: 'new', args: ['--dashboard', <id>, '--create'] }`.
+`choice` is `'environment'`, `'block'`, `'dashboard'` or `'target'`. `choices` is a list of `{ value, label, argv, args, surface?, canEdit?, pushKey?, isFromThisPlugin? }`. Ask the user using each option's `label`, then run the chosen option's `argv` exactly as given: it is the push with that choice, as a dry run, so continue from its result (show it, then run its `applyArgv`). Ignore `args`, and never construct these flags by hand.
 
 ## Guardrails
 
@@ -166,7 +171,18 @@ Never run any other injected code in the user's tabs. `refresh.script` is the on
 - On `drift_detected`, stop and ask the user. Someone edited the block in Kizen since your last push, and `--force` overwrites their changes. Pass `--force` only when the user says to discard them.
 - On `needs_choice`, ask the user using the returned `choices` as described above. Never guess.
 - On `remembered_target_missing`, the remembered dashboard or dashlet is gone. Ask the user where to publish instead, then push with `--dashboard <id>` plus `--create` or a `--dashlet` choice, or use `--forget` to clear the memory. `--create` alone won't work.
-- On `credentials_invalid`, if `message` says they're not signed in, tell the user to run `appbuilder login` (add `--env <env>` for an environment other than `go`). Otherwise tell them to fix the credential file named in `message`. Don't run `--profile` or `-c` unless the user asks for an API key.
+- On `not_signed_in`, ask the user to sign in by running the `login.argv` command themselves (it opens a browser), then run your command again.
+{{#claude}}
+  In Claude Code they can type `! ` followed by that command in this session.
+{{/claude}}
+- On `credentials_invalid`, the API-key file from `-c` or `--profile` is bad. Tell the user to fix the file named in `message`. Don't run `--profile` or `-c` unless the user asks for an API key.
+- On `session_store_unwritable`, or a `network_error` with `sandbox: "codex_network_disabled"`, a sandbox is blocking `appbuilder`, which needs the network and write access to `~/.kizenappbuilder`.
+{{#codex}}
+  Re-run the command with `sandbox_permissions: "require_escalated"`, and suggest `prefix_rule: ["appbuilder"]`.
+{{/codex}}
+{{#claude}}
+  Ask the user to add `"appbuilder *"` to `sandbox.excludedCommands` in their user settings (`~/.claude/settings.json`), so `appbuilder` runs outside the sandbox. Project settings don't work for this when Claude Code runs in strict mode.
+{{/claude}}
 - On `production_requires_flag`, the target is `go` or `fmo`. Apply the production rule above.
 - Never push to a new target without first showing the user a dry run.
 - Blocks run with the viewing user's permissions for every viewer. Don't write code that creates, updates or deletes data unless the user asked for it.
