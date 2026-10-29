@@ -6,11 +6,6 @@ import type * as OAuthCommandsModule from '../lib/oauthCommands.js';
 import type * as PushHeadlessModule from '../lib/pushHeadless.js';
 import { createProgram } from '../program.js';
 
-/**
- * Every command with an interactive path decides it with `isInteractive`: with both streams
- * TTYs, an agent environment (CLAUDECODE) or --no-interactive takes the headless path, and a plain
- * terminal still gets the UI. The runners and ink's `render` are replaced, so nothing runs.
- */
 const calls = vi.hoisted(() => ({
   rendered: 0,
   headless: [] as string[],
@@ -66,7 +61,6 @@ vi.mock('../lib/appHeadless.js', async (importOriginal) => ({
   }),
 }));
 
-// `login` runs with the real default deps; the runner only records what they say.
 vi.mock('../lib/oauthCommands.js', async (importOriginal) => ({
   ...(await importOriginal<typeof OAuthCommandsModule>()),
   runLogin: vi.fn((_options: unknown, deps: OAuthCommandsModule.AuthCommandDeps) => {
@@ -80,7 +74,6 @@ const AUTOMATION_ENV = ['CI', 'CODEX_CI', 'CLAUDECODE', 'APPBUILDER_NO_INTERACTI
 
 const COMMANDS: [name: string, argv: string[]][] = [
   ['block push', ['block', 'push', 'my_block']],
-  // `create` with no flags is the wizard; `--include-lib` alone keeps it.
   ['create', ['create', '--include-lib']],
   ['encrypt', ['encrypt', '--api-name', 'acme']],
   ['app push', ['app', 'push']],
@@ -102,7 +95,6 @@ describe('block push, create, encrypt and login use isInteractive', () => {
     calls.loginInteractive = [];
     setTTY(process.stdin, true);
     setTTY(process.stdout, true);
-    // A plain terminal, whatever runs these tests.
     vi.stubEnv('TERM', 'xterm-256color');
 
     for (const name of AUTOMATION_ENV) {
@@ -140,7 +132,6 @@ describe('block push, create, encrypt and login use isInteractive', () => {
   });
 
   it('create keeps the wizard with --no-interactive unset, despite commander’s `interactive: true`', async () => {
-    // `hasNonInteractiveFlags` counts every set option; commander sets `interactive` by default.
     await run(['create']);
 
     expect(calls).toMatchObject({ rendered: 1, headless: [] });

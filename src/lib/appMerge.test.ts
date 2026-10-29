@@ -41,11 +41,6 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/**
- * These tests run real git and real filesystem merges, so they slow down under a loaded machine
- * (the full suite in parallel). A generous ceiling keeps them from timing out on load; a hang
- * still fails, just later. Hooks get the same ceiling because they create and remove the temp tree.
- */
 const REAL_IO_TIMEOUT = 30_000;
 
 let workDir: string;
@@ -61,7 +56,6 @@ beforeEach(async () => {
 }, REAL_IO_TIMEOUT);
 
 afterEach(async () => {
-  // Every test, passing or failing a merge, leaves no throwaway repository behind.
   const left = await readdir(workspaces).catch(() => []);
 
   await rm(workDir, { recursive: true, force: true });
@@ -102,7 +96,6 @@ const exists = (path: string): Promise<boolean> =>
     () => false,
   );
 
-/** git missing for the plugin folder listing: walk mode, so the host's git config can't matter. */
 const NO_GIT: GitRunner = () =>
   Promise.reject(Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }));
 
@@ -116,7 +109,6 @@ const ISOLATED_GIT_ENV = {
   GIT_COMMITTER_EMAIL: 'test@example.com',
 };
 
-/** Real git for test repositories, isolated from the host's global/system config and excludes. */
 const isolatedGit: GitRunner = async (args, cwd) =>
   (
     await execFileAsync('git', ['-c', 'core.excludesFile=', ...args], {
@@ -135,7 +127,6 @@ const edit = (index: number, value: string): string =>
 
 const MANIFEST = '{"name":"app"}\n';
 
-/** Plans with base/live built from `baseFiles` / `liveFiles`, the folder holding `localFiles`. */
 const plan = async (
   baseFiles: Files,
   liveFiles: Files,
@@ -170,7 +161,6 @@ interface Entry {
   target?: string;
 }
 
-/** Everything under `root` without following symlinks: type, content hash, mode and mtime. */
 const snapshot = async (root: string): Promise<Record<string, Entry>> => {
   const out: Record<string, Entry> = {};
 
@@ -255,7 +245,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
       deletedLocally: [],
       binaryConflicts: [],
     });
-    // Two-way markers: no base section, whatever the host's merge.conflictStyle.
     expect(await read('a.js')).toBe(
       text([
         ...LINES.slice(0, 4),
@@ -291,7 +280,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
     expect(outcome.status).toBe('conflicts');
     expect(await read('src/new/added.js')).toBe('added\n');
     expect(await exists(join(pluginDir, 'old.js'))).toBe(false);
-    // The local edit is kept as is; no markers for a modify/delete conflict.
     expect(await read('edited.js')).toBe('v2 local\n');
   });
 
@@ -385,7 +373,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
       ),
     );
 
-    // A content change to a file the merge doesn't even touch.
     await write(pluginDir, 'b.js', 'b changed again\n');
 
     const afterEdit = await snapshot(pluginDir);
@@ -395,7 +382,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
     expect((error as MergeStaleError).paths).toStrictEqual(['b.js']);
     expect(await snapshot(pluginDir)).toStrictEqual(afterEdit);
 
-    // A new source file appearing is a change too.
     await write(pluginDir, 'b.js', 'b local\n');
     await write(pluginDir, 'c.js', 'new\n');
 
@@ -415,7 +401,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
     );
 
     expect(result.written).toStrictEqual(['cfg/new.js']);
-    // A non-source file (a symlink, which the listing skips) now sits where the merge would write.
     await mkdir(join(pluginDir, 'cfg'));
     await symlink(join(workDir, 'elsewhere.js'), join(pluginDir, 'cfg', 'new.js'));
 
@@ -450,7 +435,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
     expect(await read('.env')).toBe('SECRET=local');
     expect((await readdir(pluginDir)).sort()).toStrictEqual(['.env', 'a.js', 'kizen.json']);
 
-    // A live zip with an escaping entry is refused before anything runs.
     const escaping = planMerge(
       {
         pluginDir,
@@ -532,7 +516,6 @@ describe('planMerge and applyMerge', { timeout: REAL_IO_TIMEOUT }, () => {
     await applyMerge(result, { git: NO_GIT });
     expect(await snapshot(outside)).toStrictEqual(outsideBefore);
 
-    // Even a plan that names the path is refused at apply time.
     const again = ready(
       await planMerge(
         {
@@ -629,7 +612,6 @@ describe('replacements and odd names', { timeout: REAL_IO_TIMEOUT }, () => {
     const outcome = await applyMerge(result, { git: NO_GIT });
 
     expect(outcome.status).toBe('merged');
-    // Holds on a case-insensitive filesystem (macOS) and a case-sensitive one (Linux) alike.
     expect((await readdir(pluginDir)).sort()).toStrictEqual(['Foo.js', 'kizen.json']);
     expect(await read('Foo.js')).toBe(edit(11, 'local 12'));
   });
@@ -706,17 +688,14 @@ describe('replacements and odd names', { timeout: REAL_IO_TIMEOUT }, () => {
     await mkdir(join(pluginDir, 'empty-before'));
     await applyMerge(result, { git: NO_GIT });
     expect(await readdir(join(pluginDir, 'src'))).toStrictEqual(['keep.js']);
-    // A directory the merge didn't empty stays, even an empty one.
     expect(await exists(join(pluginDir, 'empty-before'))).toBe(true);
   });
 
   it('plan never deletes a path whose replacement it skips', async () => {
-    // Live turns foo/ into a file, but foo/ also holds a non-source file.
     const folder = { 'kizen.json': MANIFEST, 'foo/bar.js': 'bar\n' };
     const result = ready(await plan(folder, { 'kizen.json': MANIFEST, foo: 'foo file\n' }, folder));
 
     await write(pluginDir, 'foo/.DS_Store', 'finder');
-    // (Planned before .DS_Store existed; plan again with it in place.)
     expect(result.deleted).toStrictEqual(['foo/bar.js']);
 
     const blockedPlan = ready(
@@ -740,7 +719,6 @@ describe('replacements and odd names', { timeout: REAL_IO_TIMEOUT }, () => {
     expect(await read('foo/bar.js')).toBe('bar\n');
     expect(await read('foo/.DS_Store')).toBe('finder');
 
-    // A file Live turns into a folder whose new contents the folder ignores keeps the file too.
     await rm(join(pluginDir, 'foo'), { recursive: true });
 
     const ignores = { 'kizen.json': MANIFEST, '.kizenignore': 'foo/bar.js\n' };
@@ -817,7 +795,6 @@ describe('replacements and odd names', { timeout: REAL_IO_TIMEOUT }, () => {
     expect(result).toMatchObject({ written: [nfc], ignoredIncoming: [], conflicted: [] });
     await applyMerge(result, { git: NO_GIT });
 
-    // Written back under the name the folder already had: still one file.
     const names = await readdir(pluginDir);
 
     expect(names).toHaveLength(2);
@@ -894,7 +871,6 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
     'a failed apply leaves recovery files under .kizenapp and outside the source set (%s mode)',
     async (mode, git) => {
       if (mode === 'git') {
-        // No .gitignore: the staging folder is untracked and not ignored by git.
         await isolatedGit(['init', '-q'], pluginDir);
       }
 
@@ -903,7 +879,6 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
         await plan(base, { 'kizen.json': MANIFEST, 'a.js': edit(0, 'live 1') }, base, { git }),
       );
       let moves = 0;
-      // The first move (old.js into the recovery folder) succeeds; the second fails.
       const failingRename = async (from: string, to: string): Promise<void> => {
         moves += 1;
 
@@ -969,7 +944,6 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
     const files = { 'kizen.json': MANIFEST, 'a.js': 'a\n', 'old.js': 'old\n' };
     const result = ready(await plan(files, { 'kizen.json': MANIFEST, 'a.js': 'a live\n' }, files));
     const before = await snapshot(pluginDir);
-    // Real stats, except .kizenapp reports another device.
     const otherDevice = async (path: string, follow: boolean): Promise<BigIntStats> => {
       const real = follow
         ? await stat(path, { bigint: true })
@@ -985,10 +959,8 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
     await expect(applyMerge(result, { git: NO_GIT, stat: otherDevice })).rejects.toBeInstanceOf(
       MergeStagingError,
     );
-    // .kizenapp was created for staging and removed again.
     expect(await snapshot(pluginDir)).toStrictEqual(before);
 
-    // An existing .kizenapp is left as it was.
     await mkdir(join(pluginDir, '.kizenapp'));
     await write(pluginDir, '.kizenapp/config.json', '{}');
 
@@ -1002,7 +974,6 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
 
   it('applyMerge cancelled after staging writes nothing to the plugin folder and leaves no staging', async () => {
     const base = { 'kizen.json': MANIFEST, 'a.js': 'a\n', 'old.js': 'old\n' };
-    // Live edits a.js and deletes old.js: the apply would write one file and remove another.
     const result = ready(await plan(base, { 'kizen.json': MANIFEST, 'a.js': 'a live\n' }, base));
     const stagedWhenAsked: string[][] = [];
     const isAborted = vi.fn(() => {
@@ -1015,17 +986,14 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
       return true;
     });
 
-    // No .kizenapp yet: the one created for staging is removed again.
     const before = await snapshot(pluginDir);
 
     expect(await applyMerge(result, { git: NO_GIT, isAborted })).toStrictEqual({
       status: 'cancelled',
     });
-    // Asked with the merged file already staged.
     expect(stagedWhenAsked).toStrictEqual([['a.js']]);
     expect(await snapshot(pluginDir)).toStrictEqual(before);
 
-    // An existing .kizenapp is kept, minus the staging folder.
     await write(pluginDir, '.kizenapp/config.json', '{}');
 
     const withState = await snapshot(pluginDir);
@@ -1036,7 +1004,6 @@ describe('apply staging', { timeout: REAL_IO_TIMEOUT }, () => {
     expect(await snapshot(pluginDir)).toStrictEqual(withState);
     expect(stagedWhenAsked).toStrictEqual([['a.js'], ['a.js']]);
 
-    // Not cancelled, the same plan applies.
     await applyMerge(result, { git: NO_GIT, isAborted: () => false });
     expect(await read('a.js')).toBe('a live\n');
     expect(await exists(join(pluginDir, 'old.js'))).toBe(false);
@@ -1073,7 +1040,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
       await chmod(join(hooks, hook), 0o755);
     }
 
-    // Stands in for every filter, driver and fsmonitor command: leaves the marker, passes stdin on.
     await write(workDir, 'hostile-command', `#!/bin/sh\necho ran >> "${marker}"\ncat\n`);
     await chmod(run, 0o755);
     await write(workDir, 'hostile-fsmonitor', `#!/bin/sh\necho fsmonitor >> "${marker}"\nexit 1\n`);
@@ -1087,7 +1053,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
       `\tfsmonitor = ${join(workDir, 'hostile-fsmonitor')}`,
       '[merge]',
       '\tconflictStyle = diff3',
-      // No -c flag covers this one; only the ignored global config would turn renames off.
       '\trenames = false',
       '[merge "evil"]',
       `\tdriver = ${run}`,
@@ -1121,7 +1086,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
       'b.js': text(LINES),
       'moved.js': text(LINES),
     };
-    // The merged sources carry attributes that name the hostile filter and merge driver too.
     const live = {
       'kizen.json': MANIFEST,
       '.gitattributes': hostileAttributes,
@@ -1149,17 +1113,13 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
 
     expect(await exists(marker)).toBe(false);
     expect(result.conflicted).toStrictEqual(['a.js']);
-    // Rename detection (git's default) carried the local edit to Live's new name.
     expect(result.deleted).toStrictEqual(['moved.js']);
     expect(await read('renamed.js')).toBe(edit(11, 'local 12'));
-    // The host's diff3 style didn't apply.
     expect(await read('a.js')).not.toContain('|||||||');
     expect(await read('b.js')).toBe(
       text(LINES.map((line, at) => (at === 5 ? 'live 6' : at === 9 ? 'local 10' : line))),
     );
 
-    // The hostile config does run when git is called with that environment, so the check
-    // above isn't vacuous.
     const probe = join(workDir, 'probe');
 
     await writeAll(probe, { 'a.js': 'a\n' });
@@ -1191,7 +1151,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
     await write(hostileHome, '.gitconfig', hostileConfig);
     await write(hostileXdg, 'git/config', hostileConfig);
 
-    // Stands in for git 2.24-2.31, which don't know GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM.
     const oldGit = join(workDir, 'old-git');
 
     await write(
@@ -1226,12 +1185,10 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
 
     await applyMerge(result, { git: NO_GIT });
     expect(await exists(marker)).toBe(false);
-    // merge.renames=false from the hostile home would have made this a modify/delete conflict.
     expect(result.deleted).toStrictEqual(['moved.js']);
     expect(await read('renamed.js')).toBe(edit(11, 'local 12'));
     expect(await read('a.js')).not.toContain('|||||||');
 
-    // That git does read the hostile home config when nothing redirects HOME.
     const { stdout } = await execFileAsync(oldGit, ['config', '--get', 'merge.renames'], {
       cwd: workDir,
       env: parentEnv,
@@ -1265,7 +1222,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
     const realGit = resolveGit();
     const wrapper = join(workDir, 'git-wrapper');
 
-    // Records each workspace and fails the merge step, passing everything else to real git.
     await write(
       workDir,
       'git-wrapper',
@@ -1302,7 +1258,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
       }
     }
 
-    // The workspace existed during the run, and is gone now.
     expect(seen.length).toBeGreaterThan(0);
     expect(await readdir(workspaces)).toStrictEqual([]);
   });
@@ -1400,7 +1355,6 @@ describe('throwaway repository isolation', { timeout: REAL_IO_TIMEOUT }, () => {
     await isolatedGit(['init', '-q'], repo);
     await isolatedGit(['add', '-A'], repo);
     await isolatedGit(['commit', '-q', '-m', 'init'], repo);
-    // An uncommitted local edit and a staged one.
     await write(plugin, 'a.js', edit(11, 'local 12'));
     await write(plugin, 'staged.js', 'staged\n');
     await isolatedGit(['add', 'apps/plugin/staged.js'], repo);

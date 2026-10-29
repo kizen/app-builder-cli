@@ -21,10 +21,6 @@
  * acquired within `waitMs` is skipped, leaving that one operation to race as it would unlocked,
  * rather than wedging the CLI. Nothing else is locked. Accepted: a logout racing a sign-in to the
  * same account can delete that sign-in's new session file, leaving the account signed out.
- *
- * A write, rename or unlink here that fails with EPERM, EACCES or EROFS (a sandbox that only allows
- * writes to the project, typically), or ENOSPC / EDQUOT (a full disk), throws
- * `SessionStoreUnwritableError`, which says how to fix it. `probeWritable` finds that out before a token is spent.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -97,13 +93,6 @@ export interface OAuthStore {
   listAccounts: (environment: Environment) => Promise<SavedAccount[]>;
   /** Writes this account's session file only, in place; never moves the pointer. */
   writeSession: (session: OAuthSession) => Promise<void>;
-  /**
-   * Proves the store can be written as a write here needs to (create the directory and set its
-   * mode, create, write 4 KiB to, fsync and rename a file in it, remove it), leaving nothing behind. A refresh
-   * calls it before spending its refresh token, and login before opening the browser, so neither
-   * gets tokens it can't keep. Throws `SessionStoreUnwritableError` for EPERM, EACCES, EROFS,
-   * ENOSPC or EDQUOT; any other failure as it is.
-   */
   probeWritable: () => Promise<void>;
   /**
    * A refresh's write of `session`, under its account's lock: re-reads that account's own file and
@@ -158,7 +147,6 @@ export interface OAuthStore {
 
 const CLIENTS_FILE = 'clients.json';
 
-/** What `probeWritable` writes: 4 KiB, above any session file (about 1 KiB of JSON). */
 const PROBE_PAYLOAD = ' '.repeat(4096);
 
 /**
@@ -408,7 +396,6 @@ export function createOAuthStore(
 
   const listNames = async (): Promise<string[]> => (await ifExists(readdir(dir))) ?? [];
 
-  /** `run`, with `UNWRITABLE_ERRNO_CODES` as `SessionStoreUnwritableError`. */
   const writing = async <T>(run: () => Promise<T>): Promise<T> => {
     try {
       return await run();
@@ -429,7 +416,6 @@ export function createOAuthStore(
     await chmod(dir, 0o700);
   };
 
-  /** Writes `text` to a new 0600 temp file beside `path`, then renames it to `to`. */
   const writeThenRename = async (path: string, text: string, to: string): Promise<void> => {
     const tmp = `${path}.${randomBytes(6).toString('hex')}.tmp`;
 
@@ -445,13 +431,11 @@ export function createOAuthStore(
 
       await rename(tmp, to);
     } catch (err) {
-      // The original error is the one to report; a sandbox can refuse this cleanup too.
       await rm(tmp, { force: true }).catch(() => undefined);
       throw err;
     }
   };
 
-  /** Writes via a 0600 temp file and rename, so readers never see a partial file. */
   const writeAtomic = (path: string, data: unknown): Promise<void> =>
     writing(async () => {
       await ensureDir();
@@ -465,7 +449,6 @@ export function createOAuthStore(
       // Not a `<env>.<business>.<user>.json` name, so nothing lists it if a crash leaves it.
       const probe = join(dir, `.write-probe.${randomBytes(6).toString('hex')}`);
 
-      // About a session file's size or more, so a full disk fails here and not at the commit.
       await writeThenRename(probe, PROBE_PAYLOAD, probe);
       await unlink(probe);
     });

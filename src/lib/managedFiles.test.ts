@@ -117,7 +117,6 @@ describe('managed files never write outside the plugin', () => {
     { path: SKILL, content: 'bundled skill\n' },
   ];
 
-  /** Nothing new in the plugin folder but `kept`, and the outside file untouched. */
   const expectNothingWritten = async (kept: string[]): Promise<void> => {
     expect((await readdir(dir)).sort()).toStrictEqual(kept.sort());
     expect(await readFile(join(outside, 'victim.md'), 'utf-8')).toBe('outside\n');

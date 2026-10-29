@@ -82,7 +82,6 @@ const PRESIGNED = {
   expires_at: '2026-10-27T00:05:00Z',
 };
 
-/** Kizen answers presign and success; anything else is a test bug. */
 const uploadKizen =
   (presigned: Record<string, unknown> = PRESIGNED): Responder =>
   (url) => {
@@ -125,7 +124,6 @@ describe('uploadFile', () => {
       expect(names).not.toContain(name);
     }
 
-    // The Kizen calls themselves did carry auth, so the check above isn't vacuous.
     expect(
       headerNames(kizenCalls()[0]?.init ?? {}).some((n) => KIZEN_AUTH_HEADERS.includes(n)),
     ).toBe(true);
@@ -228,7 +226,6 @@ describe('uploadFile', () => {
     expect(s3Fetch).not.toHaveBeenCalled();
     expect(kizenCalls()).toHaveLength(1);
 
-    // Exactly at the limit is allowed.
     const atLimit = harness(uploadKizen({ ...PRESIGNED, max_file_size: 3 }));
 
     await expect(atLimit.api.uploadFile(new Uint8Array(3), ZIP_OPTS)).resolves.toBe('obj-1');
@@ -323,7 +320,6 @@ describe('business app endpoints', () => {
     const publishCall = kizenCalls().at(-1);
 
     expect(JSON.parse(publishCall?.init.body as string)).toStrictEqual(body);
-    // The promote carries no body.
     expect(kizenCalls()[6]?.init.body).toBeUndefined();
   });
 
@@ -352,11 +348,9 @@ describe('business app endpoints', () => {
       message: "Business Apps aren't available on this Kizen environment yet.",
       hint: 'Kizen has no Business Apps list on this environment (it answered 404). Use an environment where Business Apps are available, with --env.',
     });
-    // The request that failed stays on the error, for debugging.
     expect((error.cause as KizenApiError).message).toBe(
       `GET /external-integrations/plugin-apps/${BUSINESS_ID}/apps?search=my_app failed with 404: Not found.`,
     );
-    // As a command reports it.
     expect(apiFailure(error)).toStrictEqual({
       ok: false,
       code: 'not_found',
@@ -364,7 +358,6 @@ describe('business app endpoints', () => {
       hint: 'Kizen has no Business Apps list on this environment (it answered 404). Use an environment where Business Apps are available, with --env.',
     });
 
-    // Other list failures, and a 404 for one app or version, are reported as they are.
     const failing = harness(() => jsonResponse({ detail: 'boom' }, 500));
 
     await expect(rejectionOf(failing.api.listApps(), KizenApiError)).resolves.toMatchObject({

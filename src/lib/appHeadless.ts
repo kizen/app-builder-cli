@@ -100,32 +100,19 @@ export interface AppWriteOptions extends AppCommandOptions {
 }
 
 export interface AppPushOptions extends AppWriteOptions {
-  /** Push even though files still have merge conflict markers. */
   force?: boolean;
-  /**
-   * `--base-from-preview <id>`: take this folder's base from your preview's lineage, while your
-   * preview is still source package `<id>`. Only a base_required choice prints it; it's the user's
-   * call that this folder continues that preview.
-   */
   baseFromPreview?: string;
 }
 
 export interface AppPublishOptions extends AppWriteOptions {
   force?: boolean;
-  /**
-   * `--expect-preview <id>`: publish only if your preview's source package is still this one. A
-   * dry run's `applyArgv` carries the one it reviewed, so the apply can't publish another.
-   */
   expectPreview?: string;
 }
 
-/** `app merge` writes only local files, so it has no --allow-production. */
 export interface AppMergeCommandOptions extends AppCommandOptions {
   dryRun?: boolean;
   yes?: boolean;
-  /** `--release <n>`: merge this version instead of Live (`--version` is the program's own flag). */
   release?: string;
-  /** `--base <n>`: the version this folder came from. */
   base?: string;
   acceptLiveBase?: boolean;
 }
@@ -137,41 +124,21 @@ export interface AppPullOptions extends AppCommandOptions {
 interface Runner {
   output: CommandOutput;
   fail: (result: AppFailure) => void;
-  /** Other-command choices with their whole `argv`: this run's credential flags and --json added. */
   runnable: (choices: CommandChoice[]) => RunnableChoice[];
-  /** `appbuilder app <args>` with this run's credential flags and --json: a whole argv. */
   appArgv: (args: string[]) => string[];
-  /**
-   * A dry run's `applyArgv` (`appArgv(args)` with --yes, and --allow-production on production)
-   * and whether the agent needs the user's go-ahead for production first.
-   */
   apply: (
     args: string[],
     production: boolean,
   ) => { applyArgv: string[]; requiresProductionConsent: boolean };
-  /**
-   * Pins every command printed from here on to the account the run signed in as
-   * (`pinnedCredentialArgs`), so a switch elsewhere meanwhile can't redirect it.
-   */
   pin: (account: CommandAccount) => void;
 }
 
-/** The steps after a merge: resolve the markers, then push and publish. */
 export type AppNextStep =
   | NextCommand
   | { step: 'resolve'; files: string[]; markers: { local: 'HEAD'; incoming: 'live' } };
 
-/** Git's labels on a merge's two sides: `<<<<<<< HEAD` is the local file, `>>>>>>> live` Live's. */
 const MARKER_LABELS = { local: 'HEAD', incoming: 'live' } as const;
 
-/**
- * Output and failure reporting for one command. Every choice gets a whole `argv`: an
- * `environment` choice re-runs `command` with `rerunArgs`, its `args` and the account flags (its
- * --env replaces the run's); a `base` choice is another command, which gets this run's credential
- * flags, so it runs as printed (as does an `object` choice: the same command naming one object by
- * id). Both get --json when the run had it. No choice carries the run's --yes except a `base`
- * choice that has its own (a local write, or a push the user chose).
- */
 function runner(
   command: string,
   rerunArgs: string[],
@@ -179,9 +146,7 @@ function runner(
   deps: AppDeps,
 ): Runner {
   const output: CommandOutput = { json: options.json === true, deps };
-  // The run's credential flags until it signs in, then the account it resolved (`pin`).
   let credentials = credentialArgs(options, deps.processEnv);
-  // A push choice keeps the run's --allow-production, so it can still write to go/fmo.
   const completeArgv = (argv: string[]): string[] => [
     ...argv,
     ...(argv[2] === 'push' && (options as AppWriteOptions).allowProduction === true
@@ -215,9 +180,6 @@ function runner(
       requiresProductionConsent: production,
     }),
     fail: (result) => {
-      // A publish conflict is answered by merging Live first: a dry run of it, never --force. A
-      // preview pushed again since the plan is answered by planning the publish again, and a
-      // preview whose base is unknown by pushing this folder again (a dry run).
       const reason = result.conflict?.reason;
       const next: NextCommand[] | undefined =
         result.code === 'publish_conflict'
@@ -282,7 +244,6 @@ async function contextFor(
   return context;
 }
 
-/** Signs in, reads kizen.json and loads the app; reports a failure and returns null. */
 async function openContext(
   options: AppCommandOptions,
   deps: AppDeps,
@@ -336,10 +297,6 @@ const appJson = (summary: AppSummary): Record<string, unknown> => ({
 const lines = (...parts: (string | false | undefined)[]): string =>
   `${parts.filter((part): part is string => typeof part === 'string').join('\n')}\n`;
 
-/**
- * The out-of-date warnings of the agent skills appbuilder manages in this folder, which every
- * result carries (as `block push` does); a failing check adds none.
- */
 async function agentSkillWarnings(deps: AppDeps): Promise<string[]> {
   try {
     return await deps.staleAgentFileWarnings(deps.cwd);
@@ -356,10 +313,6 @@ const choiceLines = (title: string, choices: RunnableChoice[]): string[] =>
         ...choices.map((choice) => `  ${choice.label}  →  ${choice.argv.map(quoteArg).join(' ')}`),
       ];
 
-// ---------------------------------------------------------------------------------------------
-// JS actions: the check push, publish and versions report
-
-/** One action as a line: its links, or why it has none. */
 export function formatJsActionLine(action: JsActionInfo): string {
   const title = `${action.apiName} (${action.name})`;
 
@@ -378,27 +331,14 @@ export function formatJsActionLine(action: JsActionInfo): string {
   }
 }
 
-/** The check's actions under a heading; nothing when the app has none. */
 export const formatJsActionsLines = (check: JsActionsCheck): string[] =>
   check.actions.length === 0 ? [] : ['JS actions:', ...check.actions.map(formatJsActionLine)];
 
-/** The check's next steps as whole argvs (`appArgv`). */
 const jsActionsNext = (check: JsActionsCheck, appArgv: Runner['appArgv']): NextCommand[] =>
   jsActionsNextArgs(check).map(({ step, args }) => ({ step, argv: appArgv(args) }));
 
-/**
- * The element of a `linkArgv` / `linkMenuArgv` / `linkNoMenuArgv` that names the object: the one element of a printed
- * command an agent may replace, with an object's api name or id.
- */
 export const OBJECT_SLOT = '<object>';
 
-/**
- * The actions as JSON, each with the commands that act on it, pinned to the run's account (and
- * --json when the run had it): link dry runs whose `OBJECT_SLOT` element names the object,
- * `linkArgv` (a new link off the menus, an existing one as it is), `linkMenuArgv` (shown in the
- * Perform Action menus) and `linkNoMenuArgv` (not shown); and per listed link, `unlinkArgv`, an
- * unlink dry run by object id.
- */
 const jsActionsListJson = (
   actions: readonly JsActionInfo[],
   appArgv: Runner['appArgv'],
@@ -414,7 +354,6 @@ const jsActionsListJson = (
     linkNoMenuArgv: appArgv(['actions', 'link', action.apiName, OBJECT_SLOT, '--no-menu']),
   }));
 
-/** The check as push, publish and versions put it in their JSON (`jsActions`). */
 const jsActionsJson = (
   check: JsActionsCheck,
   next: NextCommand[],
@@ -427,19 +366,15 @@ const jsActionsJson = (
   next,
 });
 
-/** Prints a dry run's result, and the --yes note when the gate stopped for lack of it. */
 function writeDryRun(
   output: CommandOutput,
   gate: Extract<WriteGate, { kind: 'dry-run' }>,
   result: Record<string, unknown>,
-  /** null: the dry run can't be pinned to what it showed, so it prints no `applyArgv`. */
   apply: ReturnType<Runner['apply']> | null,
   text: string,
 ): void {
   writeResult(
     output,
-    // `next` is empty: a dry run goes on with `applyArgv`, after asking the user first when
-    // `requiresProductionConsent` says so, so nothing runnable here skips that.
     {
       ok: true,
       applied: false,
@@ -457,9 +392,6 @@ function writeDryRun(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// versions
-
 function formatVersionInfo(info: AppVersionInfo): string {
   const published = [
     info.publishedAt === null ? undefined : `published ${info.publishedAt}`,
@@ -472,7 +404,6 @@ function formatVersionInfo(info: AppVersionInfo): string {
 const baseText = (base: RecordedBase): string =>
   base.recorded ? versionLabel(base.version) : 'not recorded';
 
-/** The versions report as `app versions` prints it, without its warnings (`report.warnings`). */
 export function formatVersionsLines(report: AppVersionsReport): string[] {
   const summary = formatAppSummaryLines(report.summary).filter((line) => !line.startsWith('Live:'));
   const baseLines = [`Folder base: ${baseText(report.base.folder)}`];
@@ -504,11 +435,6 @@ export function formatVersionsLines(report: AppVersionsReport): string[] {
   ];
 }
 
-/**
- * Where `versions` leaves off, as dry runs: merge first when Live moved past this folder's base;
- * otherwise push this folder, then publish. Always push before publish: `versions` can't tell
- * whether your preview still matches this folder, and a push dry run is harmless.
- */
 function versionsNextSteps(report: AppVersionsReport, appArgv: Runner['appArgv']): AppNextStep[] {
   if (report.base.liveMoved) {
     return [{ step: 'merge', argv: appArgv(['merge']) }];
@@ -520,10 +446,6 @@ function versionsNextSteps(report: AppVersionsReport, appArgv: Runner['appArgv']
   ];
 }
 
-/**
- * Read-only. An app that isn't published yet is a result (`published: false`, exit 0), not a
- * failure: it's the expected state before the first publish.
- */
 export async function runAppVersionsHeadless(
   options: AppCommandOptions,
   deps: AppDeps,
@@ -547,7 +469,6 @@ export async function runAppVersionsHeadless(
     }
 
     const described = describeVersions(context, folderBase.value);
-    // Never fails versions: a failed check is a notice.
     const jsCheck = await checkJsActions(context, { kind: 'app' });
     const jsNotices = jsActionsNotices(jsCheck);
     const jsNext = jsActionsNext(jsCheck, run.appArgv);
@@ -588,9 +509,6 @@ export async function runAppVersionsHeadless(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// push
-
 export const formatIssueWarning = (issue: ValidationIssue): string =>
   `${issue.path === undefined ? '' : `${issue.path}: `}${issue.message} (${issue.rule})`;
 
@@ -598,13 +516,10 @@ const BASE_SOURCE_TEXT = {
   recorded: 'recorded for this folder',
   never_published: 'the app has no Live version yet',
   detected: 'matched exactly',
-  // Placeholder copy.
   preview: "matches your preview exactly; your preview's base, read from the server",
-  // Placeholder copy.
   base_from_preview: "continues your preview; your preview's base, read from the server",
 } as const satisfies Record<AppPushPlan['base']['source'], string>;
 
-/** A push plan as `app push` prints it, without its warnings. */
 export const formatPushPlanLines = (plan: AppPushPlan): string[] => [
   ...formatAppSummaryLines(plan.summary),
   `Source: ${String(plan.source.files)} files (${plan.source.mode}), ${String(plan.source.bytes)} bytes`,
@@ -695,7 +610,6 @@ export async function runAppPushHeadless(options: AppPushOptions, deps: AppDeps)
 
     const templates = jsActionTemplatesOf(deployable.artifacts.js_action_templates);
     const skillWarnings = await agentSkillWarnings(deps);
-    // The JS action check as a result reports it: the warnings, notices and `jsActions`.
     const withCheck = (
       jsCheck: JsActionsCheck,
     ): {
@@ -732,7 +646,6 @@ export async function runAppPushHeadless(options: AppPushOptions, deps: AppDeps)
     };
 
     if (gate.value.kind === 'dry-run') {
-      // Push leaves Live alone, so the actions are checked against the app as it is.
       const jsCheck = await checkJsActions(context, { kind: 'version', templates });
       const { warnings, notices, jsActions } = withCheck(jsCheck);
 
@@ -759,11 +672,9 @@ export async function runAppPushHeadless(options: AppPushOptions, deps: AppDeps)
       return;
     }
 
-    // Checked against the app as the push left it: a first push installs it.
     const jsCheck = await checkPushedJsActions(context, templates);
     const { jsNext, warnings, notices, jsActions } = withCheck(jsCheck);
     const allWarnings = [...warnings, ...applied.value.warnings];
-    // What was uploaded, which differs from the plan's zip when .gitignore gained the CLI's entries.
     const uploaded = { ...plan, source: applied.value.source };
 
     writeResult(
@@ -783,8 +694,6 @@ export async function runAppPushHeadless(options: AppPushOptions, deps: AppDeps)
         remembered: applied.value.remembered,
         notices,
         warnings: allWarnings,
-        // Linking the pushed actions comes first, while it's your preview; then publishing it (a
-        // dry run of it first).
         next: [...jsNext, { step: 'publish', argv: appArgv(['publish']) }] satisfies AppNextStep[],
       },
       lines(
@@ -799,11 +708,7 @@ export async function runAppPushHeadless(options: AppPushOptions, deps: AppDeps)
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// publish
-
 function formatConflictCheck(check: ConflictCheck, forced: boolean): string {
-  // Placeholder copy (both branches of `how`).
   const how =
     check.reason === 'base_unknown'
       ? "your preview's source doesn't say what it's based on"
@@ -812,7 +717,6 @@ function formatConflictCheck(check: ConflictCheck, forced: boolean): string {
   return `Conflict check: ${check.conflict ? (forced ? 'conflict, overridden by --force' : 'conflict') : 'none'} (${how})`;
 }
 
-/** A publish plan as `app publish` prints it, without the release line and warnings. */
 export const formatPublishPlanLines = (plan: AppPublishPlan): string[] => [
   ...formatAppSummaryLines(plan.summary),
   `Preview: last updated ${plan.previewUpdatedAt ?? 'unknown'}`,
@@ -831,9 +735,6 @@ export async function runAppPublishHeadless(
 ): Promise<void> {
   const run = runner('appbuilder app publish', [], options, deps);
   const { output, fail, apply, appArgv } = run;
-  // No version to pin: publish promotes your preview. The apply re-runs the conflict check just
-  // before promoting, so a Live publish, or a preview replaced from elsewhere, since the dry run
-  // stops it (publish_conflict / base_required) rather than publishing something unreviewed.
   const publishArgs = ['publish', ...(options.force === true ? ['--force'] : [])];
 
   try {
@@ -877,7 +778,6 @@ export async function runAppPublishHeadless(
     };
 
     if (gate.value.kind === 'dry-run') {
-      // The preview's actions, against the current Live version's links.
       const jsCheck = await checkJsActions(context, {
         kind: 'version',
         templates: jsActionTemplatesOf(plan.jsActionTemplates),
@@ -897,7 +797,6 @@ export async function runAppPublishHeadless(
           notices: jsNotices,
           warnings,
         },
-        // Pinned to the preview this dry run reviewed, as merge pins its --release.
         apply(
           [...publishArgs, '--expect-preview', plan.previewSourcePackageId],
           plan.summary.isProduction,
@@ -921,7 +820,6 @@ export async function runAppPublishHeadless(
       return;
     }
 
-    // What was published is Live now, so every one of its actions' links can be listed.
     const jsCheck = await checkJsActions(context, {
       kind: 'live',
       version: applied.value.liveVersion,
@@ -961,9 +859,6 @@ export async function runAppPublishHeadless(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// merge
-
 export const pathList = (title: string, paths: string[]): string[] =>
   paths.length === 0
     ? []
@@ -981,7 +876,6 @@ export function formatMergeLists(lists: AppMergeLists): string[] {
   ];
 }
 
-/** "Live v5" when the merged version is Live, else "v4". */
 export const targetLabel = (version: string, isLive: boolean): string =>
   isLive ? `Live v${version}` : `v${version}`;
 
@@ -991,7 +885,6 @@ export const conflictInstructions = (label: string): string =>
 export const FALLBACK_INSTRUCTIONS =
   'Merge it into this folder by hand and then record its base, or merge from the release this folder was copied from with --base <n>. Use --base only with the release it was really copied from: a wrong one drops the changes made since then.';
 
-/** A merge plan as `app merge` prints it, after the summary lines. */
 export function formatMergePlanLines(plan: AppMergePlan): string[] {
   const base = plan.baseVersion === undefined ? 'not recorded' : versionLabel(plan.baseVersion);
   const label = targetLabel(plan.targetVersion, plan.targetIsLive);
@@ -1062,12 +955,6 @@ function mergePlanJson(plan: AppMergePlan): Record<string, unknown> {
   }
 }
 
-/**
- * The merge a dry run showed, as `merge` args for its `applyArgv`: `--release` of the version it
- * planned, since Live can move before the apply (which would then merge, or record as the base, a
- * version nobody reviewed); the base it used when that came from --base or detection (nothing
- * records it before the apply); and --accept-live-base.
- */
 function pinnedMergeArgs(plan: AppMergePlan): string[] {
   const unrecordedBase =
     (plan.baseSource === 'flag' || plan.baseSource === 'detected') &&
@@ -1082,11 +969,6 @@ function pinnedMergeArgs(plan: AppMergePlan): string[] {
   ];
 }
 
-/**
- * What follows a merge: after a merge or an accept, push then publish (dry runs first), with a
- * `resolve` step first while any file still has conflict markers (push refuses until then).
- * Nothing for an up-to-date folder or a fallback, whose `choices` say how to go on.
- */
 function mergeNextSteps(result: AppliedAppMerge, appArgv: Runner['appArgv']): AppNextStep[] {
   if (result.status !== 'merged' && result.status !== 'conflicts' && result.status !== 'accepted') {
     return [];
@@ -1101,10 +983,6 @@ function mergeNextSteps(result: AppliedAppMerge, appArgv: Runner['appArgv']): Ap
   ];
 }
 
-/**
- * What `app merge` printed after applying `plan`, the first line its status; a fallback's lines
- * stop before its choices (`FALLBACK_INSTRUCTIONS` and the commands).
- */
 export function formatMergeOutcomeLines(plan: AppMergePlan, result: AppliedAppMerge): string[] {
   const { targetVersion } = result;
   const label = targetLabel(plan.targetVersion, plan.targetIsLive);
@@ -1177,7 +1055,6 @@ export async function runAppMergeHeadless(
 
     writeNotices(deps, plan.notices);
 
-    // Only local files change, so the production gate doesn't apply; --yes still does.
     const gate = headlessWriteGate(
       { dryRun: options.dryRun === true, yes: options.yes === true, allowProduction: true },
       context.credentials.environment,
@@ -1203,7 +1080,6 @@ export async function runAppMergeHeadless(
         output,
         gate.value,
         { action: 'merge', ...planJson, warnings: planWarnings },
-        // Only local files change: never --allow-production.
         apply(pinnedMergeArgs(plan), false),
         lines(...summaryLines, ...formatMergePlanLines(plan), ...warningLines(planWarnings)),
       );
@@ -1247,9 +1123,6 @@ export async function runAppMergeHeadless(
     fail(appFailure(error));
   }
 }
-
-// ---------------------------------------------------------------------------------------------
-// rollback
 
 export const formatRollbackPlanLines = (plan: AppRollbackPlan): string[] => [
   ...formatAppSummaryLines(plan.summary),
@@ -1329,7 +1202,6 @@ export async function runAppRollbackHeadless(
         sourcePackageId: applied.value.sourcePackageId,
         remembered: applied.value.remembered,
         warnings,
-        // The restored preview goes Live by publishing it: a dry run of that first.
         next: [{ step: 'publish', argv: appArgv(['publish']) }] satisfies AppNextStep[],
       },
       lines(rolledBackLine(plan), ...planLines, ...warningLines(warnings)),
@@ -1339,16 +1211,11 @@ export async function runAppRollbackHeadless(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// pull
-
-/** What `app pull` printed after extracting, without its warnings. */
 export const formatPullLines = (plan: AppPullPlan, applied: AppliedAppPull): string[] => [
   `✓ Extracted v${plan.version} of ${plan.summary.name ?? plan.summary.baseApiName} into ${applied.dir} (${String(applied.written.length)} files)`,
   ...pathList('Left out (safety list)', applied.skipped),
 ];
 
-/** Read-only on the server; writes only into a new folder, so it needs no --yes. */
 export async function runAppPullHeadless(
   version: string,
   options: AppPullOptions,
@@ -1400,7 +1267,6 @@ export async function runAppPullHeadless(
         skipped,
         remembered,
         warnings,
-        // The pulled version is in another folder; what comes next happens there.
         next: [] satisfies AppNextStep[],
       },
       lines(...formatPullLines(plan, applied.value), ...warningLines(warnings)),
@@ -1410,15 +1276,10 @@ export async function runAppPullHeadless(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// actions
-
 export interface AppActionsLinkOptions extends AppWriteOptions {
-  /** `--menu` / `--no-menu`: whether the action shows in the object's Perform Action menus. */
   menu?: boolean;
 }
 
-/** `app actions list`'s result, as it prints it, without its warnings. */
 export const formatActionsListLines = (summary: AppSummary, check: JsActionsCheck): string[] => [
   ...formatAppSummaryLines(summary),
   ...(check.actions.length === 0 ? ['No JS actions.'] : formatJsActionsLines(check)),
@@ -1430,7 +1291,6 @@ const menuText = (include: boolean | null): string =>
 const objectText = (plan: { object: { name: string; label: string } }): string =>
   `${plan.object.label} (${plan.object.name})`;
 
-/** A link plan as `app actions link` prints it, after the summary lines. */
 export function formatActionLinkPlanLines(plan: ActionLinkPlan): string[] {
   const action = plan.action.apiName;
 
@@ -1452,7 +1312,6 @@ export const formatActionUnlinkPlanLines = (plan: ActionUnlinkPlan): string[] =>
   `Unlink ${plan.action.apiName} from ${objectText(plan)}.`,
 ];
 
-/** An applied link's headline. */
 export const actionLinkedLine = (plan: ActionLinkPlan, status: ActionLinkStatus): string =>
   status === 'updated'
     ? `✓ Updated ${plan.action.apiName}'s link to ${plan.object.label}`
@@ -1463,10 +1322,6 @@ export const actionLinkedLine = (plan: ActionLinkPlan, status: ActionLinkStatus)
 export const actionUnlinkedLine = (plan: ActionUnlinkPlan): string =>
   `✓ Unlinked ${plan.action.apiName} from ${plan.object.label}`;
 
-/**
- * `<action>` and `<object>` are optional only so a terminal can pick them; a headless run needs
- * both, so a missing one is a `usage_error` naming it.
- */
 export function actionArguments(
   command: 'link' | 'unlink',
   args: { action: string | undefined; object: string | undefined },
@@ -1497,7 +1352,6 @@ const actionLinkJson = (plan: ActionLinkPlan): Record<string, unknown> => ({
   existing: plan.existing,
 });
 
-/** Read-only: every JS action of the app's Live version and your preview, with its links. */
 export async function runAppActionsListHeadless(
   options: AppCommandOptions,
   deps: AppDeps,
@@ -1532,7 +1386,6 @@ export async function runAppActionsListHeadless(
         status: check.status,
         actions: jsActionsListJson(check.actions, appArgv),
         warnings,
-        // Link dry runs only: listing again isn't a next step of a list.
         next: jsActionsNext(check, appArgv).filter((step) => step.step !== 'actions'),
       },
       lines(...formatActionsListLines(summary, check), ...warningLines(warnings)),
@@ -1542,10 +1395,6 @@ export async function runAppActionsListHeadless(
   }
 }
 
-/**
- * Links a JS action to an object, or changes an existing link's menu setting. A dry run without
- * --yes; its `applyArgv` names the object by id and the menu setting it showed.
- */
 export async function runAppActionsLinkHeadless(
   actionArg: string | undefined,
   objectArg: string | undefined,
@@ -1597,12 +1446,10 @@ export async function runAppActionsLinkHeadless(
     const plan = planned.value;
     const planLines = [...formatAppSummaryLines(plan.summary), ...formatActionLinkPlanLines(plan)];
     const skillWarnings = await agentSkillWarnings(deps);
-    // What the link change will do (the Live warning), then the skills' own.
     const planWarnings = [...plan.warnings, ...skillWarnings];
 
     writeNotices(deps, plan.notices);
 
-    // Nothing to write, so nothing to gate.
     if (plan.change === 'up_to_date') {
       writeResult(
         output,
@@ -1641,7 +1488,6 @@ export async function runAppActionsLinkHeadless(
           notices: plan.notices,
           warnings: planWarnings,
         },
-        // Pinned to the object this dry run resolved and the menu setting it showed.
         apply(
           [
             'actions',
@@ -1666,7 +1512,6 @@ export async function runAppActionsLinkHeadless(
       return;
     }
 
-    // Nothing changed when the server already had the link: no Live warning then.
     const warnings = [
       ...(applied.value.status === 'already_linked' ? skillWarnings : planWarnings),
       ...applied.value.warnings,
@@ -1693,7 +1538,6 @@ export async function runAppActionsLinkHeadless(
   }
 }
 
-/** Removes a JS action's link to an object. A dry run without --yes. */
 export async function runAppActionsUnlinkHeadless(
   actionArg: string | undefined,
   objectArg: string | undefined,
@@ -1805,25 +1649,12 @@ export async function runAppActionsUnlinkHeadless(
   }
 }
 
-// ---------------------------------------------------------------------------------------------
-// preview
-
 export interface AppPreviewDeleteOptions extends AppWriteOptions {
-  /** `--owner <userId>`: delete this user's preview instead of yours. */
   owner?: string;
-  /**
-   * `--expect-updated <ts>`: delete only if the preview's `updated` is still this one. A dry run's
-   * `applyArgv` carries the one it reviewed, so the apply can't delete a preview pushed since.
-   */
   expectUpdated?: string;
-  /**
-   * `--delete-app`: the go-ahead to delete the whole app with its only version. A dry run's
-   * `applyArgv` carries it only when it warned about that; without it, such a delete refuses.
-   */
   deleteApp?: boolean;
 }
 
-/** A preview delete plan as `app preview delete` prints it, without its warnings. */
 export function formatPreviewDeletePlanLines(plan: AppPreviewDeletePlan): string[] {
   const { owner, preview } = plan;
 
@@ -1838,11 +1669,6 @@ export function formatPreviewDeletePlanLines(plan: AppPreviewDeletePlan): string
   ];
 }
 
-/**
- * An applied delete's headline, then a line when the app went with it, or when it was to go but
- * the re-read found it still there. `plan` is the one the delete started from.
- */
-/** Placeholder copy. */
 export const previewDeletedLines = (
   plan: AppPreviewDeletePlan,
   applied: AppliedPreviewDelete,
@@ -1860,10 +1686,6 @@ export const previewDeletedLines = (
   ];
 };
 
-/**
- * The `preview delete` dry run of `owner`, a user id (or yours, when the run named none): the way
- * on from `preview_changed`.
- */
 const previewChangedNext = (
   failed: AppFailure,
   owner: string,
@@ -1876,7 +1698,6 @@ const previewChangedNext = (
       }
     : failed;
 
-/** Placeholder copy. */
 export const UNPINNED_PREVIEW_NOTICE =
   "Kizen reports no last update for this preview, so this dry run can't be pinned to it and has no applyArgv: it can't be applied from this dry run.";
 
@@ -1887,12 +1708,6 @@ const previewDeleteJson = (plan: AppPreviewDeletePlan): Record<string, unknown> 
   deletesApp: plan.deletesApp,
 });
 
-/**
- * Deletes your preview, or `--owner`'s. A dry run without --yes. Its `applyArgv` is pinned to what
- * it reviewed: always the owner it resolved (`--owner <id>`), the preview's `updated`
- * (`--expect-updated`), and `--delete-app` only when it warned that the app goes too. The apply
- * plans afresh, and refuses with `preview_changed` when the preview or the app's fate differs.
- */
 export async function runAppPreviewDeleteHeadless(
   options: AppPreviewDeleteOptions,
   deps: AppDeps,
@@ -1908,7 +1723,6 @@ export async function runAppPreviewDeleteHeadless(
       return;
     }
 
-    // The owner a re-run reviews: the one named, else you.
     const owner = (options.owner ?? context.credentials.userId).trim();
     const planned = planPreviewDelete(context, {
       ...(options.owner !== undefined && { owner: options.owner }),
@@ -1935,7 +1749,6 @@ export async function runAppPreviewDeleteHeadless(
 
     if (gate.value.kind === 'dry-run') {
       const { updated } = plan.preview;
-      // Without an `updated` to pin, an applyArgv could delete a preview pushed since: none.
       const notices = updated === null ? [UNPINNED_PREVIEW_NOTICE] : [];
 
       writeNotices(deps, notices);
@@ -1943,7 +1756,6 @@ export async function runAppPreviewDeleteHeadless(
         output,
         gate.value,
         { action: 'preview delete', ...previewDeleteJson(plan), notices, warnings: planWarnings },
-        // Pinned to the preview this dry run reviewed, and whether the app goes with it.
         updated === null
           ? null
           : apply(
@@ -1964,7 +1776,6 @@ export async function runAppPreviewDeleteHeadless(
       return;
     }
 
-    // Deleting the app needs its own go-ahead, which only a dry run that showed it gives.
     const consent = requireDeleteAppConsent(plan, options.deleteApp === true);
 
     if (consent !== null) {
@@ -1976,7 +1787,6 @@ export async function runAppPreviewDeleteHeadless(
     const applied = await applyPreviewDelete(context, plan, deps);
 
     if (!applied.ok) {
-      // The preview changed since the plan: a new dry run shows it as it is now.
       fail(previewChangedNext(applied, plan.owner.id, appArgv));
 
       return;
@@ -2001,8 +1811,6 @@ export async function runAppPreviewDeleteHeadless(
         appDeleted: applied.value.appDeleted,
         remembered: applied.value.remembered,
         warnings,
-        // Your preview is gone: pushing this folder (a dry run first) makes a new one. Someone
-        // else's is theirs to push again.
         next: (plan.owner.yours
           ? [{ step: 'push', argv: appArgv(['push']) }]
           : []) satisfies AppNextStep[],

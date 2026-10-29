@@ -1,8 +1,3 @@
-/**
- * `appbuilder whoami`: the text output is `runWhoami`'s; `--json` prints the identity as one JSON
- * object with the headless commands' failure contract (`not_signed_in` with the login to run,
- * `needs_choice` among environments with exit 2, any other failure exit 1).
- */
 import { accountRequest } from './authSelection.js';
 import {
   accountArgs,
@@ -28,7 +23,6 @@ export interface WhoamiOptions extends WhoamiCommandOptions {
 
 const runWhoamiJson: AuthCommand<WhoamiOptions> = async (options, deps) => {
   const output: CommandOutput = { json: true, deps };
-  // An environment choice re-runs whoami with its --env (replacing the run's) and the run's account.
   const choiceArgv: ChoiceArgv<'environment'> = (choice) =>
     commandArgv(
       'appbuilder whoami',

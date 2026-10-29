@@ -61,21 +61,13 @@ interface FlowRun {
   flow: AppFlow;
   phases: AppPhase[];
   state: { session: Session };
-  /**
-   * The flow's next phase of `type`: the first one shown after the phase the previous `until`
-   * returned, as soon as the flow shows it. Rejects if the flow ends on another phase first.
-   * Driven by the flow's own phase updates, not by polling, so it takes as long as the flow does.
-   */
   until: <T extends AppPhase['type']>(type: T) => Promise<PhaseOf<T>>;
 }
 
-/** Drives `createAppFlow` the way AppUI does, recording every phase. */
 function startFlow(h: Harness, request: AppRequest): FlowRun {
   const phases: AppPhase[] = [];
   const state: { session: Session } = { session: EMPTY_SESSION };
-  // Checked on every phase the flow shows; each returns true once it settled its `until`.
   const waiting = new Set<() => boolean>();
-  // The index of the phase the previous `until` returned.
   let consumed = -1;
 
   const record = (phase: AppPhase): void => {
@@ -144,13 +136,11 @@ function startFlow(h: Harness, request: AppRequest): FlowRun {
   return { flow, phases, state, until };
 }
 
-/** Every string a phase shows. */
 const shown = (phase: AppPhase): string =>
   JSON.stringify(phase, (key, value: unknown) =>
     key === 'apply' || key === 'run' ? undefined : value,
   );
 
-/** A server whose Live moved to v4 after this folder pushed a preview based on v3. */
 function conflictHarness(): Harness {
   const server = makeServer({ live: '3', previews: { 'user-1': yourPreview() } });
 
@@ -163,7 +153,6 @@ const nothingWritten = (h: Harness): void => {
   expect(h.server.writes()).toStrictEqual([]);
   expect(h.store.writes).toBe(0);
   expect(h.mocks.applyMerge).not.toHaveBeenCalled();
-  // Rollback's plan unpacks the old version into a temp folder outside the plugin; nothing else.
   expect(
     h.mocks.unzip.mock.calls.map(([, dir]) => dir).filter((dir) => !dir.startsWith('/tmp/')),
   ).toStrictEqual([]);
@@ -228,7 +217,6 @@ describe('app UI flow', () => {
     expect(confirm.isProduction).toBe(true);
     expect(confirm.productionPrompt).toBe('Type y to push to production (y/N)');
 
-    // --yes alone doesn't skip it on production; with --allow-production it writes.
     const yesOnly = onGo();
 
     await startFlow(yesOnly, { command: 'push', options: { ...API_KEY, yes: true } }).until(
@@ -244,7 +232,6 @@ describe('app UI flow', () => {
     }).until('done');
     expect(allowed.server.writes()).toContain('publish:false');
 
-    // Off production, the confirm is the plain one.
     const staging = await startFlow(makeHarness({ server: makeServer({ live: null }) }), {
       command: 'push',
       options: { ...API_KEY },
@@ -279,7 +266,6 @@ describe('app UI flow', () => {
     ).not.toContain('--force');
     nothingWritten(h);
 
-    // Merging runs here: its plan, before anything is written.
     h.mocks.planMerge.mockResolvedValue(readyPlan({ liveVersion: '4' }));
 
     const merge = choose.choices.find((choice) => choice.value === 'merge');
@@ -306,7 +292,6 @@ describe('app UI flow', () => {
     const { flow, until } = startFlow(h, { command: 'publish', options: { ...API_KEY } });
     const confirm = await until('confirm');
 
-    // Someone publishes v4 while the confirm is up: the apply's re-check stops it.
     h.server.release();
     flow.accept(confirm);
 
@@ -344,8 +329,6 @@ describe('app UI flow', () => {
   });
 
   it('a publish of a preview whose base is unknown offers pushing this folder, never --force', async () => {
-    // The preview's source doesn't say what it's based on: the step's hint advises --force for an
-    // agent; the picker offers pushing this folder (or exiting).
     const server = makeServer({
       live: '3',
       previews: { 'user-1': yourPreview({ lineage: null }) },
@@ -362,7 +345,6 @@ describe('app UI flow', () => {
   });
 
   it('base_required picker runs the chosen step', async () => {
-    // Nothing recorded and the folder matches no release: push stops for a base.
     const h = makeHarness({ server: makeServer({ live: '3' }) });
     const { flow, until, state } = startFlow(h, { command: 'push', options: { ...API_KEY } });
     const choose = await until('choose');
@@ -375,7 +357,6 @@ describe('app UI flow', () => {
       throw new Error('no accept choice');
     }
 
-    // "This folder already contains Live v3": recorded here, then the push resumes.
     flow.choose(choose, accept);
 
     const confirm = await until('confirm');
@@ -386,7 +367,6 @@ describe('app UI flow', () => {
     expect(confirm.lines).toContain('Base: v3 (recorded for this folder)');
     expect(h.server.writes()).toStrictEqual([]);
 
-    // The merge choice runs the merge of Live v3 here, starting with its plan.
     const again = makeHarness({ server: makeServer({ live: '3' }) });
     const second = startFlow(again, { command: 'push', options: { ...API_KEY } });
     const picker = await second.until('choose');
@@ -558,8 +538,6 @@ describe('app UI flow', () => {
   });
 
   it('a picked push on production stops at the strict confirm', async () => {
-    // Publish on go stops (the preview's base is unknown); the picked push still asks with the
-    // strict prompt, --yes without --allow-production notwithstanding.
     const server = makeServer({
       live: '3',
       previews: { 'user-1': yourPreview({ lineage: null }) },
@@ -604,7 +582,6 @@ describe('app UI flow', () => {
   });
 
   it('a --force publish at a terminal refuses a preview replaced while its confirm is open', async () => {
-    // Live moved past the preview's base (v3), so only --force publishes it.
     const server = makeServer({ live: '3', previews: { 'user-1': yourPreview() } });
 
     server.release();
@@ -616,7 +593,6 @@ describe('app UI flow', () => {
     });
     const confirm = await until('confirm');
 
-    // Pushed again from another folder while the confirm is open.
     h.server.state.previews.set(
       'user-1',
       yourPreview({ def: { ...yourPreview().def, source_filesystem_package: 'src-elsewhere' } }),
@@ -625,7 +601,6 @@ describe('app UI flow', () => {
 
     const error = await until('error');
 
-    // --force overrides the conflict, never which preview is published.
     expect(error.view).toMatchObject({
       message: PREVIEW_CHANGED_MESSAGE,
       hint: PREVIEW_CHANGED_HINT,
@@ -636,14 +611,12 @@ describe('app UI flow', () => {
   });
 
   it('the pre-promote re-check catches a replaced preview on a first release', async () => {
-    // No release yet, so the conflict check has nothing to compare with.
     const h = makeHarness({
       server: makeServer({ live: null, previews: { 'user-1': yourPreview() } }),
     });
     const { flow, until } = startFlow(h, { command: 'publish', options: { ...API_KEY } });
     const confirm = await until('confirm');
 
-    // Pushed again from another folder while the confirm is open.
     h.server.state.previews.set(
       'user-1',
       yourPreview({ def: { ...yourPreview().def, source_filesystem_package: 'src-elsewhere' } }),
@@ -662,7 +635,6 @@ describe('app UI flow', () => {
   });
 
   describe('Ctrl+C', () => {
-    /** Holds this folder's state read (part of loading the app) until the test lets it go. */
     const gated = (h: Harness): (() => void) => {
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => {
@@ -692,7 +664,6 @@ describe('app UI flow', () => {
       });
 
     it('Ctrl+C before apply starts no write', async () => {
-      // Control: without Ctrl+C, the same --yes run writes once the read is let go.
       const control = pushHarness();
       const releaseControl = gated(control);
 
@@ -727,7 +698,6 @@ describe('app UI flow', () => {
     });
 
     it('Ctrl+C shows nothing more, a decision included', async () => {
-      // No base recorded: push looks for a matching release (downloads), then would ask.
       const h = makeHarness({ server: makeServer({ live: '3' }) });
       const download = h.server.api.downloadFile.getMockImplementation();
       let release: () => void = () => undefined;
@@ -762,11 +732,8 @@ describe('app UI flow', () => {
       expect(h.exitCodes).toStrictEqual([130]);
     });
 
-    /** A call the test holds: it waits in `wait()` until `release()`; `arrived` settles then. */
     interface Held {
-      /** Awaited by the held call: marks it arrived, then waits for the release. */
       wait: () => Promise<void>;
-      /** Settles once the held call is waiting. */
       arrived: Promise<void>;
       release: () => void;
     }
@@ -792,10 +759,6 @@ describe('app UI flow', () => {
       };
     };
 
-    /**
-     * Starts `request`, accepts its confirm, waits until `held` (a call the apply makes) is
-     * pending, then Ctrl+C (unless `control`) and lets it go.
-     */
     const interruptDuringApply = async (
       h: Harness,
       request: AppRequest,
@@ -823,7 +786,6 @@ describe('app UI flow', () => {
         const getPreview = h.server.api.getPreview.getMockImplementation();
         let reads = 0;
 
-        // The plan's read goes through; the pre-promote re-check's read waits.
         h.server.api.getPreview.mockImplementation(async (apiName, owner) => {
           reads += 1;
 
@@ -882,7 +844,6 @@ describe('app UI flow', () => {
 
       const h = await run(false);
 
-      // The uploads were already sent; the preview itself is never saved.
       expect(h.server.writes()).not.toContain('publish:false');
       expect(h.store.writes).toBe(0);
       expect(h.exitCodes).toStrictEqual([130]);
@@ -895,7 +856,6 @@ describe('app UI flow', () => {
         const zip = h.deps.zipSourceDir;
         let zips = 0;
 
-        // The apply adds the CLI's entries to .gitignore, so it zips the folder again.
         h.deps.ensureGitignore = vi.fn(() => true);
         h.deps.zipSourceDir = vi.fn(async (dir: string) => {
           zips += 1;
@@ -956,8 +916,6 @@ describe('app UI flow', () => {
       expect(h.exitCodes).toStrictEqual([130]);
     });
 
-    // Real files: the merge plans and applies on disk, which under load takes longer than the
-    // default 5 s. Every wait in it follows the flow's own progress (`until`, `held.arrived`).
     it(
       'Ctrl+C while a merge prepares its apply writes no source file',
       { timeout: 30_000 },
@@ -968,7 +926,6 @@ describe('app UI flow', () => {
         const run = async (control: boolean): Promise<{ h: Harness; pluginDir: string }> => {
           const pluginDir = await mkdtemp(join(tmp, 'acme-'));
 
-          // This folder is release 3 as is; Live is 4, so the merge rewrites both files.
           for (const [path, text] of Object.entries(original)) {
             await mkdir(dirname(join(pluginDir, path)), { recursive: true });
             await writeFile(join(pluginDir, path), text);
@@ -988,7 +945,6 @@ describe('app UI flow', () => {
               cwd: pluginDir,
               planMerge: real.planMerge,
               readTextFile: real.readTextFile,
-              // The real apply, held while it checks .kizenapp (after its checks, before staging).
               applyMerge: (plan, applyControl) => {
                 const applied = applyMerge(plan, {
                   ...applyControl,
@@ -1026,7 +982,6 @@ describe('app UI flow', () => {
             expect(await readFile(join(pluginDir, path), 'utf8')).toBe(text);
           }
 
-          // No staging folder, and no .kizenapp left behind.
           expect((await readdir(pluginDir)).sort()).toStrictEqual(['kizen.json', 'src']);
           expect(h.store.writes).toBe(0);
           expect(h.exitCodes).toStrictEqual([130]);
@@ -1052,7 +1007,6 @@ describe('app UI flow', () => {
           return download(id);
         });
 
-        // Pull doesn't ask: Ctrl+C lands while its download is pending.
         const { flow } = startFlow(h, { command: 'pull', version: '2', options: { ...API_KEY } });
 
         await held.arrived;
@@ -1098,7 +1052,6 @@ describe('app UI flow', () => {
         };
       });
 
-      // Loading the app fails, but only once Ctrl+C has been pressed.
       h.server.api.listApps.mockReturnValue(failing);
 
       const { flow, phases } = startFlow(h, {
@@ -1119,10 +1072,6 @@ describe('app UI flow', () => {
 
     it('abort during the lineage download writes nothing', async () => {
       const LOCAL = { 'kizen.json': '{"api_name":"acme","local":true}' };
-      /**
-       * `request` against a preview pushed from another machine (based on v3, Live v3), with no
-       * state here, its source download held until Ctrl+C (unless `control`).
-       */
       const run = async (request: AppRequest, control: boolean): Promise<Harness> => {
         const server = makeServer({ live: '3' });
         const previewId = server.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
@@ -1156,7 +1105,6 @@ describe('app UI flow', () => {
         return h;
       };
 
-      // publish --yes: the plan's download of the preview's source, then the promote.
       const publishRequest: AppRequest = { command: 'publish', options: { ...API_KEY, yes: true } };
 
       expect((await run(publishRequest, true)).server.writes()).toStrictEqual(['promote:user-1']);
@@ -1166,7 +1114,6 @@ describe('app UI flow', () => {
       nothingWritten(published);
       expect(published.exitCodes).toStrictEqual([130]);
 
-      // push --yes with no state: the download that recovers the base from your preview.
       const pushRequest: AppRequest = { command: 'push', options: { ...API_KEY, yes: true } };
 
       expect((await run(pushRequest, true)).server.writes()).toContain('publish:false');
@@ -1183,7 +1130,6 @@ describe('app UI flow', () => {
         const held = hold();
         const upload = h.server.api.uploadFile.getMockImplementation();
 
-        // The restored source (with its lineage) is uploaded anew; it waits.
         h.server.api.uploadFile.mockImplementation(async (bytes, opts) => {
           if (opts.source === 'plugin_app_source_filesystem') {
             await held.wait();
@@ -1227,7 +1173,6 @@ describe('app UI flow', () => {
 describe('app UI flow: JS actions', () => {
   const LIVE_ACTIONS = ['hello_action', 'other_action'];
 
-  /** hello_action is linked to Contacts (menu on); other_action is in Live and unlinked. */
   const HELLO_LINK: StoredAssociation = {
     id: 'assoc-1',
     template: 'hello_action',
@@ -1242,7 +1187,6 @@ describe('app UI flow: JS actions', () => {
     includePerformAction: false,
   };
 
-  /** Live v3 has hello_action and other_action; your preview adds new_action. */
   const actionsHarness = (server: ServerOptions = {}, options: HarnessOptions = {}): Harness =>
     makeHarness({
       server: makeServer({
@@ -1264,7 +1208,6 @@ describe('app UI flow: JS actions', () => {
       ...options,
     });
 
-  /** This folder's app, with Live's two actions and new_action. */
   const appWithActions = (): DeployablePlugin =>
     ({
       ...deployable(),
@@ -1281,7 +1224,6 @@ describe('app UI flow: JS actions', () => {
   const UNLINKED_WARNING =
     "These JS actions aren't linked to any object: other_action. Link them: with `--json`, run an action's `linkArgv`, `linkMenuArgv` or `linkNoMenuArgv`; at a terminal, run `appbuilder app actions link` to pick them.";
 
-  /** Picks the choice whose value is `value` on `phase`. */
   const choose = (
     flow: AppFlow,
     phase: Extract<AppPhase, { type: 'choose' }>,
@@ -1296,7 +1238,6 @@ describe('app UI flow: JS actions', () => {
     flow.choose(phase, choice);
   };
 
-  /** A headless --json run's result, for comparing what the terminal shows with it. */
   const headless = async (
     run: (h: Harness) => Promise<void>,
     harness: () => Harness,
@@ -1312,7 +1253,6 @@ describe('app UI flow: JS actions', () => {
     const h = actionsHarness();
     const { flow, until } = startFlow(h, { command: 'actions link', options: { ...API_KEY } });
 
-    // The action, with its status; the first that may need linking starts highlighted.
     const actions = await until('choose');
 
     expect(actions.title).toBe('JS action to link');
@@ -1325,8 +1265,6 @@ describe('app UI flow: JS actions', () => {
     expect(actions.searchable).toBe(true);
     choose(flow, actions, 'other_action');
 
-    // The object: every one the user can see, Contacts included, told apart by api name; the
-    // action's hint object starts highlighted.
     const objects = await until('choose');
 
     expect(objects.title).toBe('Object for other_action');
@@ -1339,7 +1277,6 @@ describe('app UI flow: JS actions', () => {
     expect(objects.searchable).toBe(true);
     choose(flow, objects, DEALS.id);
 
-    // The menu setting: off for a new link unless picked.
     const menu = await until('choose');
 
     expect(menu.choices.map((choice) => choice.value)).toStrictEqual(['no', 'yes']);
@@ -1388,7 +1325,6 @@ describe('app UI flow: JS actions', () => {
     expect(objects.choices.map((choice) => choice.value)).toStrictEqual([DEALS.id, OLD_DEALS.id]);
     choose(flow, objects, OLD_DEALS.id);
 
-    // --no-menu was given, so no menu picker: straight to the confirm.
     const confirm = await until('confirm');
 
     expect(confirm.lines).toContain(
@@ -1429,7 +1365,6 @@ describe('app UI flow: JS actions', () => {
   });
 
   it('cancel at any actions picker or confirm writes nothing', async () => {
-    /** Runs `request`, picks `picks` in order, then Esc on the next picker, or n on the confirm. */
     const cancelAfter = async (
       request: AppRequest,
       picks: string[],
@@ -1466,7 +1401,6 @@ describe('app UI flow: JS actions', () => {
     await cancelAfter(link, ['other_action', DEALS.id, 'yes'], 'confirm');
     await cancelAfter(unlink, [], 'choose');
     await cancelAfter(unlink, ['assoc-1'], 'confirm');
-    // With both arguments, the confirm is the only stop.
     await cancelAfter(
       {
         command: 'actions link',
@@ -1509,7 +1443,6 @@ describe('app UI flow: JS actions', () => {
     expect(confirm.productionPrompt).toBe('Type y to link it on production (y/N)');
     nothingWritten(asked);
 
-    // --yes alone doesn't skip it on production; with --allow-production it writes.
     const yesOnly = onGo();
 
     await startFlow(yesOnly, request({ yes: true })).until('confirm');
@@ -1522,7 +1455,6 @@ describe('app UI flow: JS actions', () => {
       `createAssociation:other_action:${CONTACTS.id}`,
     ]);
 
-    // Unlinking asks the same way.
     const unlink = await startFlow(onGo(), {
       command: 'actions unlink',
       action: 'hello_action',
@@ -1535,8 +1467,6 @@ describe('app UI flow: JS actions', () => {
   });
 
   it('interactive push, publish and versions show the unlinked-actions warning', async () => {
-    // push: the plan and the result say what headless says; then "link JS actions now" links
-    // new_action (only in the preview just pushed, which the push made the one in use) here.
     const pushHarness = (): Harness => actionsHarness({}, { deployable: appWithActions() });
     const pushDry = await headless(
       (h) => runAppPushHeadless({ json: true, ...API_KEY }, h.deps),
@@ -1584,7 +1514,6 @@ describe('app UI flow: JS actions', () => {
 
     const linkConfirm = await pushRun.until('confirm');
 
-    // Picked, so it asks, whatever the push's flags were.
     expect(linkConfirm.prompt).toBe('Link it? (Y/n)');
     expect(
       pushed.server.calls.filter((call) => call.startsWith('createAssociation')),
@@ -1594,7 +1523,6 @@ describe('app UI flow: JS actions', () => {
     expect(pushed.server.writes()).toContain(`createAssociation:new_action:${DEALS.id}`);
     expect(pushed.exitCodes).toStrictEqual([]);
 
-    // publish: the preview's actions before; the new Live version's after, then "Done".
     const publishDry = await headless(
       (h) => runAppPublishHeadless({ json: true, ...API_KEY }, h.deps),
       actionsHarness,
@@ -1624,7 +1552,6 @@ describe('app UI flow: JS actions', () => {
     expect((await publishRun.until('done')).outcome.title).toBe('✓ Published Live v4 of Acme');
     expect(published.exitCodes).toStrictEqual([]);
 
-    // versions: the report and its warnings; Esc on "What next?" ends on the report (exit 0).
     const versionsJson = await headless(
       (h) => runAppVersionsHeadless({ json: true, ...API_KEY }, h.deps),
       actionsHarness,
@@ -1646,7 +1573,6 @@ describe('app UI flow: JS actions', () => {
     expect(looked.exitCodes).toStrictEqual([]);
     nothingWritten(looked);
 
-    // Every action linked: nothing to offer, the report as before.
     const linked = actionsHarness({
       jsActions: { '3': ['hello_action'] },
       previews: {},
@@ -1683,7 +1609,6 @@ describe('app UI flow: JS actions', () => {
         warnings: applied.warnings,
       },
     });
-    // Checked against the app the push installed, not the one from before it.
     expect(next.above?.type === 'done' && next.above.outcome.lines).toEqual(
       expect.arrayContaining([
         'JS actions:',
@@ -1704,7 +1629,6 @@ describe('app UI flow: JS actions', () => {
     const liveWarning = (action: string, object: string): string =>
       `${action} is in the Live version, so this change to its link to ${object} applies to everyone using Live as soon as it's made.`;
 
-    // Linking other_action (in Live): the confirm says so, and so does the result.
     const linked = actionsHarness();
     const linkRun = startFlow(linked, {
       command: 'actions link',
@@ -1720,7 +1644,6 @@ describe('app UI flow: JS actions', () => {
       liveWarning('other_action', 'deal_pipeline'),
     ]);
 
-    // Unlinking hello_action (in Live) from Contacts.
     const unlinkRun = startFlow(actionsHarness(), {
       command: 'actions unlink',
       action: 'hello_action',
@@ -1732,7 +1655,6 @@ describe('app UI flow: JS actions', () => {
       liveWarning('hello_action', 'client_client'),
     ]);
 
-    // Linking new_action (only in your preview): no Live warning.
     const previewRun = startFlow(actionsHarness(), {
       command: 'actions link',
       action: 'new_action',
@@ -1744,7 +1666,6 @@ describe('app UI flow: JS actions', () => {
   });
 
   it('a picked "Link JS actions now" asks before writing, whatever the run\'s --yes and --allow-production', async () => {
-    /** Runs `request` to its end, picks "Link JS actions now", and links other_action to Deals. */
     const linkNow = async (
       h: Harness,
       request: AppRequest,
@@ -1772,7 +1693,6 @@ describe('app UI flow: JS actions', () => {
       );
 
     for (const command of ['push', 'publish'] as const) {
-      // --yes wrote the push or publish without asking; the link it offers still asks.
       const staging = actionsHarness({}, { deployable: appWithActions() });
       const yes = await linkNow(staging, { command, options: { ...API_KEY, yes: true } });
 
@@ -1787,8 +1707,6 @@ describe('app UI flow: JS actions', () => {
         `createAssociation:other_action:${DEALS.id}`,
       ]);
 
-      // On production, --allow-production wrote the push or publish; the link gets the strict
-      // confirm and writes nothing until it's accepted.
       const go = onGo();
       const allowed = await linkNow(go, {
         command,
@@ -1874,7 +1792,6 @@ describe('app UI flow: preview delete', () => {
     expect(h.entry()?.previewSourcePackageId).toBeUndefined();
     expect(h.exitCodes).toStrictEqual([]);
 
-    // Someone else's: the confirm shows why to think twice, and a "n" deletes nothing.
     const other = previewHarness();
     const otherRun = startFlow(other, {
       command: 'preview delete',
@@ -1885,7 +1802,6 @@ describe('app UI flow: preview delete', () => {
     expect(otherConfirm.lines).toContain(
       `Preview: Bo B (${OTHER}), last updated 2026-10-21T00:00:00.000Z`,
     );
-    // Bo uses his own preview, so deleting it switches him away.
     expect(otherConfirm.warnings).toStrictEqual([
       NOT_YOUR_PREVIEW_WARNING('Bo B'),
       PREVIEW_IN_USE_WARNING(1, false),
@@ -1898,7 +1814,6 @@ describe('app UI flow: preview delete', () => {
     expect(other.exitCodes).toStrictEqual([1]);
     nothingWritten(other);
 
-    // Ctrl+C at the confirm, then accept: nothing either.
     const interrupted = previewHarness();
     const interruptedRun = startFlow(interrupted, {
       command: 'preview delete',
@@ -1912,7 +1827,6 @@ describe('app UI flow: preview delete', () => {
     nothingWritten(interrupted);
     expect(interrupted.exitCodes).toStrictEqual([130]);
 
-    // Production: the strict confirm, which --yes alone doesn't skip.
     const onGo = (): Harness =>
       previewHarness({
         credentials: { environment: 'go' },
@@ -1936,7 +1850,6 @@ describe('app UI flow: preview delete', () => {
     }).until('done');
     expect(allowed.server.writes()).toStrictEqual([`deletePreview:${USER}`]);
 
-    // --dry-run shows the plan and stops.
     const dry = previewHarness();
     const dryDone = await startFlow(dry, {
       command: 'preview delete',
@@ -1954,7 +1867,6 @@ describe('app UI flow: preview delete', () => {
         state: [stateEntry()],
       });
 
-    // --yes skips the confirm, but not for deleting the app; --delete-app does.
     const h = onlyVersion();
     const { flow, until } = startFlow(h, {
       command: 'preview delete',
@@ -1966,7 +1878,6 @@ describe('app UI flow: preview delete', () => {
     expect(confirm.lines).toContain('Delete: this preview, and with it the app');
     nothingWritten(h);
 
-    // Bo pushes a preview while the confirm is open: the app keeps a version.
     h.server.state.previews.set(
       OTHER,
       yourPreview({ ownerName: 'Bo B', updated: '2026-10-21T00:00:00.000Z' }),
@@ -2024,7 +1935,6 @@ describe('app UI flow: preview delete', () => {
       'Type y to delete the preview and the whole app on production (y/N)',
     );
 
-    // A preview whose app stays keeps the plain prompt off production.
     const stays = await confirmOf({
       [USER]: yourPreview(),
       [OTHER]: yourPreview({ ownerName: 'Bo B' }),
@@ -2065,7 +1975,6 @@ describe('app UI flow: the preview base on the server', () => {
 
     server.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
 
-    // Even with --yes, the decision waits for a pick.
     const withYes = makeHarness({ server, files: DIVERGED });
     const asked = await startFlow(withYes, {
       command: 'push',
@@ -2096,7 +2005,6 @@ describe('app UI flow: the preview base on the server', () => {
 
     flow.choose(choose, preview);
 
-    // A picked push still shows its plan and asks.
     const confirm = await until('confirm');
 
     expect(confirm.lines).toContain(
@@ -2106,7 +2014,6 @@ describe('app UI flow: the preview base on the server', () => {
     flow.accept(confirm);
     await until('done');
 
-    // Pushed once (no second push after it), with your preview's base.
     expect(h.server.writes().filter((call) => call === 'publish:false')).toHaveLength(1);
     expect(h.entry()).toMatchObject({
       folderBaseLiveVersion: '3',

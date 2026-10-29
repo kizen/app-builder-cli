@@ -2,11 +2,6 @@ import { errorCause, isRecord } from './guards.js';
 import { KizenApiError } from './kizenClient.js';
 import type { KizenClient } from './kizenTypes.js';
 
-/**
- * Wire types and an API wrapper for per-business "Business Apps"
- * (`/external-integrations/plugin-apps/{businessId}/…`) and the S3 file upload/download they use.
- */
-
 export type BusinessAppStatus = 'live' | 'preview' | 'disabled';
 
 export type BusinessAppVersionStatus = 'live' | 'released' | 'preview';
@@ -21,11 +16,8 @@ export interface BusinessAppVersionRow {
   version: string;
   status: BusinessAppVersionStatus;
   preview_owner: BusinessAppPreviewOwner | null;
-  /** A preview's: the users using it now, its owner included. Null for a release. */
   active_users_count: number | null;
-  /** A preview's: the users who have it installed. Null for a release. */
   installed_count: number | null;
-  /** Whether this is the version the signed-in user is using. */
   is_current_for_viewer: boolean;
   updated: string | null;
   published_at: string | null;
@@ -70,7 +62,6 @@ export interface BusinessAppArtifacts {
   automation_action_configs: unknown[];
 }
 
-/** The body of `POST …/{businessId}/publish`. `api_name` is the base (unsuffixed) name. */
 export interface BusinessAppPublishBody {
   name: string;
   api_name: string;
@@ -86,13 +77,10 @@ export interface BusinessAppPublishBody {
   release_notes?: string;
   /** true publishes a new numbered release; false updates the caller's preview. */
   release: boolean;
-  /** The S3 file id of the source zip (`plugin_app_source_filesystem`). */
   source_filesystem_package: string;
-  /** The S3 file id of the thumbnail (`public_image`); a release requires one. */
   thumbnail: string | null;
 }
 
-/** A stored version or preview, in the publish payload's shape (api_name is the base name). */
 export type BusinessAppDefinition = Omit<
   BusinessAppPublishBody,
   'release' | 'source_filesystem_package'
@@ -105,7 +93,6 @@ export type BusinessAppDefinition = Omit<
 export interface PublishResult {
   api_name: string;
   base_api_name: string;
-  /** "0" for a preview, else the new release number. */
   version: string;
 }
 
@@ -124,7 +111,6 @@ export interface UploadFileOptions {
   isPublic?: boolean;
 }
 
-/** A JS action template as an association names it. */
 export interface ActionAssociationTemplate {
   id: string;
   api_name: string;
@@ -132,7 +118,6 @@ export interface ActionAssociationTemplate {
   hint_object_name: string | null;
 }
 
-/** The object an association links to; `name` is its api name (`client_client`). */
 export interface ActionAssociationObject {
   id: string;
   name: string;
@@ -140,39 +125,30 @@ export interface ActionAssociationObject {
   entity_name?: string;
 }
 
-/**
- * One JS action template ↔ object link of the app's install. The server lists only links whose
- * template is in the install's Live version.
- */
+/** The server lists only links whose template is in the install's Live version. */
 export interface ActionAssociation {
   id: string;
-  /** Whether the action shows in that object's Perform Action menus; null when never set. */
   include_perform_action: boolean | null;
   browser_js_action_template: ActionAssociationTemplate;
   custom_object: ActionAssociationObject;
 }
 
 export interface CreateActionAssociationInput {
-  /** The suffixed api_name of the app. */
   appApiName: string;
   actionApiName: string;
   objectId: string;
   includePerformAction: boolean;
 }
 
-/** An object actions can be linked to, Contacts included (`custom_only=false`). */
 export interface BusinessObject {
   id: string;
-  /** The api name (`client_client`). */
   name: string;
-  /** The display name (`Contacts`). */
   objectName: string;
   entityName: string | null;
 }
 
 export type BusinessAppErrorCode = 'thumbnail_required' | 'file_too_large';
 
-/** A local failure, raised before the request it would have made. */
 export class BusinessAppError extends Error {
   readonly code: BusinessAppErrorCode;
 
@@ -194,12 +170,9 @@ export interface BusinessAppsApi {
   publish(body: BusinessAppPublishBody): Promise<PublishResult>;
   promotePreview(apiName: string, ownerId: string): Promise<PromoteResult>;
   deletePreview(apiName: string, ownerId: string): Promise<void>;
-  /** Uploads through a presigned S3 POST and confirms it; resolves to the Kizen file id. */
   uploadFile(bytes: Uint8Array, opts: UploadFileOptions): Promise<string>;
   downloadFile(id: string): Promise<Uint8Array>;
-  /** The install's JS action ↔ object links; `appApiName` is the suffixed api_name. */
   listActionAssociations(appApiName: string): Promise<ActionAssociation[]>;
-  /** Creates a link (the flat endpoint the Kizen UI uses); the server answers with no id. */
   createActionAssociation(input: CreateActionAssociationInput): Promise<void>;
   updateActionAssociation(
     appApiName: string,
@@ -207,24 +180,20 @@ export interface BusinessAppsApi {
     includePerformAction: boolean,
   ): Promise<void>;
   deleteActionAssociation(associationId: string): Promise<void>;
-  /** Every object the signed-in user can see, Contacts included. */
   listObjects(): Promise<BusinessObject[]>;
 }
 
 const segment = encodeURIComponent;
 
-/** Placeholder copy. */
 export const BUSINESS_APPS_UNAVAILABLE_MESSAGE =
   "Business Apps aren't available on this Kizen environment yet.";
 
-/** Placeholder copy. */
 export const BUSINESS_APPS_UNAVAILABLE_HINT =
   'Kizen has no Business Apps list on this environment (it answered 404). Use an environment where Business Apps are available, with --env.';
 
 const isNotFound = (error: unknown): error is KizenApiError =>
   error instanceof KizenApiError && error.kind === 'not_found';
 
-/** The list endpoint's 404, as a failure that says Business Apps aren't on this environment. */
 const businessAppsUnavailable = (error: KizenApiError): KizenApiError =>
   new KizenApiError('not_found', BUSINESS_APPS_UNAVAILABLE_MESSAGE, {
     ...(error.status !== undefined && { status: error.status }),
@@ -333,7 +302,6 @@ export function createBusinessAppsApi(
   const appPath = (apiName: string): string => `${base}/${segment(apiName)}`;
   const previewPath = (apiName: string, ownerId: string): string =>
     `${appPath(apiName)}/previews/${segment(ownerId)}`;
-  // The install's routes take the suffixed api_name; one install serves Live and every preview.
   const associationsPath = (appApiName: string): string =>
     `/external-integrations/business-plugin-apps/${segment(appApiName)}/browser-js-action-template-associations`;
   const flatAssociationPath = '/external-integrations/browser-js-action-template-association';
@@ -399,8 +367,7 @@ export function createBusinessAppsApi(
       try {
         data = await client.requestJson('GET', path);
       } catch (error) {
-        // The list itself never answers 404 (webapp `list_apps` returns an empty list when nothing
-        // matches), so a 404 means this environment has no such endpoint.
+        // webapp `list_apps` never 404s, so a 404 means this environment lacks the endpoint.
         throw isNotFound(error) ? businessAppsUnavailable(error) : error;
       }
 
@@ -430,7 +397,6 @@ export function createBusinessAppsApi(
     },
 
     async publish(body) {
-      // The server rejects this too, but only after the uploads; fail before any request.
       if (body.release && !body.thumbnail) {
         throw new BusinessAppError('thumbnail_required', THUMBNAIL_REQUIRED_MESSAGE);
       }

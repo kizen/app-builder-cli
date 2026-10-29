@@ -46,13 +46,8 @@ export class OAuthError extends Error {
   }
 }
 
-/** The errno codes that mean the store is full: no space left, or over the user's quota. */
 const DISK_FULL_ERRNO_CODES: readonly string[] = ['ENOSPC', 'EDQUOT'];
 
-/**
- * The errno codes that mean the session store can't be written here: a sandbox (EPERM, EACCES,
- * EROFS), usually, or a full disk.
- */
 export const UNWRITABLE_ERRNO_CODES: readonly string[] = [
   'EPERM',
   'EACCES',
@@ -60,14 +55,9 @@ export const UNWRITABLE_ERRNO_CODES: readonly string[] = [
   ...DISK_FULL_ERRNO_CODES,
 ];
 
-/**
- * The session store can't be written (one of `UNWRITABLE_ERRNO_CODES`), as under an agent's
- * sandbox that only allows writes to the project, or on a full disk. `hint` says how to fix it.
- */
 export class SessionStoreUnwritableError extends OAuthError {
   readonly hint: string;
 
-  /** @param credentialsDir the directory that needs write access (the store's parent). */
   constructor(storeDir: string, credentialsDir: string, errno: string) {
     const full = DISK_FULL_ERRNO_CODES.includes(errno);
 

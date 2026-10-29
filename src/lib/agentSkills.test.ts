@@ -4,12 +4,6 @@ import { createProgram } from '../program.js';
 import { AGENT_HARNESSES, renderSkillTemplate, type AgentHarness } from './agentHarness.js';
 import { agentFiles, MANAGED_SKILL_NAMES } from './createCopilotFiles.js';
 
-/**
- * The skills appbuilder writes for coding agents, checked as an agent reads them: rendered for
- * each harness, with frontmatter the harnesses accept, and naming only commands and flags the CLI
- * really has.
- */
-
 const skillFiles = (harness: AgentHarness): { path: string; content: string }[] =>
   agentFiles(harness).filter((file) => file.path.endsWith('.md'));
 
@@ -72,16 +66,13 @@ describe.each(HARNESS_CASES)('the $harness skills', ({ harness }) => {
       );
       const description = fields.get('description') ?? '';
 
-      // The Agent Skills format: name is lowercase words and hyphens, at most 64 characters (Codex
-      // enforces the 64), and matches the folder.
+      // Agent Skills format: lowercase words and hyphens, at most 64 characters.
       expect(fields.get('name')).toBe(name);
       expect(name).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
       expect(name.length).toBeLessThanOrEqual(64);
-      // Required by Codex; at most 1,024 characters in the Agent Skills format (Claude Code cuts
-      // the listing at 1,536).
+      // Required by Codex; at most 1,024 characters in the Agent Skills format.
       expect(description.length).toBeGreaterThan(0);
       expect(description.length).toBeLessThanOrEqual(1024);
-      // A plain YAML scalar: a ": " or a leading quote or indicator would change how it parses.
       expect(description).not.toContain(': ');
       expect(description).not.toMatch(/^[`'"&*!|>%@[{#-]/);
       expect([...fields.keys()]).toStrictEqual(['name', 'description']);
@@ -95,7 +86,6 @@ describe.each(HARNESS_CASES)('the $harness skills', ({ harness }) => {
   });
 });
 
-/** The command a code span names (`appbuilder block push …`) and the flags it uses. */
 function commandOf(
   program: Command,
   span: string,
@@ -142,10 +132,8 @@ describe.each(HARNESS_CASES)(
     const program = createProgram();
     const appSubcommands = program.commands.find((command) => command.name() === 'app')?.commands;
     const everyFlag = new Set(allCommands(program).flatMap((command) => [...flagsOf(command)]));
-    // Every `appbuilder app …` command's, nested ones (`app actions link`) included.
     const appCommands = (appSubcommands ?? []).flatMap(allCommands);
     const appFlags = new Set(appCommands.flatMap((command) => [...flagsOf(command)]));
-    /** A command's runnable path: itself, or each command a group (`app actions`) holds. */
     const leafPaths = (command: Command, path: string): string[] =>
       command.commands.length === 0
         ? [path]
@@ -163,8 +151,6 @@ describe.each(HARNESS_CASES)(
         for (const span of commandSpans) {
           const { command, path, flags } = commandOf(program, span);
 
-          // A span names at least one real command, and its words all resolve: a group (`appbuilder
-          // app`) only on its own, with nothing after it that isn't a subcommand.
           expect(path, span).not.toBe('appbuilder');
 
           if (command.commands.length > 0) {
@@ -193,7 +179,6 @@ describe.each(HARNESS_CASES)(
     });
 
     it.each(MANAGED_SKILL_NAMES)('%s: every flag span is a flag the CLI declares', (name) => {
-      // The business-apps skill's flags belong to `appbuilder app`; the block skill's to any command.
       const known = name === 'kizen-business-apps' ? appFlags : everyFlag;
       const flagSpans = codeSpans(skillFile(harness, name))
         .filter((span) => /^--?[a-z][a-z-]*(\/--[a-z-]+)?( <[^>]+>)?$/.test(span))

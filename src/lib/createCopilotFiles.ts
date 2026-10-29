@@ -32,10 +32,6 @@ export const KIZEN_DATA_LIB_FILE = 'lib/kizenData.js';
 export const kizenDataLibPath = (entryDir = 'src'): string =>
   entryDir === '' ? KIZEN_DATA_LIB_FILE : `${entryDir}/${KIZEN_DATA_LIB_FILE}`;
 
-/**
- * The templates of each managed skill (`MANAGED_SKILL_NAMES`), by file name. Every harness gets the
- * same skills from these templates, rendered for it (`renderSkillTemplate`).
- */
 const SKILL_TEMPLATES: Readonly<Record<ManagedSkillName, readonly [string, string][]>> = {
   'kizen-custom-block': [
     ['SKILL.md', kizenCustomBlockSkill],
@@ -46,14 +42,9 @@ const SKILL_TEMPLATES: Readonly<Record<ManagedSkillName, readonly [string, strin
 
 export { MANAGED_SKILL_NAMES };
 
-/** `<skills dir>/<name>/SKILL.md` for each managed skill, for `harness`. */
 export const managedSkillEntryPaths = (harness: AgentHarness): string[] =>
   MANAGED_SKILL_NAMES.map((name) => `${AGENT_HARNESS_INFO[harness].skillsDir}/${name}/SKILL.md`);
 
-/**
- * Every managed skill file for `harness`, plus the Kizen data lib under each of `libEntryDirs`.
- * The lib is opt-in, so an empty list (the default) scaffolds only the skills.
- */
 export function agentFiles(
   harness: AgentHarness,
   libEntryDirs: readonly string[] = [],
@@ -74,10 +65,8 @@ export function agentFiles(
   ];
 }
 
-/** The Claude Code skills (`.claude/skills/`), plus the data lib under each of `libEntryDirs`. */
 export const claudeFiles = (libEntryDirs: readonly string[] = []): ScaffoldedFile[] =>
   agentFiles('claude', libEntryDirs);
 
-/** The Codex skills (`.agents/skills/`), plus the data lib under each of `libEntryDirs`. */
 export const codexFiles = (libEntryDirs: readonly string[] = []): ScaffoldedFile[] =>
   agentFiles('codex', libEntryDirs);

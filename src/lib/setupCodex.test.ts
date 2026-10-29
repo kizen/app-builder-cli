@@ -82,7 +82,6 @@ describe('runSetupCodex', () => {
     }
 
     expect(await read(BUSINESS_PATH)).toContain('appbuilder setup-codex');
-    // Nothing for Claude Code, and no data lib unless asked.
     await expect(stat(join(dir, '.claude'))).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(stat(join(dir, LIB_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
   });
@@ -175,7 +174,6 @@ describe('runSetupCodex', () => {
         await readFile(join(outside, 'skills', 'kizen-custom-block', 'SKILL.md'), 'utf-8'),
       ).toBe('mine\n');
       expect((await readdir(join(outside, 'skills'))).sort()).toStrictEqual(['kizen-custom-block']);
-      // Not even the data lib, which was safe on its own.
       await expect(stat(join(dir, LIB_PATH))).rejects.toMatchObject({ code: 'ENOENT' });
     } finally {
       await rm(outside, { recursive: true, force: true });

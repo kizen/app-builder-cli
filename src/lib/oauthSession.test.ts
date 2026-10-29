@@ -49,15 +49,12 @@ const hooks = vi.hoisted(() => ({
     | { matches: (to: string) => boolean; reached: () => void; gate: Promise<void> }
     | undefined,
   onCreateTaken: undefined as ((path: string) => void) | undefined,
-  /** Writes under this directory fail with EPERM, as under a sandbox that denies them. */
   denyWritesUnder: undefined as string | undefined,
-  /** A file write under `root` of more than `bytes` fails with ENOSPC: a nearly full disk. */
   diskFree: undefined as { root: string; bytes: number } | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const fs = await importOriginal<typeof FsPromisesModule>();
-  /** Throws EPERM for a write under `hooks.denyWritesUnder`, as macOS's sandbox does. */
   const deny = (operation: string, path: unknown): void => {
     const root = hooks.denyWritesUnder;
 
@@ -1429,7 +1426,6 @@ describe('createDefaultTokenProvider', () => {
 });
 
 describe("a session store this process can't write", () => {
-  /** The account file's bytes, to show a failed refresh left it as it was. */
   const accountBytes = (): Promise<string> =>
     readFile(store.accountPath('staging', ACCOUNT_A), 'utf-8');
 
@@ -1441,7 +1437,6 @@ describe("a session store this process can't write", () => {
 
     hooks.denyWritesUnder = dir;
 
-    // An expiring token, and a 401 on a fresh one: neither reaches the token endpoint.
     const expiring = await rejectionOf(
       provider(server).getAccessToken(),
       SessionStoreUnwritableError,
@@ -1459,7 +1454,6 @@ describe("a session store this process can't write", () => {
     hooks.denyWritesUnder = undefined;
 
     expect(await accountBytes()).toBe(before);
-    // Still signed in with the same refresh token: a refresh once the store is writable works.
     await expect(provider(server).getAccessToken()).resolves.toBe('access-1');
     expect(server.tokenRequests()[0]?.get('refresh_token')).toBe('refresh-0');
   });
@@ -1485,7 +1479,6 @@ describe("a session store this process can't write", () => {
       message: `Can't write to ${store.dir} (EPERM), where appbuilder keeps its sign-in sessions.`,
       hint: `appbuilder needs write access to ${dir} to keep you signed in. Under Codex, re-run the command with sandbox_permissions: "require_escalated" (prefix_rule: ["appbuilder"]). Under the Claude Code sandbox, add "appbuilder *" to sandbox.excludedCommands in your user settings (~/.claude/settings.json); allowing writes to ${dir} alone isn't enough, since appbuilder also needs network access the sandbox blocks.`,
     });
-    // Neither the token endpoint nor the API was called.
     expect(server.fetch).toHaveBeenCalledTimes(0);
   });
 
@@ -1495,7 +1488,6 @@ describe("a session store this process can't write", () => {
     const before = await accountBytes();
     const server = fakeAuthServer();
 
-    // Room for a session file (under 1 KiB), not for the 4 KiB probe.
     hooks.diskFree = { root: dir, bytes: 2048 };
 
     const error = await rejectionOf(provider(server).getAccessToken(), SessionStoreUnwritableError);

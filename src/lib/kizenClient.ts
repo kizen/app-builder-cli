@@ -80,7 +80,6 @@ export class KizenApiError extends Error {
   readonly kind: KizenApiErrorKind;
   readonly status: number | undefined;
   readonly hint: string | undefined;
-  /** The parsed body of a failed response (a DRF error dict, say), or undefined when it had none. */
   readonly details: unknown;
 
   constructor(
@@ -238,7 +237,6 @@ const TOKEN_ERROR_KINDS = new Map<OAuthLocalErrorCode, KizenApiErrorKind>([
   ['session_store_unwritable', 'session_store_unwritable'],
 ]);
 
-/** `cause` keeps the token provider's error, so a caller can tell a missing sign-in apart. */
 function tokenError(err: unknown, environment: Environment): KizenApiError {
   const message = errorMessage(err);
   const kind =
@@ -291,9 +289,7 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     };
   };
 
-  // Sends one authenticated request, refreshing and retrying once after a Bearer 401.
-  // Redirects are followed by hand, and only within the API origin: fetch's own following would
-  // forward the X-API-KEY / X-USER-ID / X-BUSINESS-ID headers to whatever host a 3xx names.
+  // fetch would forward the auth headers to whatever host a redirect names.
   const send = async (
     method: string,
     url: string,
@@ -332,7 +328,6 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
       for (let hops = 0; ; hops += 1) {
         const res = await fetchOnce(target, hopMethod, hopBody, authHeaders);
 
-        // A runtime that hides manual redirects can't be followed safely.
         if (res.type === 'opaqueredirect') {
           throw new KizenApiError(
             'api_error',
@@ -390,7 +385,6 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
     const { headers: authHeaders, retry } = await authorize();
     let res = await attempt(authHeaders);
 
-    // One refresh and retry; a second 401 falls through to the auth error.
     if (res.status === 401 && retry) {
       await res.body?.cancel().catch(() => undefined);
       res = await attempt(await retry());
@@ -449,7 +443,6 @@ export function createKizenClient(options: KizenClientOptions): KizenSessionClie
       ? undefined
       : { contentType: 'application/json', payload: JSON.stringify(body) };
 
-  // The public primitives take an API path only, so Kizen credentials never go to another host.
   const apiPath = (method: string, path: string): string => {
     if (!path.startsWith('/') || path.startsWith('//')) {
       throw new KizenApiError(

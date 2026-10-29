@@ -40,7 +40,6 @@ export function createCommand(program: Command): void {
     .option('--include-lib', 'also install the Kizen data helper library (src/lib/kizenData.js)')
     .option('--no-interactive', NO_INTERACTIVE_HELP)
     .action(async (parsed: CreateOptions & Interactive) => {
-      // Split off before `hasNonInteractiveFlags`, which counts every option that's set.
       const { noInteractive, options } = takeInteractiveFlag(parsed);
       const parentDir = process.cwd();
       const store = createOAuthStore();

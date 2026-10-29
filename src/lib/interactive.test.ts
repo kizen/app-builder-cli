@@ -3,7 +3,6 @@ import { isInteractive, takeInteractiveFlag, type InteractiveInput } from './int
 
 const TTY = { isTTY: true };
 
-/** A person at a terminal: both streams TTYs, an ordinary TERM, no flags. */
 const plain = (overrides: Partial<InteractiveInput> = {}): InteractiveInput => ({
   stdin: TTY,
   stdout: TTY,
@@ -47,8 +46,6 @@ describe('isInteractive', () => {
   });
 
   it('isInteractive ignores CODEX_COMPANION_* variables', () => {
-    // The Codex plugin for Claude Code sets these inside a Claude Code session; only the exact
-    // CODEX_CI name means Codex runs this process.
     expect(
       isInteractive(
         plain({

@@ -104,7 +104,6 @@ vi.mock('./lib/kizenAdmin.js', async (importOriginal) => {
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The sixteen commands, in the order `createProgram` registers them. */
 const COMMAND_NAMES = [
   'create',
   'setup-claude',
@@ -249,7 +248,6 @@ function subcommand(program: Command, name: string): Command {
   return found;
 }
 
-/** A command's runnable commands: itself, or the leaves of its subcommand groups. */
 const leafCommands = (command: Command): Command[] =>
   command.commands.length === 0 ? [command] : command.commands.flatMap(leafCommands);
 
@@ -383,9 +381,6 @@ describe('encrypt command options', () => {
 
   it('leaves every encrypt option unset before parsing', () => {
     // The action falls back to interactive prompts / kizen.json for anything
-    // missing, so no encrypt flag may carry a commander-level default. The one
-    // exception is commander's own: `--no-interactive` defaults `interactive` to
-    // true, and the action splits it off (`takeInteractiveFlag`).
     expect(subcommand(createProgram(), 'encrypt').opts()).toStrictEqual({ interactive: true });
   });
 });
@@ -484,7 +479,6 @@ describe('block command', () => {
   it('leaves every push and targets option unset before parsing', () => {
     const block = subcommand(createProgram(), 'block');
 
-    // But `--no-interactive`'s commander default, which the action splits off.
     expect(subcommand(block, 'push').opts()).toStrictEqual({ interactive: true });
     expect(subcommand(block, 'targets').opts()).toStrictEqual({});
   });
@@ -566,7 +560,6 @@ describe('app command', () => {
     [
       'link',
       'Link a JS action to an object, or change whether it shows in its menus',
-      // Optional so a terminal can pick them; headless, a missing one is a usage_error.
       [
         ['action', false],
         ['object', false],
@@ -724,7 +717,6 @@ describe('app command', () => {
   it('leaves every app option unset before parsing', () => {
     const app = subcommand(createProgram(), 'app');
 
-    // But `--no-interactive`'s commander default, which the actions split off.
     for (const command of leafCommands(app)) {
       expect(command.opts(), command.name()).toStrictEqual({ interactive: true });
     }
@@ -750,7 +742,6 @@ describe('--no-interactive', () => {
 
       expect(flag?.negate, command.name()).toBe(true);
       expect(flag?.attributeName(), command.name()).toBe('interactive');
-      // No positive --interactive alongside it, which would change the default.
       expect(command.options.some((opt) => opt.flags === '--interactive')).toBe(false);
     }
   });
@@ -1028,7 +1019,6 @@ describe('(r) option parsing of other commands is unchanged', () => {
     return { out, code: undefined };
   }
 
-  // `app merge` takes --release <n> rather than --version <n> because of this.
   it.each([
     [['dev', '-V']],
     [['block', 'push', '--version']],

@@ -27,7 +27,6 @@ const put = async (path: string, content: string): Promise<void> => {
   await writeFile(join(dir, path), content, 'utf-8');
 };
 
-/** Every bundled file for `harness`, the data lib under src/ included. */
 const installAll = async (harness: AgentHarness): Promise<void> => {
   for (const file of agentFiles(harness, ['src'])) {
     await put(file.path, file.content);
@@ -54,7 +53,6 @@ describe('stale detection covers every managed skill', () => {
       expect(await isAgentFilesStale(dir, harness)).toBe(false);
     });
 
-    // Every managed skill file, one at a time: edited, then missing while the rest are installed.
     it.each(skillFiles(harness))('is stale when %s differs', async (path) => {
       await installAll(harness);
       await put(path, 'edited locally\n');

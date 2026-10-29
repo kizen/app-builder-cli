@@ -11,25 +11,6 @@ import { errorCause, isErrnoCode } from './guards.js';
 
 const execFileAsync = promisify(execFile);
 
-/**
- * The source zip a Business App publish uploads (`plugin_app_source_filesystem`), and the
- * reverse for pulling one down.
- *
- * Which files go in:
- * 1. In a git work tree, what `git ls-files --cached --others --exclude-standard` lists (tracked
- *    files, plus untracked ones no .gitignore / info/exclude / global exclude drops). If git
- *    lists nothing (the enclosing repository ignores the folder), the zip is refused. When git
- *    is missing or the folder isn't in a work tree, every file under it minus the root
- *    `.gitignore`.
- * 2. Minus the root `.kizenignore` (gitignore syntax), in both modes.
- * 3. Minus the fixed safety list below and the CLI-managed agent skill folders
- *    (`isManagedSkillPath`), always; no negation in either file brings those back.
- * Only regular files physically under the directory go in: a symlink is never followed, at any
- * depth, whichever mode listed the file. Git's listing is treated as untrusted input.
- * The result must include `kizen.json`.
- */
-
-/** Directories left out at any depth: dependencies, VCS, CLI state, build output, caches. */
 export const SOURCE_ZIP_SKIP_DIRS: ReadonlySet<string> = new Set([
   'node_modules',
   '.git',
@@ -40,7 +21,6 @@ export const SOURCE_ZIP_SKIP_DIRS: ReadonlySet<string> = new Set([
   'dist',
 ]);
 
-/** Files left out at any depth; `.env.*` is matched separately. */
 export const SOURCE_ZIP_SKIP_FILES: ReadonlySet<string> = new Set([
   '.DS_Store',
   '.env',
@@ -54,31 +34,19 @@ const SAFETY_NAMES: ReadonlySet<string> = new Set(
   [...SOURCE_ZIP_SKIP_DIRS, ...SOURCE_ZIP_SKIP_FILES].map((name) => name.toLowerCase()),
 );
 
-/**
- * Whether the safety list drops a path segment. Case-insensitive, since macOS and Windows
- * filesystems are, and every name counts as a file or a directory (a `.env/` folder is dropped).
- * Trailing dots and spaces are ignored because Windows strips them (`.git.` opens `.git`).
- * 8.3 short names (`GIT~1`) aren't recognized.
- */
+/** Windows strips trailing dots and spaces (`.git.` opens `.git`). 8.3 names aren't handled. */
 const isSafetySegment = (segment: string): boolean => {
   const name = segment.toLowerCase().replace(/[. ]+$/, '');
 
   return SAFETY_NAMES.has(name) || name.startsWith('.env.');
 };
 
-/** A path segment as a case-insensitive filesystem, and Windows' trailing-dot stripping, sees it. */
 const foldSegment = (segment: string): string => segment.toLowerCase().replace(/[. ]+$/, '');
 
 const MANAGED_SKILL_SEGMENTS: readonly string[][] = MANAGED_SKILL_DIRS.map((dir) =>
   dir.split('/').map(foldSegment),
 );
 
-/**
- * Whether a zip-relative path is in, or is, one of the skill folders appbuilder manages for coding
- * agents (`.claude/skills/kizen-custom-block`, `.agents/skills/kizen-business-apps`, …) at the
- * plugin root. The CLI rewrites them on every upgrade, so shipping them would only make merges
- * between CLI versions conflict. A user's own skills in those folders aren't affected.
- */
 export const isManagedSkillPath = (path: string): boolean => {
   const segments = path.replace(/\/$/, '').split('/').map(foldSegment);
 
@@ -89,30 +57,16 @@ export const isManagedSkillPath = (path: string): boolean => {
   );
 };
 
-/**
- * Whether the safety list drops a zip-relative path (a trailing `/` marks a directory): a
- * safety-listed segment anywhere, or a managed skill folder (`isManagedSkillPath`).
- */
 export const isSafetyExcluded = (path: string): boolean =>
   path.replace(/\/$/, '').split('/').some(isSafetySegment) || isManagedSkillPath(path);
 
-/**
- * DOS timestamps are local time, so the fixed time is built from local parts to come out the
- * same in every time zone. 1980-01-01 is the earliest a zip can hold.
- */
+/** DOS timestamps are local time; 1980-01-01 is the earliest a zip can hold. */
 const FIXED_MTIME = new Date(1980, 0, 1, 0, 0, 0);
 
 const GIT_TIMEOUT_MS = 15_000;
 
-/** Runs git with `args` in `cwd`, resolving to stdout; rejects when git fails or is missing. */
 export type GitRunner = (args: readonly string[], cwd: string) => Promise<string>;
 
-/**
- * Git's own variables that are kept for the child. The rest (GIT_DIR, GIT_WORK_TREE,
- * GIT_INDEX_FILE, GIT_CONFIG_PARAMETERS, …) are dropped, so git finds the plugin directory's own
- * repository and nothing re-enables what `GIT_SAFE_ARGS` turns off. The global config, and with
- * it the user's global excludes, still applies.
- */
 const GIT_ENV_KEPT: ReadonlySet<string> = new Set([
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
@@ -127,11 +81,7 @@ export function gitChildEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   );
 }
 
-/**
- * Listing files must never run code from the repository's config. `ls-files` runs a
- * `core.fsmonitor` command (`rev-parse` doesn't), so that's turned off; hooks are pointed nowhere
- * and optional index writes skipped as a further safeguard.
- */
+/** `ls-files` runs the repository's `core.fsmonitor` command. */
 export const GIT_SAFE_ARGS: readonly string[] = [
   '--no-optional-locks',
   '-c',
@@ -143,7 +93,6 @@ export const GIT_SAFE_ARGS: readonly string[] = [
 interface ExecutableLookup {
   env: NodeJS.ProcessEnv;
   platform: NodeJS.Platform;
-  /** Whether an absolute path is a runnable file. */
   isExecutable: (path: string) => boolean;
 }
 
@@ -161,12 +110,7 @@ const defaultIsExecutable = (path: string): boolean => {
   }
 };
 
-/**
- * The absolute path of `name` found on PATH, or undefined. Only absolute PATH entries are
- * searched, never the working directory: spawning a bare name can find a program in the cwd on
- * Windows, and the cwd here is a plugin folder that came from someone else. On win32 each
- * PATHEXT extension is tried, and the PATH variable's name is matched case-insensitively.
- */
+/** On Windows, spawning a bare name can run a program from the working directory. */
 export function resolveExecutable(
   name: string,
   { env, platform, isExecutable }: ExecutableLookup,
@@ -200,7 +144,6 @@ export function resolveExecutable(
 
 let gitPath: string | null | undefined;
 
-/** git's absolute path, resolved once; rejects like a failed spawn (`ENOENT`) when there's none. */
 export function resolveGit(): string {
   gitPath ??=
     resolveExecutable('git', {
@@ -230,10 +173,8 @@ export const runGit: GitRunner = async (args, cwd) =>
 export type SourceZipMode = 'git' | 'walk';
 
 export interface SourceFileList {
-  /** Zip-relative paths, sorted by code unit. */
   files: string[];
   mode: SourceZipMode;
-  /** Set when git couldn't be used, saying what the zip honored instead. */
   notice?: string;
 }
 
@@ -242,9 +183,7 @@ export interface SourceZip extends SourceFileList {
 }
 
 export interface SourceZipOptions {
-  /** Injected for tests; defaults to running the `git` binary. */
   git?: GitRunner;
-  /** Injected for tests; defaults to the limits every reader enforces (`MAX_ZIP_*_BYTES`). */
   limits?: { entryBytes: number; totalBytes: number };
 }
 
@@ -265,11 +204,6 @@ function gitFailureNotice(err: unknown): string {
   return `Couldn't list files with git (${errorCause(err)}), ${FALLBACK_SUFFIX}`;
 }
 
-/**
- * git is available and this folder is in a work tree, but git lists none of its files: the
- * enclosing repository ignores it. Walking it instead would drop the repository's other ignore
- * rules (ancestor, nested, info/exclude, global), so the zip is refused.
- */
 export class SourceZipIgnoredDirError extends Error {
   constructor() {
     super(
@@ -293,10 +227,6 @@ export class SourceZipMissingManifestError extends Error {
 
 const byCodeUnit = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-/**
- * An ignore file exists but can't be read (EACCES, …). Skipping it would put the files it
- * excludes in the zip, so the zip is refused instead.
- */
 export class SourceZipIgnoreUnreadableError extends Error {
   readonly file: string;
 
@@ -310,7 +240,6 @@ export class SourceZipIgnoreUnreadableError extends Error {
   }
 }
 
-/** The ignore file `name` in `dir`; undefined only when it's absent (ENOENT, ENOTDIR). */
 export async function readIgnoreFile(dir: string, name: string): Promise<Ignore | undefined> {
   let text: string;
 
@@ -327,11 +256,6 @@ export async function readIgnoreFile(dir: string, name: string): Promise<Ignore 
   return ignore().add(text);
 }
 
-/**
- * Whether `path` (zip-relative) is a regular file reached from `dir` through real directories
- * only. `lstat` on every segment, so a symlinked folder anywhere on the way disqualifies it;
- * `isDirectory` caches the answer per directory.
- */
 async function isPhysicalFile(
   dir: string,
   path: string,
@@ -370,7 +294,6 @@ function directoryChecker(dir: string): (relative: string) => Promise<boolean> {
   };
 }
 
-/** Git's view of the files under `dir`, relative to it, or a notice saying why git can't say. */
 async function gitFiles(
   dir: string,
   git: GitRunner,
@@ -382,8 +305,6 @@ async function gitFiles(
       return { notice: `Not in a git work tree, ${FALLBACK_SUFFIX}` };
     }
 
-    // Run from `dir`, ls-files lists only what's under it, relative to it. Anything that isn't a
-    // canonical relative path, or isn't a regular file physically under `dir`, is dropped.
     const listed = await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], dir);
     const unique = [...new Set(listed.split('\0'))].filter(isSafeEntryName);
 
@@ -403,7 +324,6 @@ async function gitFiles(
   }
 }
 
-/** Every regular file under `dir`, pruning the safety-listed directories and gitignored ones. */
 async function walkFiles(root: string, gitignore: Ignore | undefined): Promise<string[]> {
   const out: string[] = [];
 
@@ -413,7 +333,6 @@ async function walkFiles(root: string, gitignore: Ignore | undefined): Promise<s
     for (const entry of entries) {
       const path = `${prefix}${entry.name}`;
 
-      // Symlinks aren't followed: they could pull in files from outside the project.
       if (entry.isDirectory()) {
         if (!isSafetySegment(entry.name) && gitignore?.ignores(`${path}/`) !== true) {
           await walk(join(dir, entry.name), `${path}/`);
@@ -429,12 +348,6 @@ async function walkFiles(root: string, gitignore: Ignore | undefined): Promise<s
   return out;
 }
 
-/**
- * The zip-relative paths `zipSourceDir` would include, and how they were chosen. Throws
- * `SourceZipIgnoredDirError` when the enclosing repository ignores the folder,
- * `SourceZipIgnoreUnreadableError` when `.kizenignore` (or, walking, `.gitignore`) exists but can't
- * be read, and `SourceZipMissingManifestError` when `kizen.json` isn't among the files.
- */
 export async function collectSourceFiles(
   dir: string,
   opts: SourceZipOptions = {},
@@ -469,10 +382,6 @@ export async function collectSourceFiles(
   return listing;
 }
 
-/**
- * The source is over a limit `readZipEntries` enforces, so once uploaded it couldn't be pulled,
- * merged, rolled back to or detected as a base. Thrown before anything is read or uploaded.
- */
 export class SourceZipTooLargeError extends Error {
   constructor(message: string) {
     super(message);
@@ -480,7 +389,6 @@ export class SourceZipTooLargeError extends Error {
   }
 }
 
-/** Throws `SourceZipTooLargeError` when a file, or all of them, exceed what a reader accepts. */
 async function assertWithinReadLimits(
   dir: string,
   files: readonly string[],
@@ -507,11 +415,6 @@ async function assertWithinReadLimits(
   }
 }
 
-/**
- * Zips a plugin's source directory (see the file comment for what's included). Deterministic:
- * entries are sorted and carry a fixed timestamp, so an identical file set gives identical bytes.
- * Refuses (`SourceZipTooLargeError`) a source over the limits every reader of it enforces.
- */
 export async function zipSourceDir(dir: string, opts: SourceZipOptions = {}): Promise<SourceZip> {
   const listing = await collectSourceFiles(dir, opts);
 
@@ -553,10 +456,6 @@ export class ZipDestinationExistsError extends Error {
   }
 }
 
-/**
- * False for absolute paths, drive letters, backslashes, NULs, and `..`, `.` or empty segments,
- * so every accepted name is already in canonical form. A trailing `/` marks a directory.
- */
 export function isSafeEntryName(name: string): boolean {
   const segments = (name.endsWith('/') ? name.slice(0, -1) : name).split('/');
 
@@ -576,13 +475,8 @@ function assertSafeEntryName(name: string): void {
   }
 }
 
-/** How a filesystem that ignores case and Unicode normalization (macOS, Windows) sees a path. */
 export const foldPath = (path: string): string => path.normalize('NFC').toLowerCase();
 
-/**
- * Rejects two entries that land on the same path (on a case-insensitive filesystem too), and a
- * file whose path another entry needs as a directory.
- */
 function assertNoCollisions(names: readonly string[]): void {
   const files = new Map<string, string>();
   const directories = new Map<string, string>();
@@ -611,18 +505,10 @@ function assertNoCollisions(names: readonly string[]): void {
 }
 
 export interface ZipEntries {
-  /** The files to extract, keyed by zip path. */
   files: Map<string, Uint8Array>;
-  /** File entries the safety list drops (`.git/…`, `.env`, `node_modules/…`, …), never extracted. */
   skipped: string[];
 }
 
-/**
- * Uncompressed limits for extracting a source zip. Plugin sources are scripts, configs and a few
- * images, typically well under 10 MB in all, so these leave wide headroom while bounding the
- * memory a hostile zip can claim: everything is decompressed in memory before anything is
- * written.
- */
 export const MAX_ZIP_ENTRY_BYTES = 50 * 1024 * 1024;
 export const MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024;
 
@@ -642,10 +528,6 @@ const readU16 = (bytes: Uint8Array, at: number): number =>
 const readU32 = (bytes: Uint8Array, at: number): number =>
   (readU16(bytes, at) | (readU16(bytes, at + 2) << 16)) >>> 0;
 
-/**
- * The CRC-32 of each central-directory entry, in directory order (the order fflate's filter
- * sees them). ZIP64 is refused: a source zip within the limits never needs it.
- */
 function centralDirectoryCrcs(bytes: Uint8Array): number[] {
   let end = bytes.length - 22;
 
@@ -699,17 +581,6 @@ function crc32(data: Uint8Array): number {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-/**
- * The files in a zip, keyed by their zip path (directory entries dropped, safety-listed entries
- * moved to `skipped` and never decompressed).
- *
- * Every check runs on the central directory before anything is decompressed: names
- * (`UnsafeZipEntryError` for one that could escape the extraction directory, or two that land on
- * the same path) and the uncompressed limits (`ZipLimitError`). fflate then inflates each kept
- * entry into a buffer of its declared size, so memory never exceeds what was checked; a size or
- * CRC-32 mismatch after inflating (data longer than declared comes back truncated) is an
- * `UnsafeZipEntryError`.
- */
 export function readZipEntries(bytes: Uint8Array): ZipEntries {
   const crcs = centralDirectoryCrcs(bytes);
   const infos: UnzipFileInfo[] = [];
@@ -779,34 +650,17 @@ export function readZipEntries(bytes: Uint8Array): ZipEntries {
     files.set(info.name, data);
   }
 
-  // The lineage record is the CLI's own entry, not a source file someone left out.
   const listed = skipped.filter((name) => name !== SOURCE_LINEAGE_PATH).sort(byCodeUnit);
 
   return { files: new Map([...files].sort(([a], [b]) => byCodeUnit(a, b))), skipped: listed };
 }
 
-// ---------------------------------------------------------------------------------------------
-// lineage: what an uploaded source zip is based on
-
-/**
- * Where an uploaded source zip carries its lineage. `.kizenapp` is on the safety list, so the
- * readers above never extract it, count it in a content comparison, or list it as skipped; only
- * `readSourceLineage` reads it, and only `withSourceLineage` writes it.
- */
 export const SOURCE_LINEAGE_PATH = '.kizenapp/lineage.json';
 
-/** The record's `format`. A record in any other format reads as none. */
 export const SOURCE_LINEAGE_FORMAT = 1;
 
-/** The largest record `readSourceLineage` reads; anything bigger reads as none. */
 const MAX_LINEAGE_BYTES = 4096;
 
-/**
- * What a preview's source is based on, stored in the source zip itself so that any machine can
- * read it from the server: the Live version the preview was based on when it was saved (null: the
- * app had none), and that version's source package, which tells a version apart from a
- * same-numbered one of an app deleted and created again.
- */
 export type SourceLineage =
   | { baseLiveVersion: null; baseSourcePackageId: null }
   | { baseLiveVersion: string; baseSourcePackageId: string };
@@ -814,7 +668,6 @@ export type SourceLineage =
 const isReleaseNumber = (value: unknown): value is string =>
   typeof value === 'string' && /^[1-9]\d*$/.test(value);
 
-/** A parsed record as a lineage; null for anything that isn't exactly one. */
 function lineageOf(value: unknown): SourceLineage | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return null;
@@ -837,11 +690,6 @@ function lineageOf(value: unknown): SourceLineage | null {
     : null;
 }
 
-/**
- * The lineage a source zip carries; null when it has none, or one that can't be read (an invalid
- * zip, a record over the size limit, invalid JSON, another format, or the wrong fields). Never
- * throws: a lineage that can't be read counts as none.
- */
 export function readSourceLineage(bytes: Uint8Array): SourceLineage | null {
   try {
     let declared = -1;
@@ -868,12 +716,6 @@ export function readSourceLineage(bytes: Uint8Array): SourceLineage | null {
   }
 }
 
-/**
- * `bytes` (a source zip) with `lineage` as its record: the files `readZipEntries` keeps, so a
- * zip that fails its checks throws as it does, re-zipped deterministically (as `zipSourceDir`
- * zips) with the record added. Safety-listed entries, an older record included, are left out;
- * no reader extracts them anyway. The files, and so every content comparison, are unchanged.
- */
 export function withSourceLineage(bytes: Uint8Array, lineage: SourceLineage): Uint8Array {
   const { files } = readZipEntries(bytes);
   const zippable: Zippable = {};
@@ -893,20 +735,10 @@ export function withSourceLineage(bytes: Uint8Array, lineage: SourceLineage): Ui
 }
 
 export interface UnzipResult {
-  /** Relative paths written, sorted. */
   written: string[];
-  /** Entries left out because the safety list drops them. */
   skipped: string[];
 }
 
-/**
- * Extracts a zip into `destDir`, which must not exist yet (its parent may). The whole entry set
- * is checked first, so a zip that fails the checks creates nothing, not even `destDir`.
- * Safety-listed entries (a `.git` directory, `.env`, …) are never written; they come back in
- * `skipped`. Throws `ZipDestinationExistsError` if `destDir` exists: a fresh directory is what
- * makes the containment check hold, since nothing in it can be a symlink this function didn't
- * create (and it creates none).
- */
 export async function unzipToDir(bytes: Uint8Array, destDir: string): Promise<UnzipResult> {
   const root = resolve(destDir);
   const { files, skipped } = readZipEntries(bytes);

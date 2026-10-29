@@ -19,7 +19,6 @@ import type { KizenClient } from './kizenTypes.js';
 
 const CREDENTIALS_PATH = '/tmp/credentials.json';
 
-/** The API-key file's ids; every one differs from the session identity's. */
 const FILE_CREDENTIALS: Credentials = {
   apiKey: 'file-key',
   userId: 'file-user',
@@ -27,7 +26,6 @@ const FILE_CREDENTIALS: Credentials = {
   environment: 'staging',
 };
 
-/** The sign-in session's identity; its user and business differ from the file's and each other. */
 const IDENTITY = {
   userId: 'session-user',
   businessId: 'session-biz',
@@ -42,9 +40,7 @@ const sessionClient = {} as KizenClient;
 const makeDeps = (
   options: {
     environmentSource?: DetailedCredentials['environmentSource'];
-    /** What the file loads as; FILE_CREDENTIALS unless given. */
     credentials?: Credentials;
-    /** The environments signed in to. */
     sessions?: Environment[];
   } = {},
 ): CommandDeps & {
@@ -82,7 +78,6 @@ describe('resolveCredentials', () => {
   ] as const)(
     'resolveCredentials refuses a credential file with a %s environment',
     async (environmentSource, problem) => {
-      // The real loader falls back to production when the environment is missing or invalid.
       const deps = makeDeps({
         environmentSource,
         credentials: { ...FILE_CREDENTIALS, environment: 'go' },
@@ -94,7 +89,6 @@ describe('resolveCredentials', () => {
         code: 'credentials_invalid',
         message: `${CREDENTIALS_PATH} ${problem}. Set it to one of: ${ENVIRONMENTS.join(', ')}. The CLI won't default to production.`,
       });
-      // Nothing that could reach an environment was built from the file.
       expect(deps.createClient).not.toHaveBeenCalled();
       expect(deps.oauth.connect).not.toHaveBeenCalled();
     },
@@ -121,7 +115,6 @@ describe('resolveCredentials', () => {
       'Ask the user to sign in: they run `appbuilder login` in a terminal, or you run it in the background and give them the URL it prints. Then run this command again.';
 
     expect(await hintUnder({ CLAUDECODE: '1' })).toBe(CLAUDE);
-    // The Codex plugin for Claude Code sets CODEX_COMPANION_*; that's still Claude Code.
     expect(await hintUnder({ CLAUDECODE: '1', CODEX_COMPANION_SESSION_ID: 'x' })).toBe(CLAUDE);
     expect(await hintUnder({ CODEX_CI: '1' })).toBe(CODEX);
     expect(await hintUnder({ CODEX_CI: '1', CLAUDECODE: '1' })).toBe(CODEX);
@@ -172,7 +165,6 @@ describe('resolveCredentials', () => {
 
     expect('apiKey' in step.value.credentials).toBe(false);
     expect(JSON.stringify(step.value.credentials)).not.toContain('file-key');
-    // The client alone gets the key.
     expect(deps.createClient).toHaveBeenCalledWith(FILE_CREDENTIALS);
   });
 

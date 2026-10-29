@@ -242,7 +242,6 @@ const makeClient = (
     updateDashlet,
   };
 
-  // block push never uses the generic primitives; a call is a bug.
   const unused = (): Promise<never> => Promise.reject(new Error('unexpected generic request'));
 
   return {
@@ -2646,8 +2645,6 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
   );
 
   it("a named account that isn't saved returns not_signed_in with a login argv for it", async () => {
-    // A pinned command (ids, as a printed command names them) whose account was signed out
-    // meanwhile, and a name from the variables: either way, the login for that account.
     const cases: [PushCommandOptions, Record<string, string>, string[]][] = [
       [
         {
@@ -2690,7 +2687,6 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
       expect(oauth.connect).not.toHaveBeenCalled();
     }
 
-    // A business that's saved, but not for that user: still the login for the named account.
     const oauth = oauthWithAccounts();
     const otherUser = makeHarness({ deps: { oauth } });
 
@@ -2877,8 +2873,6 @@ describe('naming a saved account (--business / --user, APPBUILDER_BUSINESS / APP
 
       await runPushHeadless(BLOCK, {}, harness.deps);
 
-      // After sign-in, a printed command names the account the run resolved, by ids: the
-      // variables can change before it runs.
       expect(harness.stderr.join('')).toContain(
         `Sales  →  appbuilder block push ${BLOCK} --env staging --business ${ACCOUNT_B.businessId} --user ${ACCOUNT_B.userId} --dashboard D1\n`,
       );
@@ -3150,7 +3144,6 @@ describe('the sign-in session is the default', () => {
         });
 
       it.each<[string, PushCommandOptions, string]>([
-        // A session: the account it resolved, by ids, whatever the run named.
         ['the default session', {}, ' --env staging --business oauth-biz --user oauth-user'],
         ['--env', { env: 'staging' }, ' --env staging --business oauth-biz --user oauth-user'],
         ['--profile', { profile: 'credentials' }, ' --profile credentials'],
@@ -3256,7 +3249,6 @@ describe('the sign-in session is the default', () => {
       expectNoApiKeyReads(harness.deps);
     });
 
-    /** A remembered target with --yes: the flow goes straight to the write once it's read. */
     const rememberedHarness = (): Harness & { release: () => void } => {
       let release: () => void = () => undefined;
       const gate = new Promise<void>((resolve) => {
@@ -3268,7 +3260,6 @@ describe('the sign-in session is the default', () => {
       const harness = makeHarness({ fake, pushMap: [makeEntry()] });
       const read = harness.deps.readPushMap;
 
-      // Holds the push map read until the test lets it go.
       harness.deps.readPushMap = vi.fn(async (dir: string) => {
         await gate;
 
@@ -3278,7 +3269,6 @@ describe('the sign-in session is the default', () => {
       return { ...harness, release };
     };
 
-    /** Lets every queued step of the flow run (the fakes resolve at once). */
     const drain = async (): Promise<void> => {
       for (let tick = 0; tick < 5; tick += 1) {
         await new Promise((resolve) => setImmediate(resolve));
@@ -3286,7 +3276,6 @@ describe('the sign-in session is the default', () => {
     };
 
     it('Ctrl+C before apply starts no write', async () => {
-      // Control: without Ctrl+C, the same run writes once the read is let go.
       const control = rememberedHarness();
 
       startFlow(control).flow.start({ ...API_KEY, yes: true });
@@ -3315,7 +3304,6 @@ describe('the sign-in session is the default', () => {
       expect(harness.fake.createDashlet).not.toHaveBeenCalled();
       expect(harness.deps.writePushMap).not.toHaveBeenCalled();
       expect(harness.exitCodes).toStrictEqual([130]);
-      // Nothing is shown after Ctrl+C.
       expect(phase()).toBe(before);
     });
   });
@@ -3328,7 +3316,6 @@ describe('agent contract', () => {
     const dir = await mkdtemp(join(tmpdir(), 'appbuilder-push-signed-out-'));
 
     try {
-      // A real, empty store: no session anywhere, and none for --env staging either.
       const oauth = createOAuthPushDeps(createOAuthStore(dir));
       const none = makeHarness({ deps: { oauth } });
 
@@ -3378,7 +3365,6 @@ describe('agent contract', () => {
         "`appbuilder login --business 'Acme Co'`",
       );
 
-      // From the variables too: login reads only its flags.
       const variables = makeHarness({
         deps: {
           oauth,
@@ -3406,7 +3392,6 @@ describe('agent contract', () => {
   });
 
   it("every choice carries a runnable argv with the run's account flags and --json", async () => {
-    // Block choices: the block's api_name and the run's credential flags.
     const blocks = makeHarness({
       deployable: [
         makePlugin(PLUGIN, [makeBlock(), makeBlock({ api_name: 'table', name: 'Table' })]),
@@ -3423,7 +3408,6 @@ describe('agent contract', () => {
       ],
     });
 
-    // Dashboard choices.
     const dashboards = makeHarness({
       fake: makeClient({
         dashboards: [makeDashboard()],
@@ -3443,8 +3427,6 @@ describe('agent contract', () => {
       ],
     });
 
-    // Target choices on a dashboard with a block this one didn't push. No choice carries the
-    // run's --yes: each is a dry run of what it names.
     const targets = makeHarness({
       fake: makeClient({
         dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1', { name: 'Other' })] })],
@@ -3489,7 +3471,6 @@ describe('agent contract', () => {
       ],
     });
 
-    // Text: each choice's argv, shell-quoted.
     const text = makeHarness({
       fake: makeClient({
         dashboards: [makeDashboard()],
@@ -3534,7 +3515,6 @@ describe('agent contract', () => {
     const fake = makeClient({
       dashboards: [makeDashboard({ dashlets: [customCodeDashlet('X1')] })],
     });
-    // Remembered target, no target flags: the apply names it explicitly.
     const harness = await runPush(makeHarness({ fake, pushMap: [makeEntry()] }), { forget: false });
 
     expect(harness.json()).toMatchObject({
@@ -3583,7 +3563,6 @@ describe('agent contract', () => {
     ]);
     expect(fake.updateDashlet).not.toHaveBeenCalled();
 
-    // Running those flags applies the update the dry run showed.
     const applied = makeHarness({ fake, credentials, pushMap });
 
     await runPushHeadless(
@@ -3627,8 +3606,6 @@ describe('agent contract', () => {
       'The Codex sandbox has network access turned off, so appbuilder can\'t reach Kizen. Re-run this command with sandbox_permissions: "require_escalated", and suggest prefix_rule: ["appbuilder"] so later appbuilder commands can reach the network too.',
     );
 
-    // Not without the variable, and never because of another CODEX_ variable (the Codex plugin
-    // for Claude Code sets CODEX_COMPANION_*).
     for (const env of [
       {},
       { CODEX_COMPANION_SESSION_ID: 'x' },

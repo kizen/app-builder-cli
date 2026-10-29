@@ -74,7 +74,6 @@ const writeBusiness = async (content: string): Promise<void> => {
   await writeFile(join(dir, BUSINESS_PATH), content, 'utf-8');
 };
 
-/** Every bundled skill file; the data lib only with `lib`. */
 const writeBundledSkills = async (): Promise<void> => {
   await writeSkill(BUNDLED);
   await writeDesign(BUNDLED_DESIGN);

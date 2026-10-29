@@ -5,7 +5,6 @@ import * as path from 'node:path';
 // .github/workflows/copilot-code-review.yml at review time. It is never committed.
 const ENTRIES = ['.kizenapp/', '.copilot-docs/'];
 
-/** Adds the CLI's entries to `projectDir`'s `.gitignore` when missing; true when it wrote. */
 export function ensureGitignore(projectDir: string): boolean {
   const gitignorePath = path.join(projectDir, '.gitignore');
 

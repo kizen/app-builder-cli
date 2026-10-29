@@ -4,7 +4,6 @@ import type { ValidationIssue } from '@kizenapps/packager';
 import { formatValidationIssues } from '../lib/formatValidationIssues.js';
 import { Lines } from './Lines.js';
 
-/** What an error frame shows; a `CommandFailure` is one. */
 export interface ErrorView {
   message: string;
   hint?: string;

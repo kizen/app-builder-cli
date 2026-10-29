@@ -120,7 +120,6 @@ export interface PushDeps extends CommandDeps {
   readPushMap: (dir: string) => Promise<PushMapEntry[]>;
   writePushMap: (dir: string, entries: readonly PushMapEntry[]) => Promise<void>;
   ensureGitignore: (dir: string) => void;
-  /** The out-of-date warnings of the agent skills appbuilder manages here (Claude, Codex). */
   staleAgentFileWarnings: (dir: string) => Promise<string[]>;
   randomUUID: () => string;
 }
@@ -882,12 +881,7 @@ export async function runPushHeadless(
   const output: CommandOutput = { json: options.json === true, deps };
   const command = 'appbuilder block push';
   let blockArgs = apiName === undefined ? [] : [apiName];
-  // The run's credential flags until it signs in; then the account it resolved, so a printed
-  // command can't act as another account a switch made current meanwhile.
   let credentialFlags = credentialArgs(options, deps.processEnv);
-  // Every choice re-runs `block push` without the run's write or target flags, so it's a dry run
-  // of the choice; its `applyArgv` then writes. An environment choice carries only the account
-  // flags (its --env replaces the run's), a block or target choice the credential flags.
   const choiceArgs = (choice: PushChoice, kind: ChoiceKind | undefined): string[] => {
     if (kind === 'environment') {
       return [...blockArgs, ...choice.args, ...accountArgs(options, deps.processEnv)];
@@ -990,9 +984,6 @@ export async function runPushHeadless(
     if (gate.kind === 'dry-run') {
       const warnings = [...issueWarnings, ...plan.warnings];
       const production = plan.summary.isProduction;
-      // This dry run with --yes, pinned to the target it showed (so a remembered target that
-      // changes meanwhile can't redirect the write); --allow-production only on production, where
-      // the agent asks the user first (`requiresProductionConsent`).
       const applyArgv = commandArgv(
         command,
         [

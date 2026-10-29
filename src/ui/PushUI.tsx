@@ -186,10 +186,8 @@ export function createPushFlow(
   acceptDrift: (phase: Extract<Phase, { type: 'confirm'; kind: 'drift' }>) => void;
   acceptPush: (phase: Extract<Phase, { type: 'confirm'; kind: 'push' }>) => void;
   cancel: () => void;
-  /** Ctrl+C: no further phase or write (`SessionStep.abort`). */
   abort: () => void;
 } {
-  // The account step every signed-in command shares; it continues with `packageBlock`.
   const session = createSessionStep<PushCommandOptions>({
     deps,
     setPhase: showPhase,
@@ -197,12 +195,10 @@ export function createPushFlow(
     next: (options, resolved) => packageBlock(options, resolved, apiName),
   });
   const { fail, guard } = session;
-  // After Ctrl+C the flow shows nothing more.
   const setPhase = session.whileRunning(showPhase);
   const setSession = session.whileRunning(showSession);
 
   const apply = async (context: PushContext, plan: PushPlan): Promise<void> => {
-    // Ctrl+C before the write starts it never starts.
     if (session.isAborted()) {
       return;
     }
@@ -306,7 +302,6 @@ export function createPushFlow(
     { credentials, client }: ResolvedCredentials,
     block: ResolvedBlock,
   ): Promise<void> => {
-    // --forget rewrites the push map here.
     if (session.isAborted()) {
       return;
     }

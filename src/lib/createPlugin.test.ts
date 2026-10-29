@@ -293,7 +293,6 @@ describe('createPlugin', () => {
       ).toBe(file.content);
     }
 
-    // A fresh plugin's managed files are current for both harnesses.
     expect(await staleAgentFileWarnings(input.targetDir)).toStrictEqual([]);
   });
 

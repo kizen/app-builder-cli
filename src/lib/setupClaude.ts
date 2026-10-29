@@ -20,14 +20,12 @@ export type ClaudeFs = ManagedFs;
 
 export const nodeClaudeFs: ClaudeFs = nodeManagedFs;
 
-/** The Claude files appbuilder manages in this plugin (`pluginAgentFiles` for Claude Code). */
 export const pluginClaudeFiles = (
   dir: string,
   fs: ClaudeFs = nodeClaudeFs,
   options: { includeLib?: boolean } = {},
 ): Promise<ScaffoldedFile[]> => pluginAgentFiles(dir, 'claude', fs, options);
 
-/** Whether the plugin's Claude files are out of date (`isAgentFilesStale` for Claude Code). */
 export const isClaudeSkillStale = (dir: string, fs: ClaudeFs = nodeClaudeFs): Promise<boolean> =>
   isAgentFilesStale(dir, 'claude', fs);
 

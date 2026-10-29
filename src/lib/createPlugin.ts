@@ -126,7 +126,6 @@ export async function createPlugin(input: CreatePluginInput): Promise<void> {
     writeScaffoldedFiles(input.targetDir, scaffoldArtifactFiles(input.artifacts ?? [])),
     writeScaffoldedFiles(input.targetDir, copilotFiles()),
     writeScaffoldedFiles(input.targetDir, claudeFiles(input.includeLib === true ? ['src'] : [])),
-    // The same skills for Codex; the lib is a plugin file, so the Claude set alone writes it.
     writeScaffoldedFiles(input.targetDir, codexFiles()),
     writeFile(join(input.targetDir, ...THUMBNAIL_PATH.split('/')), thumbnailBytes(input.apiName)),
   ]);

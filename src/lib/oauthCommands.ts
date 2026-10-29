@@ -70,7 +70,6 @@ export interface AuthCommandDeps {
   /** `/auth/bootstrap` through `bearer`. */
   identify: Identify;
   tokenProvider: (environment: Environment, options?: TokenProviderOptions) => BearerTokenProvider;
-  /** Whether a person can answer a prompt (`isInteractive`). */
   isInteractive: () => boolean;
   /** The terminal account picker; without one, `login` never prompts. */
   pickAccount?: PickAccount;
@@ -81,10 +80,6 @@ export interface AuthCommandDeps {
   setExitCode: (code: number) => void;
 }
 
-/**
- * `noInteractive` is `login --no-interactive`. Whether a person can answer a prompt is
- * `isInteractive`'s call: both streams terminals, and no agent or CI environment.
- */
 export function createDefaultAuthCommandDeps(
   store: OAuthStore = createOAuthStore(),
   pickAccount?: PickAccount,
@@ -154,7 +149,6 @@ async function sessionEnvironment(
 const businessLabel = (name: string | undefined, id: string): string =>
   name ? `${name} (${id})` : id;
 
-/** The identity as `whoami` and `login` print it. */
 export const identityLines = (environment: Environment, identity: KizenIdentity): string => {
   const who = [identity.fullName, identity.email && `<${identity.email}>`]
     .filter(Boolean)

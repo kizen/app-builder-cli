@@ -1,7 +1,3 @@
-/**
- * The fake Business Apps server and the AppDeps harness behind the `appbuilder app` tests: the
- * headless runners' (appHeadless.test.ts) and the interactive flow's (appUiFlow.test.ts).
- */
 import type { DeployablePlugin } from '@kizenapps/packager';
 import { strToU8, zipSync } from 'fflate';
 import { expect, vi, type Mock } from 'vitest';
@@ -37,7 +33,6 @@ export const APP_API = 'acme_abc123';
 export const NOW = '2026-10-27T12:00:00.000Z';
 export const API_KEY = { profile: 'credentials' };
 export const CRED_ARGS = ['--profile', 'credentials'];
-/** A printed command's flags in a --json run: the credential flags, then --json. */
 export const JSON_ARGS = [...CRED_ARGS, '--json'];
 export const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
@@ -48,10 +43,6 @@ export const KEY: AppStateKey = {
   userId: USER,
 };
 
-/**
- * This folder's entry: based on v3 (or the `folderBaseLiveVersion` given, with that release's
- * source package as the fake server first numbers it), having pushed `yourPreview()`.
- */
 export const stateEntry = (overrides: Partial<AppStateEntry> = {}): AppStateEntry => {
   const base = 'folderBaseLiveVersion' in overrides ? overrides.folderBaseLiveVersion : '3';
 
@@ -59,14 +50,12 @@ export const stateEntry = (overrides: Partial<AppStateEntry> = {}): AppStateEntr
     ...KEY,
     folderBaseLiveVersion: base,
     ...(typeof base === 'string' ? { folderBaseSourcePackageId: `src-v${base}` } : {}),
-    /** `yourPreview()`'s source package: the preview on the server is the one this folder pushed. */
     previewSourcePackageId: 'src-preview',
     lastPushedSourceHash: null,
     ...overrides,
   };
 };
 
-/** An entry with the folder's base recorded but no push of the preview. */
 export const folderOnlyEntry = (): AppStateEntry => {
   const entry = stateEntry();
 
@@ -80,18 +69,15 @@ export type Files = Record<string, string>;
 export const zipOf = (files: Files): Uint8Array =>
   zipSync(Object.fromEntries(Object.entries(files).map(([path, text]) => [path, strToU8(text)])));
 
-/** The source files of release `version` on the fake server. */
 export const versionFiles = (version: string): Files => ({
   'kizen.json': `{"api_name":"${BASE}","release":"${version}"}`,
   'src/a.js': `a${version}`,
 });
 
-/** Services as packaging the source produces them: secrets included. */
 export const SOURCE_SERVICES = [
   { name: 'crm', auth_credentials: { client_secret: 'from-source' } },
 ];
 
-/** Services as the server's GET returns them: secrets stripped. */
 export const STRIPPED_SERVICES = [{ name: 'crm' }];
 
 export const definition = (
@@ -121,7 +107,6 @@ export const definition = (
   ...(version === undefined ? {} : { version }),
 });
 
-/** A packaged JS action template, as the definitions and the packager carry it. */
 export interface JsActionWire {
   api_name: string;
   name: string;
@@ -136,7 +121,6 @@ export const jsAction = (apiName: string, hint = 'client_client'): JsActionWire 
   script: 'return 1;',
 });
 
-/** `def` with these JS action templates. */
 export const withJsActions = (
   def: BusinessAppDefinition,
   apiNames: readonly string[],
@@ -159,7 +143,6 @@ export const DEALS: BusinessObject = {
   entityName: 'Deal',
 };
 
-/** A second object whose display name is also "Deals". */
 export const OLD_DEALS: BusinessObject = {
   id: 'obj-old-deals',
   name: 'old_deals',
@@ -167,7 +150,6 @@ export const OLD_DEALS: BusinessObject = {
   entityName: 'Deal',
 };
 
-/** One association row as the server stores it: keyed by template api_name, per install. */
 export interface StoredAssociation {
   id: string;
   template: string;
@@ -181,39 +163,24 @@ export interface Release {
   publishedBy: string;
 }
 
-/**
- * What a preview's source zip on the fake server carries as its lineage: a record (as the CLI
- * writes it), raw bytes stored at the lineage path (a malformed record), or none (a source whose
- * record is missing).
- */
 export type LineageFixture = SourceLineage | { raw: string } | null;
 
 export interface Preview {
   def: BusinessAppDefinition;
-  /** Null: a row the server sends without a last update. */
   updated: string | null;
   ownerName: string;
-  /** Its `installed_count`; by default, the users using it. */
   installed?: number;
-  /**
-   * The files of its source package, stored on the server under its `source_filesystem_package`
-   * when nothing is stored there yet (`PREVIEW_FILES` by default).
-   */
   files?: Files;
-  /** The lineage that source carries: based on v3 (`DEFAULT_PREVIEW_LINEAGE`) by default. */
   lineage?: LineageFixture;
 }
 
-/** The lineage of `yourPreview()`'s source: pushed based on v3, as `stateEntry()`'s folder is. */
 export const DEFAULT_PREVIEW_LINEAGE: SourceLineage = {
   baseLiveVersion: '3',
   baseSourcePackageId: 'src-v3',
 };
 
-/** A preview's source files when a test doesn't name them. */
 export const PREVIEW_FILES: Files = { 'kizen.json': '{"api_name":"acme","preview":true}' };
 
-/** `files` zipped as a source package with `lineage` in it, as a push uploads it. */
 export function sourceZipOf(files: Files, lineage: LineageFixture = null): Uint8Array {
   if (lineage === null) {
     return zipOf(files);
@@ -226,7 +193,6 @@ export function sourceZipOf(files: Files, lineage: LineageFixture = null): Uint8
   return withSourceLineage(zipOf(files), lineage);
 }
 
-/** The lineage of a source based on release `version` as the fake server first numbers it. */
 export const lineageOf = (version: string | null, sourceId?: string): SourceLineage =>
   version === null
     ? { baseLiveVersion: null, baseSourcePackageId: null }
@@ -236,17 +202,11 @@ export interface ServerOptions {
   exists?: boolean;
   live?: string | null;
   releases?: Release[];
-  /** Release numbers used before and since deleted; the next release counts them. */
   deleted?: string[];
   previews?: Record<string, Preview>;
-  /** JS action template api_names per released version. */
   jsActions?: Record<string, string[]>;
   objects?: BusinessObject[];
   associations?: StoredAssociation[];
-  /**
-   * The preview each user is using, by its owner (null: Live). By default each preview's owner
-   * uses it, as after pushing it.
-   */
   active?: Record<string, string | null>;
 }
 
@@ -257,15 +217,10 @@ export interface ServerState {
   previews: Map<string, Preview>;
   definitions: Map<string, BusinessAppDefinition>;
   files: Map<string, Uint8Array>;
-  /** The highest release number ever used, deleted ones included. */
   maxEver: number;
-  /** The user the client signed in as; publish writes this user's preview. */
   caller: string;
-  /** The objects `listObjects` returns (Contacts included, as `custom_only=false` does). */
   objects: BusinessObject[];
-  /** The install's JS action links. One install per business and app: `exists` is it. */
   associations: StoredAssociation[];
-  /** The preview each user is using, by owner; a user not listed (or null) uses Live. */
   active: Map<string, string | null>;
 }
 
@@ -274,22 +229,10 @@ export type FakeApi = { [K in keyof BusinessAppsApi]: Mock<BusinessAppsApi[K]> }
 export interface FakeServer {
   state: ServerState;
   api: FakeApi;
-  /** Every request, in order (`listApps`, `getVersion:3`, `publish:false`, …). */
   calls: string[];
-  /** The calls that change something on the server. */
   writes: () => string[];
-  /** Adds a release (published by someone else) and makes it Live. */
   release: (publishedBy?: string) => string;
-  /**
-   * The app deleted and created again (webapp `destroy_app`, outside the CLI): every version and
-   * preview goes, then releases 1…`live` are published anew (at `NOW`). They reuse the old numbers
-   * but each has a new source package (`src-r<n>-v<version>`), with the same files as before.
-   */
   recreate: (live: string) => void;
-  /**
-   * `owner`'s preview saved by another client (another machine, or a user with no state here):
-   * its source package holds `files` and `lineage`, under a new file id that's returned.
-   */
   pushPreviewFrom: (owner: string, files: Files, lineage: LineageFixture) => string;
 }
 
@@ -342,7 +285,6 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
       ),
     ),
   };
-  // Bumped by `recreate`: the app's releases get new source packages.
   let generation = 1;
   const releaseSourceId = (version: string): string =>
     generation === 1 ? `src-v${version}` : `src-r${String(generation)}-v${version}`;
@@ -360,7 +302,6 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
     addRelease(release.version);
   }
 
-  // A preview's source package, unless the test stored one itself.
   const storePreviewSource = (preview: Preview): void => {
     const sourceId = preview.def.source_filesystem_package;
 
@@ -385,11 +326,7 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
   // Like the server: a list shows only links whose template is in the install's Live version.
   const liveTemplateNames = (): Set<string> =>
     new Set(state.live === null ? [] : templateNamesOf(state.definitions.get(state.live)));
-  // Like the server: a create resolves templates against the version the caller is using, their
-  // active preview, else Live (webapp origin/develop: `get_for_business_plugin_app` in
-  // external_integrations/models.py:266-270 resolves through `served_plugin_app_for_request`;
-  // a preview push activates the pusher's own preview, `activate_business_app_preview` in
-  // services.py:629, called from rest_api/plugin_apps_business.py:307).
+  // Like the server: a create resolves templates against the caller's active preview, else Live.
   const servedTemplateNames = (): Set<string> => {
     const owner = state.active.get(state.caller) ?? null;
     const preview = owner === null ? undefined : state.previews.get(owner);
@@ -400,7 +337,6 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
   const associationPath = (appApiName: string, id?: string): string =>
     `/external-integrations/business-plugin-apps/${appApiName}/browser-js-action-template-associations${id === undefined ? '' : `/${id}`}`;
 
-  /** How many users use `owner`'s preview (`active_users_count`). */
   const usersOf = (owner: string): number =>
     [...state.active.values()].filter((using) => using === owner).length;
 
@@ -410,7 +346,6 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
         version: release.version,
         status: release.version === state.live ? 'live' : 'released',
         preview_owner: null,
-        // Like the server: the counts are a preview's only.
         active_users_count: null,
         installed_count: null,
         is_current_for_viewer: false,
@@ -485,8 +420,7 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
         return Promise.reject(new Error('this flow must never publish a release'));
       }
 
-      // Like the server: release false writes the signed-in caller's own preview, and makes it
-      // the one they use.
+      // Like the server: release false writes the caller's own preview and makes it active.
       state.exists = true;
       state.previews.set(state.caller, {
         def: structuredClone(body) as unknown as BusinessAppDefinition,
@@ -516,10 +450,7 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
       state.live = version;
       state.previews.delete(owner);
 
-      // Like the server: whoever used the promoted preview uses Live now (webapp origin/develop:
-      // promote deletes that owner's BusinessPluginAppPreview rows, rest_api/
-      // plugin_apps_business.py:855-857, and with none active `active_preview_owner_id` is None,
-      // which is Live, models.py:606).
+      // Like the server: whoever used the promoted preview uses Live now.
       for (const [user, using] of state.active) {
         if (using === owner) {
           state.active.set(user, null);
@@ -537,9 +468,7 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
 
       state.previews.delete(owner);
 
-      // Like the server (webapp origin/develop, rest_api/plugin_apps_business.py `destroy_preview`):
-      // whoever used it goes back to their own preview, else Live; and with no version left, the
-      // app is deleted with its install (`_delete_app_without_versions`).
+      // Like the server: users fall back to their own preview, else Live; no version left, no app.
       for (const [user, using] of state.active) {
         if (using === owner) {
           state.active.set(user, state.previews.has(user) ? user : null);
@@ -711,7 +640,6 @@ export function makeServer(options: ServerOptions = {}): FakeServer {
       state.definitions.clear();
       state.associations = [];
       state.active.clear();
-      // Published anew: now, after anything this folder recorded before the recreation.
       state.releases = releasesUpTo(live).map((release) => ({ ...release, publishedAt: NOW }));
       state.maxEver = Number(live);
       state.live = live;
@@ -764,7 +692,6 @@ export interface HarnessOptions {
   packageError?: unknown;
   zipError?: unknown;
   thumbnail?: Uint8Array | null;
-  /** What packaging this folder produces (`deployable()` by default). */
   deployable?: DeployablePlugin;
   deps?: Partial<AppDeps>;
 }
@@ -776,9 +703,7 @@ export interface Harness {
   stderr: string[];
   exitCodes: number[];
   store: { doc: AppStateDoc; writes: number };
-  /** State docs written into other folders (a pulled folder). */
   otherDirs: Map<string, AppStateDoc>;
-  /** This folder's source files; change them to simulate local edits. */
   local: { files: Files };
   mocks: {
     businessApps: Mock<AppDeps['businessApps']>;
@@ -955,7 +880,6 @@ export const sha = async (files: Files): Promise<string> => {
   return createHash('sha256').update(zipOf(files)).digest('hex');
 };
 
-/** The body of the first `publish` call. */
 export function publishedBody(server: FakeServer): BusinessAppPublishBody {
   const body = server.api.publish.mock.calls[0]?.[0];
 

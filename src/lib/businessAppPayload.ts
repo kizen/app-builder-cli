@@ -12,11 +12,6 @@ export interface PublishBodyOptions {
   thumbnailId: string | null;
 }
 
-/**
- * base_config as the packager emits it, as plugin-wizard sends it: the setup assistants' `actions`
- * stay the action objects exactly as the packager emits them. Only undefined values are left out
- * (JSON drops them anyway).
- */
 function publishBaseConfig(
   baseConfig: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
@@ -46,11 +41,6 @@ function publishArtifacts(artifacts: DeployablePlugin['artifacts']): BusinessApp
 const optionalString = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined;
 
-/**
- * The publish body for one packaged app. An explicit allow-list: anything else the packager emits
- * (version, thumbnail and kzn bytes, developer_business_id, release settings, …) is left out.
- * Pure; throws `BusinessAppError('thumbnail_required')` for a release without a thumbnail id.
- */
 export function toPublishBody(
   deployable: DeployablePlugin,
   opts: PublishBodyOptions,
@@ -59,7 +49,6 @@ export function toPublishBody(
     throw new BusinessAppError('thumbnail_required', THUMBNAIL_REQUIRED_MESSAGE);
   }
 
-  // Fields the manifest may carry that DeployablePlugin doesn't type.
   const extra = deployable as unknown as Record<string, unknown>;
   const body: BusinessAppPublishBody = {
     name: deployable.name,

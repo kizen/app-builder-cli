@@ -3,7 +3,6 @@ import { Text, useInput } from 'ink';
 
 export interface ConfirmPromptProps {
   prompt: string;
-  /** Only `y` accepts, and any other key cancels; otherwise Enter accepts and `n` / Esc cancel. */
   strict: boolean;
   onAccept: () => void;
   onCancel: () => void;
@@ -29,17 +28,13 @@ export const ConfirmPrompt: FC<ConfirmPromptProps> = ({ prompt, strict, onAccept
 
 export interface ProductionConfirmProps {
   isProduction: boolean;
-  /** Off production too, only `y` accepts (with `productionPrompt`), without the banner. */
   strict?: boolean;
-  /** Shown off production, where Enter accepts. */
   prompt: string;
-  /** Shown on production, or when `strict`, where only `y` accepts. */
   productionPrompt: string;
   onAccept: () => void;
   onCancel: () => void;
 }
 
-/** A write confirmation: on production, a PRODUCTION banner and a strict prompt. */
 export const ProductionConfirm: FC<ProductionConfirmProps> = ({
   isProduction,
   strict = false,

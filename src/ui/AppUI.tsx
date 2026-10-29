@@ -38,7 +38,6 @@ const OutcomeFrame: FC<{ outcome: AppOutcome }> = ({ outcome }) => (
   </Box>
 );
 
-/** A final screen: a finished step's outcome, or a report. */
 const FinalFrame: FC<{ phase: FinalPhase }> = ({ phase }) =>
   phase.type === 'done' ? (
     <OutcomeFrame outcome={phase.outcome} />
@@ -49,7 +48,6 @@ const FinalFrame: FC<{ phase: FinalPhase }> = ({ phase }) =>
     </Box>
   );
 
-/** A packaging failure lists its validation errors by file; anything else is an error frame. */
 const Failure: FC<{ view: ErrorView }> = ({ view }) =>
   view.issues && view.issues.length > 0 ? (
     <ValidationIssues issues={view.issues} />
@@ -57,7 +55,6 @@ const Failure: FC<{ view: ErrorView }> = ({ view }) =>
     <ErrorFrame view={view} />
   );
 
-/** `appbuilder app …` at a terminal: the steps of `createAppFlow`, with block push's frame. */
 export const AppUI: FC<AppUIProps> = ({ request, deps }) => {
   const [phase, setPhase] = useState<AppPhase>({ type: 'loading', label: LOADING_CREDENTIALS });
   const [session, setSession] = useState<Session>(EMPTY_SESSION);
@@ -114,7 +111,6 @@ export const AppUI: FC<AppUIProps> = ({ request, deps }) => {
           {phase.lines.length > 0 && <Lines lines={phase.lines} />}
           {phase.message !== '' && <Text color="yellow">{phase.message}</Text>}
           <ChoiceList
-            // A new picker starts fresh: its own cursor and filter.
             key={[phase.title, ...phase.choices.map((choice) => choice.value)].join('|')}
             title={phase.title}
             choices={phase.choices}

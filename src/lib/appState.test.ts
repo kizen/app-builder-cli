@@ -147,7 +147,6 @@ describe('app state', () => {
       expect(read.notice).toContain('.kizenapp/apps.json');
       expect(read.notice).toContain('so it was ignored');
 
-      // The next write moves the corrupt file aside instead of destroying it.
       await writeAppState(dir, upsertAppStateEntry(read.doc, entry()));
 
       expect(await readFile(`${statePath()}.corrupt`, 'utf8')).toBe(text);
@@ -197,7 +196,6 @@ describe('app state', () => {
       writeAppState(dir, upsertAppStateEntry(second.doc, entry({ userId: 'b' }))),
     ).rejects.toThrow(AppStateChangedError);
 
-    // The first run's entry survived; re-reading and writing again keeps both.
     const fresh = await readAppState(dir);
 
     await writeAppState(dir, upsertAppStateEntry(fresh.doc, entry({ userId: 'b' })));
@@ -220,7 +218,6 @@ describe('app state', () => {
   });
 
   it('state writes are atomic', async () => {
-    // A large document, so a non-atomic write (truncate, then write) is observable mid-way.
     const big: AppStateDoc = {
       ...emptyAppStateDoc(),
       entries: Array.from({ length: 3000 }, (_, index) =>
@@ -296,7 +293,6 @@ describe('updateAppStateEntries', () => {
       otherBusiness,
       'junk',
     ]);
-    // The same objects, untouched.
     expect(updated?.entries[3]).toBe(otherApp);
     expect(updated?.entries[4]).toBe(otherBusiness);
   });

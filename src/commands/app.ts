@@ -69,10 +69,6 @@ const withWriteFlags = (command: Command, production = true): Command => {
   return production ? command.option('--allow-production', 'allow writes to go/fmo') : command;
 };
 
-/**
- * Runs `request` in the interactive UI when `isInteractive` says a person is at the terminal,
- * else with `headless` (where write commands are dry runs without --yes).
- */
 async function runApp(
   request: AppRequest,
   noInteractive: boolean,
@@ -97,7 +93,6 @@ async function runApp(
   }
 }
 
-/** `appbuilder app actions …`: which objects the app's JS actions are linked to. */
 function actionsCommand(app: Command): void {
   const actions = app
     .command('actions')
@@ -116,7 +111,6 @@ function actionsCommand(app: Command): void {
     );
   });
 
-  // Optional only so a terminal can pick them: a headless run without both is a usage_error.
   const link = withCredentialFlags(
     actions
       .command('link')
@@ -178,7 +172,6 @@ function actionsCommand(app: Command): void {
   );
 }
 
-/** `appbuilder app preview …`: the app's previews, yours or another developer's. */
 function previewCommand(app: Command): void {
   const preview = app.command('preview').description("Manage the app's previews: delete");
   const remove = withCredentialFlags(
@@ -207,12 +200,6 @@ function previewCommand(app: Command): void {
   );
 }
 
-/**
- * `appbuilder app …`: the Business App of the plugin in the current folder. At a terminal each
- * subcommand runs interactively and asks before writing; otherwise it runs headless, where write
- * commands are dry runs without --yes. Flags go in the order block push uses: credentials, the
- * command's own, write flags, then the session flags.
- */
 export function appCommand(program: Command): void {
   const app = program
     .command('app')
@@ -236,7 +223,6 @@ export function appCommand(program: Command): void {
   withSessionFlags(
     withWriteFlags(push)
       .option('--force', 'push even if files still have merge conflict markers')
-      // Placeholder copy.
       .option(
         '--base-from-preview <id>',
         "take this folder's base from your preview, while it's still source package <id> (a base_required choice prints it)",
@@ -255,12 +241,10 @@ export function appCommand(program: Command): void {
 
   withSessionFlags(
     withWriteFlags(publish)
-      // Placeholder copy.
       .option(
         '--force',
         'publish even if Live changed since your preview was based on it, or its base is unknown',
       )
-      // Placeholder copy.
       .option(
         '--expect-preview <id>',
         "publish only if your preview's source package is still <id> (a dry run prints it)",

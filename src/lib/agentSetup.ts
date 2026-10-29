@@ -13,12 +13,6 @@ import {
   type ManagedFs,
 } from './managedFiles.js';
 
-/**
- * The files `setup-claude` and `setup-codex` manage in a plugin, and whether they're out of date.
- * Both write the same skills (rendered for their harness) and the same data lib.
- */
-
-/** A kizen.json `entry` as a root-relative directory, or undefined when blank or outside the plugin. */
 const entryDirOf = (entry: unknown): string | undefined => {
   if (typeof entry !== 'string' || entry.trim() === '') {
     return undefined;
@@ -56,10 +50,6 @@ const manifestEntryDirs = async (dir: string, fs: ManagedFs): Promise<string[]> 
   }
 };
 
-/**
- * The files appbuilder manages in this plugin for `harness`: always every managed skill, and the
- * data lib under each entry directory when `includeLib` is set or that lib already exists.
- */
 export async function pluginAgentFiles(
   dir: string,
   harness: AgentHarness,
@@ -81,12 +71,6 @@ export async function pluginAgentFiles(
   return agentFiles(harness, libEntryDirs);
 }
 
-/**
- * Whether `harness`'s managed files in this plugin are out of date. Only a plugin that has opted
- * in counts, by having any managed skill's SKILL.md for that harness; then any managed file that
- * is missing (a skill added in a newer CLI included) or differs makes it stale. False when the
- * check itself fails: it only ever adds a warning.
- */
 export async function isAgentFilesStale(
   dir: string,
   harness: AgentHarness,
@@ -111,7 +95,6 @@ export async function isAgentFilesStale(
   }
 }
 
-/** The out-of-date warning of each harness whose managed files are stale here, in harness order. */
 export async function staleAgentFileWarnings(
   dir: string,
   fs: ManagedFs = nodeManagedFs,
@@ -135,11 +118,6 @@ export interface AgentFilesDeps {
 const count = (plan: readonly ManagedFilePlan[], status: ManagedFileStatus): string =>
   `${String(plan.filter((entry) => entry.status === status).length)} ${status}`;
 
-/**
- * Writes `harness`'s managed files into the plugin at `dir` (or with `dryRun` only reports them),
- * one line per file and a summary. Fails with exit code 1, writing nothing, outside a plugin.
- * `notFoundHint` is appended to the kizen.json-not-found error.
- */
 export async function setupAgentFiles(
   dir: string,
   harness: AgentHarness,

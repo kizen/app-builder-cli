@@ -101,15 +101,6 @@ import {
   type Setter,
 } from './commandSession.js';
 
-/**
- * The interactive `appbuilder app …` flow behind AppUI, free of ink so it can be tested without a
- * TTY. It drives the same appFlow steps as the headless runners and says what they say (the
- * appHeadless formatters); the differences are that it asks before writing, and answers a
- * decision (`base_required`, `publish_conflict`, a merge fallback) with a picker that runs the
- * chosen step here rather than printing a command.
- */
-
-/** One `appbuilder app` subcommand and its parsed options. */
 export type AppRequest =
   | { command: 'versions'; options: AppCommandOptions }
   | { command: 'push'; options: AppPushOptions }
@@ -118,19 +109,15 @@ export type AppRequest =
   | { command: 'rollback'; version: string; options: AppWriteOptions }
   | { command: 'pull'; version: string; options: AppPullOptions }
   | { command: 'actions list'; options: AppCommandOptions }
-  /** Without `action` or `object`, the flow picks them (and the menu setting). */
   | { command: 'actions link'; action?: string; object?: string; options: AppActionsLinkOptions }
   | { command: 'actions unlink'; action?: string; object?: string; options: AppWriteOptions }
   | { command: 'preview delete'; options: AppPreviewDeleteOptions };
 
-/** A finished step's screen. */
 export interface AppOutcome {
   title: string;
-  /** `success`: a ✓ line; `warning`: the step stopped short (a dry run, conflicts, a fallback). */
   tone: 'success' | 'warning';
   lines: string[];
   warnings: string[];
-  /** The command to run next, as text, when the lines don't already say it. */
   next: string | null;
 }
 
@@ -138,9 +125,7 @@ export interface ConfirmPhase {
   type: 'confirm';
   lines: string[];
   warnings: string[];
-  /** Production (go/fmo) gets the PRODUCTION banner and the strict prompt. */
   isProduction: boolean;
-  /** The strict prompt (`productionPrompt`, only `y` accepts) off production too. */
   strict?: boolean;
   prompt: string;
   productionPrompt: string;
@@ -158,24 +143,18 @@ export interface DonePhase {
   outcome: AppOutcome;
 }
 
-/** A final screen: a read-only report, or a finished step. */
 export type FinalPhase = ReportPhase | DonePhase;
 
 export interface ChoosePhase {
   type: 'choose';
   title: string;
-  /** Shown above the choices; empty for none. */
   message: string;
   lines: string[];
   choices: CommandChoice[];
   run: (choice: CommandChoice) => Promise<void>;
-  /** What Esc ends on: this final screen (exit 0), or null to cancel (exit 1). */
   dismissed: FinalPhase | null;
-  /** A finished step's screen, shown above a picker of what to do next. */
   above?: FinalPhase;
-  /** The choice (by value) the cursor starts on. */
   initial?: string;
-  /** Typing filters the choices. */
   searchable?: boolean;
 }
 
@@ -194,14 +173,11 @@ export interface AppFlow {
   ) => void;
   accept: (phase: ConfirmPhase) => void;
   choose: (phase: ChoosePhase, choice: CommandChoice) => void;
-  /** Esc on a picker. */
   dismiss: (phase: ChoosePhase) => void;
   cancel: () => void;
-  /** Ctrl+C: no further phase or write (`SessionStep.abort`). */
   abort: () => void;
 }
 
-/** Final phases: the UI exits on these. */
 export const isFinalAppPhase = (phase: AppPhase): boolean =>
   phase.type === 'done' || phase.type === 'report' || phase.type === 'error';
 
@@ -247,15 +223,11 @@ function writeFlagsOf(request: AppRequest): WriteFlags {
   }
 }
 
-/** How a push takes its base: `--base-from-preview`, or (empty) as it resolves on its own. */
 type PushBaseOptions = Pick<ResolveFolderBaseOptions, 'baseFromPreview'>;
 
-/** A write a picked "link JS actions now" makes: never a dry run, and always asked first. */
 const ASK_FIRST: Required<WriteGateFlags> = { dryRun: false, yes: false, allowProduction: false };
 
-/** A picker choice as the step it runs here: the command its `argv` prints, minus the shell. */
 export type ChoiceStep =
-  /** `baseFromPreview`: the push takes your preview's base (`--base-from-preview <id>`). */
   | { command: 'push'; baseFromPreview?: string }
   | { command: 'merge'; options: AppMergeOptions }
   | { command: 'actions link' };
@@ -300,17 +272,11 @@ export function choiceStep(choice: CommandChoice): ChoiceStep | null {
   return null;
 }
 
-/**
- * A step's message for a person at the terminal: without the advice to pass --force, which is
- * for an agent relaying the user's explicit wish. The picker never offers --force; the user passes
- * it on the command line.
- */
 export const withoutForceAdvice = (message: string): string =>
   message.replace(/ Only if the user explicitly wants[^:]*: pass --force\./g, '');
 
 const EXIT_CHOICE: CommandChoice = { value: 'exit', label: 'Exit without publishing', args: [] };
 
-/** `publish_conflict`'s way on: merge Live into this folder (shown before it writes). */
 const MERGE_LIVE_CHOICE: CommandChoice = {
   value: 'merge',
   label: 'Merge Live into this folder',
@@ -318,7 +284,6 @@ const MERGE_LIVE_CHOICE: CommandChoice = {
   argv: ['appbuilder', 'app', 'merge'],
 };
 
-/** `publish_conflict` with an unknown base: push this folder (shown before it writes), then publish. */
 const PUSH_FOLDER_CHOICE: CommandChoice = {
   value: 'push',
   label: 'Push this folder as your preview',
@@ -326,7 +291,6 @@ const PUSH_FOLDER_CHOICE: CommandChoice = {
   argv: ['appbuilder', 'app', 'push'],
 };
 
-/** After a step whose JS action check found actions that may need linking: link them here. */
 const LINK_ACTIONS_CHOICE: CommandChoice = {
   value: 'link-actions',
   label: 'Link JS actions now',
@@ -336,7 +300,6 @@ const LINK_ACTIONS_CHOICE: CommandChoice = {
 
 const FINISH_CHOICE: CommandChoice = { value: 'finish', label: 'Done', args: [] };
 
-/** A picker's choice per object, by id; the label tells apart objects with one display name. */
 const objectChoice = (object: BusinessObject): CommandChoice => ({
   value: object.id,
   label: `${object.objectName} (${object.name})`,
@@ -355,10 +318,6 @@ const actionChoice = (action: JsActionInfo): CommandChoice => ({
   args: [],
 });
 
-/**
- * The objects `arg` may name: every object when it's left out, the one it names, or (when several
- * match) those, for a picker. `not_found` when it names none.
- */
 function objectCandidates(
   objects: readonly BusinessObject[],
   arg: string | undefined,
@@ -382,7 +341,6 @@ function objectCandidates(
   return resolved;
 }
 
-/** `actions link` / `unlink`'s arguments; a missing one is picked. */
 interface ActionArgs {
   action?: string;
   object?: string;
@@ -391,7 +349,6 @@ interface ActionArgs {
 const MERGE_MARKER_NOTE = (label: string): string =>
   `Conflicted files get git conflict markers: <<<<<<< HEAD is your file and >>>>>>> live is ${label}.`;
 
-/** The interactive app flow; exported for tests. */
 export function createAppFlow(
   request: AppRequest,
   deps: AppDeps,
@@ -399,7 +356,6 @@ export function createAppFlow(
   showSession: Setter<Session>,
 ): AppFlow {
   const flags = writeFlagsOf(request);
-  // `--expect-preview`: publish only the preview a dry run reviewed.
   const expectPreview = request.command === 'publish' ? request.options.expectPreview : undefined;
   let signed: Signed | null = null;
 
@@ -408,7 +364,6 @@ export function createAppFlow(
     setPhase: showPhase,
     setSession: showSession,
     toView: appFailure,
-    // `not_signed_in` names the login command to run, not an agent's instructions.
     present: forPerson,
     next: async (_options, resolved) => {
       signed = { credentials: resolved.credentials, client: resolved.client };
@@ -417,11 +372,9 @@ export function createAppFlow(
   });
 
   const { fail } = session;
-  // After Ctrl+C the flow shows nothing more, and `writable` stops every write before it starts.
   const setPhase = session.whileRunning(showPhase);
   const setSession = session.whileRunning(showSession);
   const writable = (): boolean => !session.isAborted();
-  // The same check inside each apply, right before its server or file write.
   const control: ApplyControl = { isAborted: session.isAborted };
 
   const notice = (lines: readonly string[]): void => {
@@ -436,10 +389,6 @@ export function createAppFlow(
     setPhase({ type: 'done', outcome });
   };
 
-  /**
-   * Ends a step on `screen`. When its JS action check found actions that may need linking (as
-   * headless puts them in `next`), offers linking them here first; Esc or "Done" ends on `screen`.
-   */
   const finish = (context: AppContext, screen: FinalPhase, check: JsActionsCheck): void => {
     if (jsActionsNextArgs(check).length === 0) {
       setPhase(screen);
@@ -471,7 +420,6 @@ export function createAppFlow(
     fail({ message: 'Cancelled.' });
   };
 
-  /** `appbuilder app <args>` with the flags this run was given, for a "next" hint. */
   const nextCommand = (args: string[]): string =>
     ['appbuilder', 'app', ...args, ...credentialArgs(request.options, deps.processEnv)]
       .map(quoteArg)
@@ -491,7 +439,6 @@ export function createAppFlow(
     return step.value;
   };
 
-  /** The app again after a step changed it or this folder's state (its notices already shown). */
   const reload = async (context: AppContext): Promise<AppContext | null> => {
     if (signed === null) {
       return null;
@@ -510,7 +457,6 @@ export function createAppFlow(
     return step.value;
   };
 
-  /** Shows a planned write and asks (or applies, or stops at a dry run), as `writeDecision` says. */
   const write = async (
     context: AppContext,
     view: Omit<ConfirmPhase, 'type' | 'apply'>,
@@ -537,15 +483,6 @@ export function createAppFlow(
     }
   };
 
-  // -------------------------------------------------------------------------------------------
-  // decisions: a picker whose choices run here
-
-  /**
-   * A decision a step stopped for: `base_required` offers its choices, `publish_conflict` offers
-   * merging Live (never --force). `resume` re-runs the command that stopped, once an accept (or a
-   * push from a publish) has answered it. A push that stopped passes `afterPush`: a picked push
-   * (continuing your preview) is that push, so what follows it is what followed the push.
-   */
   const stopped = (
     context: AppContext,
     failure: AppFailure,
@@ -566,10 +503,8 @@ export function createAppFlow(
       return;
     }
 
-    // A preview pushed again since this publish was planned: nothing to merge; say so and stop.
     if (failure.code === 'publish_conflict' && failure.conflict?.reason !== 'preview_replaced') {
       const { message } = failure;
-      // A preview whose base is unknown is answered by pushing this folder, then publishing.
       const unknown = failure.conflict?.reason === 'base_unknown';
 
       setPhase({
@@ -596,10 +531,6 @@ export function createAppFlow(
     fail(failure);
   };
 
-  /**
-   * Runs a picked choice's step. An accept (or a push) then resumes the command that stopped; a
-   * push picked where a push stopped is followed by `afterPush` instead.
-   */
   const runChoice = async (
     context: AppContext,
     choice: CommandChoice,
@@ -614,8 +545,6 @@ export function createAppFlow(
       return;
     }
 
-    // The app as it is now: a conflict found just before publishing means Live moved since the
-    // context was loaded, and a merge of "Live" must merge that one.
     const fresh = await reload(context);
 
     if (fresh === null) {
@@ -638,12 +567,8 @@ export function createAppFlow(
       return;
     }
 
-    // Picking "already contains" is the go-ahead for recording it; a merge still shows its plan.
     await merge(fresh, step.options, step.options.acceptLiveBase === true ? resume : null);
   };
-
-  // -------------------------------------------------------------------------------------------
-  // push
 
   const push = async (
     context: AppContext,
@@ -678,7 +603,6 @@ export function createAppFlow(
 
     const plan = planned.value;
     const templates = jsActionTemplatesOf(prepared.deployable.artifacts.js_action_templates);
-    // Push leaves Live alone, so the actions are checked against the app as it is.
     const check = await checkJsActions(context, { kind: 'version', templates });
     const lines = [...formatPushPlanLines(plan), ...formatJsActionsLines(check)];
     const planWarnings = [...plan.warnings, ...jsActionsWarnings(check)];
@@ -721,7 +645,6 @@ export function createAppFlow(
 
         loading('Checking the JS actions…');
 
-        // Checked against the app as the push left it: a first push installs it.
         const pushedCheck = await checkPushedJsActions(context, templates);
 
         notice(jsActionsNotices(pushedCheck));
@@ -747,7 +670,6 @@ export function createAppFlow(
     );
   };
 
-  /** Packages this folder, then plans its push into `context`'s app. */
   const pushFolder = async (
     context: AppContext | Signed,
     then: (() => Promise<void>) | null,
@@ -779,9 +701,6 @@ export function createAppFlow(
     }
   };
 
-  // -------------------------------------------------------------------------------------------
-  // publish
-
   const publish = async (context: AppContext): Promise<void> => {
     if (!writable()) {
       return;
@@ -811,7 +730,6 @@ export function createAppFlow(
 
     const plan = planned.value;
     const lines = formatPublishPlanLines(plan);
-    // The preview's actions, against the current Live version's links.
     const previewCheck = await checkJsActions(context, {
       kind: 'version',
       templates: jsActionTemplatesOf(plan.jsActionTemplates),
@@ -839,13 +757,11 @@ export function createAppFlow(
         const applied = await applyPublish(context, plan, deps, control);
 
         if (!applied.ok) {
-          // Live moved, or the preview was replaced, since the plan: the same decision again.
           stopped(context, applied, resume);
 
           return;
         }
 
-        // What was published is Live now, so every one of its actions' links can be listed.
         const check = await checkJsActions(context, {
           kind: 'live',
           version: applied.value.liveVersion,
@@ -869,9 +785,6 @@ export function createAppFlow(
       },
     );
   };
-
-  // -------------------------------------------------------------------------------------------
-  // merge
 
   const merge = async (
     context: AppContext,
@@ -940,8 +853,6 @@ export function createAppFlow(
       };
 
       if (result.status === 'fallback' && plan.kind === 'fallback') {
-        // Merged by hand, or from the release this folder was copied from: picked here; Esc
-        // leaves it extracted.
         setPhase({
           type: 'choose',
           title: 'Choose how to go on',
@@ -958,7 +869,6 @@ export function createAppFlow(
       done(outcome);
     };
 
-    // Nothing to write: say so without asking.
     if (plan.kind === 'up_to_date' && !plan.advancesBase) {
       await apply();
 
@@ -974,7 +884,6 @@ export function createAppFlow(
           ...(marked ? [MERGE_MARKER_NOTE(label)] : []),
         ],
         warnings: plan.warnings,
-        // Only local files change.
         isProduction: false,
         prompt:
           plan.kind === 'merge'
@@ -984,7 +893,6 @@ export function createAppFlow(
               : 'Record it? (Y/n)',
         productionPrompt: '',
       },
-      // A picked accept was the go-ahead; production needs no flag for local files.
       {
         dryRun: flags.dryRun,
         yes: flags.yes || (then !== null && plan.kind === 'accept'),
@@ -993,9 +901,6 @@ export function createAppFlow(
       apply,
     );
   };
-
-  // -------------------------------------------------------------------------------------------
-  // rollback, pull, versions
 
   const rollback = async (context: AppContext, version: string): Promise<void> => {
     if (!writable()) {
@@ -1051,7 +956,6 @@ export function createAppFlow(
     );
   };
 
-  /** Writes only into a new folder, so it doesn't ask. */
   const pull = async (context: AppContext, version: string, out?: string): Promise<void> => {
     if (!writable()) {
       return;
@@ -1092,9 +996,6 @@ export function createAppFlow(
     });
   };
 
-  // -------------------------------------------------------------------------------------------
-  // actions
-
   const listActions = async (context: AppContext): Promise<void> => {
     loading('Reading the JS actions…');
 
@@ -1115,7 +1016,6 @@ export function createAppFlow(
     });
   };
 
-  /** The app's actions and the objects, read once for the pickers and the plan. */
   const readChoices = async (context: AppContext): Promise<ActionChoices | null> => {
     loading('Reading the JS actions…');
 
@@ -1130,7 +1030,6 @@ export function createAppFlow(
     return read.value;
   };
 
-  /** A picker whose Esc cancels. */
   const pickOne = (
     view: Pick<ChoosePhase, 'title' | 'choices'> & { initial?: string; searchable?: boolean },
     run: (choice: CommandChoice) => Promise<void>,
@@ -1138,7 +1037,6 @@ export function createAppFlow(
     setPhase({ type: 'choose', message: '', lines: [], ...view, run, dismissed: null });
   };
 
-  /** `then` with one of `candidates`: the only one when `named` (an argument named it), else picked. */
   const withObject = async (
     action: JsActionInfo,
     candidates: BusinessObject[],
@@ -1159,7 +1057,6 @@ export function createAppFlow(
       return;
     }
 
-    // The action's hint object starts highlighted.
     const hint =
       action.hintObjectName === null
         ? null
@@ -1182,10 +1079,6 @@ export function createAppFlow(
     );
   };
 
-  /**
-   * Links an action to an object. Without `action` or `object` it picks them, then the menu
-   * setting (unless `menu` says it); with both, it plans what they name, as headless does.
-   */
   const linkAction = async (
     context: AppContext,
     args: ActionArgs & { menu?: boolean },
@@ -1260,7 +1153,6 @@ export function createAppFlow(
       return;
     }
 
-    // The first one that may need linking starts highlighted.
     const pending = actions.find((action) => action.status !== 'linked');
 
     pickOne(
@@ -1299,7 +1191,6 @@ export function createAppFlow(
 
     notice(plan.notices);
 
-    // Nothing to write, so nothing to ask.
     if (plan.change === 'up_to_date') {
       done({ title: 'Nothing to change.', tone: 'success', lines, warnings: [], next: null });
 
@@ -1339,7 +1230,6 @@ export function createAppFlow(
           title: actionLinkedLine(plan, applied.value.status),
           tone: applied.value.status === 'already_linked' ? 'warning' : 'success',
           lines,
-          // Nothing changed when the server already had the link: no Live warning then.
           warnings: [
             ...(applied.value.status === 'already_linked' ? [] : plan.warnings),
             ...applied.value.warnings,
@@ -1350,10 +1240,6 @@ export function createAppFlow(
     );
   };
 
-  /**
-   * Removes a link. Without `action` or `object` it picks one of the listed links (of `action`,
-   * or to `object`, when one is given); with both, it plans what they name, as headless does.
-   */
   const unlinkAction = async (
     context: AppContext,
     args: ActionArgs,
@@ -1429,7 +1315,6 @@ export function createAppFlow(
         }
 
         const { action, link } = picked;
-        // An object the user can't list any more is still the one the link names.
         const object = choices.objects.find((candidate) => candidate.id === link.objectId) ?? {
           id: link.objectId,
           name: link.objectName,
@@ -1500,10 +1385,6 @@ export function createAppFlow(
     );
   };
 
-  // -------------------------------------------------------------------------------------------
-  // preview
-
-  /** Deletes your preview, or `owner`'s, after showing what that does. */
   const deletePreview = async (
     context: AppContext,
     options: AppPreviewDeleteOptions,
@@ -1532,14 +1413,12 @@ export function createAppFlow(
         lines,
         warnings: plan.warnings,
         isProduction: plan.summary.isProduction,
-        // Deleting a whole app takes a typed y everywhere, so Enter by habit can't do it.
         strict: plan.deletesApp,
         prompt: 'Delete it? (Y/n)',
         productionPrompt: plan.deletesApp
           ? `Type y to delete the preview and the whole app${plan.summary.isProduction ? ' on production' : ''} (y/N)`
           : 'Type y to delete it on production (y/N)',
       },
-      // --yes doesn't cover deleting the whole app: that's asked, unless --delete-app said it.
       plan.deletesApp && options.deleteApp !== true ? { ...flags, yes: false } : flags,
       async () => {
         if (!writable()) {
@@ -1564,7 +1443,6 @@ export function createAppFlow(
           tone: 'success',
           lines: [...deleted, ...formatPreviewDeletePlanLines(outcome)],
           warnings: [...outcome.warnings, ...applied.value.warnings],
-          // Your preview is gone: pushing this folder makes a new one.
           next: plan.owner.yours ? nextCommand(['push']) : null,
         });
       },
@@ -1609,7 +1487,6 @@ export function createAppFlow(
         }
 
         const report = describeVersions(context, folderBase.value);
-        // Never fails versions: a failed check is a notice.
         const check = await checkJsActions(context, { kind: 'app' });
 
         notice(jsActionsNotices(check));

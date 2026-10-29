@@ -92,7 +92,6 @@ export function authCommands(program: Command): void {
     }
 
     command.action(async (parsed: AuthCommandOptions & Interactive & Record<string, unknown>) => {
-      // Only `login` declares --no-interactive; elsewhere `interactive` is unset.
       const { noInteractive, options } = takeInteractiveFlag(parsed);
 
       await run(options, createDefaultAuthCommandDeps(undefined, pickInTerminal, noInteractive));

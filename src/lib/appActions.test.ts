@@ -69,7 +69,6 @@ const publish = (h: Harness, extra: Extra = {}): Promise<void> =>
 const versions = (h: Harness, extra: Extra = {}): Promise<void> =>
   runAppVersionsHeadless({ json: true, ...API_KEY, ...extra }, h.deps);
 
-/** hello_action is linked to Contacts (menu on); other_action is in Live and unlinked. */
 const HELLO_LINK: StoredAssociation = {
   id: 'assoc-1',
   template: 'hello_action',
@@ -77,7 +76,6 @@ const HELLO_LINK: StoredAssociation = {
   includePerformAction: true,
 };
 
-/** new_action is only in your preview; this link to it exists but the list can't show it. */
 const NEW_LINK: StoredAssociation = {
   id: 'assoc-2',
   template: 'new_action',
@@ -104,7 +102,6 @@ const actionServer = (overrides: ServerOptions = {}): ReturnType<typeof makeServ
 const harness = (overrides: ServerOptions = {}, options: HarnessOptions = {}): Harness =>
   makeHarness({ server: actionServer(overrides), state: [stateEntry()], ...options });
 
-/** A sign-in session for the current account (no account named), so printed commands pin it. */
 const sessionDeps = (environment: Environment = 'staging'): Partial<AppDeps> => ({
   oauth: {
     listSessions: vi.fn(() => Promise.resolve([environment])),
@@ -126,7 +123,6 @@ const sessionDeps = (environment: Environment = 'staging'): Partial<AppDeps> => 
 
 const PINNED = ['--env', 'staging', '--business', BIZ, '--user', USER, '--json'];
 
-/** This folder's app: a setup assistant offering hello_action, and three JS action templates. */
 const pushedApp = (): DeployablePlugin =>
   ({
     ...deployable(),
@@ -180,7 +176,6 @@ describe('the JS action check on push, publish and versions', () => {
 
     expect(h.exitCodes).toStrictEqual([]);
     expect(result).toMatchObject({ ok: true, applied: true });
-    // The setup assistant's actions go as the packager emits them; linking is separate.
     expect(publishedBody(h.server).base_config).toStrictEqual(pushedApp().base_config);
     expect(result.warnings).toStrictEqual([
       "These JS actions aren't linked to any object: other_action. Link them: with `--json`, run an action's `linkArgv`, `linkMenuArgv` or `linkNoMenuArgv`; at a terminal, run `appbuilder app actions link` to pick them.",
@@ -225,14 +220,12 @@ describe('the JS action check on push, publish and versions', () => {
       },
     ];
 
-    // Linking first, while it's the preview just pushed; then publishing.
     expect(result.next).toStrictEqual([
       ...actionNext,
       { step: 'publish', argv: ['appbuilder', 'app', 'publish', ...JSON_ARGS] },
     ]);
     expect((result.jsActions as { next: unknown }).next).toStrictEqual(actionNext);
 
-    // A dry run says the same, and keeps its own `next` for the apply.
     const dry = harness({}, { deployable: pushedApp() });
 
     await push(dry);
@@ -245,7 +238,6 @@ describe('the JS action check on push, publish and versions', () => {
   });
 
   it('a template missing from Live is reported as unknown, not unlinked', async () => {
-    // new_action really is linked (NEW_LINK), but the list only shows Live's templates' links.
     const h = harness();
 
     await versions(h);
@@ -264,7 +256,6 @@ describe('the JS action check on push, publish and versions', () => {
       "aren't linked to any object: new_action",
     );
 
-    // Once it's published, its link shows.
     const published = harness();
 
     await publish(published, { yes: true });
@@ -294,7 +285,6 @@ describe('the JS action check on push, publish and versions', () => {
     const first = (): Harness =>
       makeHarness({ server: makeServer({ exists: false, live: null }), deployable: pushedApp() });
 
-    // The dry run: nothing is installed yet, so nothing can be linked.
     const dry = first();
 
     await push(dry);
@@ -310,8 +300,6 @@ describe('the JS action check on push, publish and versions', () => {
       new_action: 'unlinked',
     });
 
-    // Applied: the push installed the app with only your preview, so every action is preview-only,
-    // checked against the app as the push left it, not the context from before it.
     const h = first();
 
     await push(h, { yes: true });
@@ -333,8 +321,6 @@ describe('the JS action check on push, publish and versions', () => {
         (action) => action.inLive,
       ),
     ).toStrictEqual([false, false, false]);
-    // They're linked now, like Live ones: listing them is a next step, but no link dry run picks
-    // an object for an action that may be linked already.
     const listStep = {
       step: 'actions',
       argv: ['appbuilder', 'app', 'actions', 'list', ...JSON_ARGS],
@@ -348,11 +334,9 @@ describe('the JS action check on push, publish and versions', () => {
     expect(result.warnings).toStrictEqual([
       "These JS actions aren't in the Live version, so their links can't be listed and they may not be linked to any object: hello_action, other_action, new_action. To make sure, link them: with `--json`, run an action's `linkArgv`, `linkMenuArgv` or `linkNoMenuArgv`; at a terminal, run `appbuilder app actions link` to pick them.",
     ]);
-    // The app was read again after the push; there's no Live version to list links of.
     expect(h.server.calls.filter((call) => call === 'listApps')).toHaveLength(2);
     expect(h.server.calls).not.toContain('listAssociations');
 
-    // Right after the push, linking one works (the server resolves your preview for the link).
     h.reset();
     await link(h, 'new_action', 'client_client', { yes: true });
 
@@ -374,8 +358,6 @@ describe('the JS action check on push, publish and versions', () => {
 
     expect(h.json()).toMatchObject({ ok: true, jsActions: { status: 'checked', actions: [] } });
     expect(h.server.calls).not.toContain('listAssociations');
-    // Only the push's own read of its base's source package (for the lineage it uploads); the JS
-    // action check reads no version.
     expect(h.server.calls.filter((call) => call.startsWith('getVersion'))).toStrictEqual([
       'getVersion:3',
     ]);
@@ -413,7 +395,6 @@ describe('the JS action check on push, publish and versions', () => {
       expect(h.stderr.join(''), name).toContain(notice);
     }
 
-    // The push and the publish really wrote.
     const pushed = failing();
 
     await push(pushed, { yes: true });
@@ -424,7 +405,6 @@ describe('the JS action check on push, publish and versions', () => {
     await publish(published, { yes: true });
     expect(published.server.writes()).toContain(`promote:${USER}`);
 
-    // Versions too.
     const listed = failing();
 
     await versions(listed);
@@ -492,7 +472,6 @@ describe('app actions list', () => {
     const result = h.json();
 
     expect(result).toMatchObject({ ok: true, published: true, status: 'checked' });
-    // Each action with its link templates; each link with its unlink dry run; all as this run.
     const linkArgvs = (action: string): Record<string, string[]> => ({
       linkArgv: ['appbuilder', 'app', 'actions', 'link', action, '<object>', ...JSON_ARGS],
       linkMenuArgv: [
@@ -643,7 +622,6 @@ describe('app actions link', () => {
       requiresProductionConsent: false,
       next: [],
     });
-    // The object by id (not "Contacts"), the menu setting shown, and the signed-in account.
     expect(result.applyArgv).toStrictEqual([
       'appbuilder',
       'app',
@@ -673,7 +651,6 @@ describe('app actions link', () => {
         appApiName: APP_API,
         actionApiName: 'other_action',
         objectId: CONTACTS.id,
-        // Like the Kizen UI, a new link isn't in the menus unless asked.
         includePerformAction: menu ?? false,
       });
       expect(h.server.state.associations).toContainEqual(
@@ -730,7 +707,6 @@ describe('app actions link', () => {
   });
 
   it('a duplicate 400 on create is reported as already linked', async () => {
-    // new_action is only in your preview, so its existing link (NEW_LINK) isn't listed.
     const h = harness();
 
     await link(h, 'new_action', 'client_client', { yes: true, menu: true });
@@ -747,7 +723,6 @@ describe('app actions link', () => {
       warnings: [ALREADY_LINKED_WARNING('new_action', 'client_client')],
     });
     expect(h.server.api.createActionAssociation).toHaveBeenCalledTimes(1);
-    // Nothing changed: the flag wasn't touched.
     expect(h.server.state.associations).toContainEqual(NEW_LINK);
   });
 
@@ -771,7 +746,6 @@ describe('app actions link', () => {
   });
 
   it('actions link resolves Contacts (custom_only=false) and refuses an unknown or ambiguous object', async () => {
-    // Contacts, the object custom_only=true leaves out, by api name, id, or display name.
     for (const arg of ['client_client', CONTACTS.id, 'contacts', 'CLIENT_CLIENT']) {
       const h = harness();
 
@@ -793,7 +767,6 @@ describe('app actions link', () => {
     expect(unknown.exitCodes).toStrictEqual([1]);
     expect(unknown.server.writes()).toStrictEqual([]);
 
-    // Two objects are called "Deals": a decision, with a command per object by id.
     const ambiguous = harness();
 
     await link(ambiguous, 'other_action', 'Deals', { yes: true, menu: true });
@@ -892,7 +865,6 @@ describe('app actions unlink', () => {
     expect(applied.server.writes()).toStrictEqual(['deleteAssociation:assoc-1']);
     expect(applied.server.state.associations.map((row) => row.id)).toStrictEqual(['assoc-2']);
 
-    // In Live and not linked: a plain not_found.
     const inLive = harness();
 
     await unlink(inLive, 'other_action', 'client_client', { yes: true });
@@ -903,7 +875,6 @@ describe('app actions unlink', () => {
       message: "other_action isn't linked to client_client.",
     });
 
-    // Only in your preview: its link exists (NEW_LINK), but it can't be listed, so say why.
     const previewOnly = harness();
 
     await unlink(previewOnly, 'new_action', 'client_client', { yes: true });
@@ -973,7 +944,6 @@ describe('every actions command', () => {
       await run(rejected, { yes: true, allowProduction: true });
 
       expect(rejected.json()).toMatchObject({ ok: false, code: 'auth_failed' });
-      // The mocked rejection records no call; nothing after it ran.
       expect(rejected.server.calls).toStrictEqual([]);
       expect(rejected.server.api.listActionAssociations).not.toHaveBeenCalled();
       expect(rejected.server.api.listObjects).not.toHaveBeenCalled();
@@ -1023,7 +993,6 @@ describe('every actions command', () => {
       expect(h.server.writes()).toStrictEqual([]);
     }
 
-    // Not aborted, the same plans write.
     expect(await applyActionLink(createContext, createPlan.value)).toMatchObject({ ok: true });
     expect(create.server.writes()).toHaveLength(1);
   });
@@ -1072,7 +1041,6 @@ describe('actions link and unlink arguments', () => {
       expect(result, name).toMatchObject({ ok: false, code: 'usage_error' });
       expect(result.message, name).toContain(`Missing argument ${missing}.`);
       expect(h.exitCodes, name).toStrictEqual([1]);
-      // Before signing in: no request, no write.
       expect(h.mocks.businessApps, name).not.toHaveBeenCalled();
       expect(h.server.calls, name).toStrictEqual([]);
     }
@@ -1081,8 +1049,6 @@ describe('actions link and unlink arguments', () => {
 
 describe('a create the server resolves against the version the caller is using', () => {
   it("a create that can't find a preview-only template says to publish first, then link", async () => {
-    // new_action is only in your preview, and the server resolves Live for the caller (as one
-    // without KZN-19521's fix does for an OAuth client).
     const switched = harness({ active: { [USER]: null } });
 
     await link(switched, 'new_action', 'deal_pipeline', { yes: true });
@@ -1098,7 +1064,6 @@ describe('a create the server resolves against the version the caller is using',
     expect(switched.exitCodes).toStrictEqual([1]);
     expect(switched.server.state.associations).toStrictEqual([HELLO_LINK, NEW_LINK]);
 
-    // Using someone else's preview fails the same way.
     const otherPreview = harness({
       active: { [USER]: OTHER },
       previews: {
@@ -1116,8 +1081,6 @@ describe('a create the server resolves against the version the caller is using',
       hint: PREVIEW_ONLY_LINK_HINT('new_action'),
     });
 
-    // Control: a caller the server resolves your preview for (right after a push, on an
-    // environment with the fix) creates the same link.
     const using = harness();
 
     await link(using, 'new_action', 'deal_pipeline', { yes: true });
@@ -1125,7 +1088,6 @@ describe('a create the server resolves against the version the caller is using',
     expect(using.json()).toMatchObject({ ok: true, applied: true, status: 'created' });
     expect(using.server.writes()).toStrictEqual([`createAssociation:new_action:${DEALS.id}`]);
 
-    // A Live action the server can't find gets no preview hint: that isn't the cause.
     const live = harness();
 
     live.server.api.createActionAssociation.mockRejectedValueOnce(
@@ -1147,7 +1109,6 @@ describe('a link change to an action in Live', () => {
     `${action} is in the Live version, so this change to its link to ${object} applies to everyone using Live as soon as it's made.`;
 
   it('link dry run of a Live action warns that the change reaches Live users', async () => {
-    // A new link: the dry run, and the applied result.
     const dry = harness();
 
     await link(dry, 'other_action', 'deal_pipeline');
@@ -1166,7 +1127,6 @@ describe('a link change to an action in Live', () => {
       warnings: [LIVE_WARNING('other_action', 'deal_pipeline')],
     });
 
-    // A menu setting change counts: it changes the object's Perform Action menus in Live.
     const menu = harness();
 
     await link(menu, 'hello_action', 'client_client', { menu: false });
@@ -1176,7 +1136,6 @@ describe('a link change to an action in Live', () => {
       warnings: [LIVE_WARNING('hello_action', 'client_client')],
     });
 
-    // The server already had it (a link made since the list was read): nothing changed.
     const raced = harness();
 
     raced.server.api.createActionAssociation.mockRejectedValueOnce(
@@ -1187,8 +1146,6 @@ describe('a link change to an action in Live', () => {
       ),
     );
     await link(raced, 'other_action', 'deal_pipeline', { yes: true });
-    // other_action is in Live, so its link would be listed: it was made after the list was read.
-    // Say that, not that the link can't be listed, and how to set the menu now.
     expect(raced.json()).toMatchObject({
       status: 'already_linked',
       warnings: [ALREADY_LINKED_LIVE_WARNING('other_action', 'deal_pipeline')],
@@ -1200,7 +1157,6 @@ describe('a link change to an action in Live', () => {
       "isn't listed",
     );
 
-    // Nothing to change, nothing to warn about.
     const same = harness();
 
     await link(same, 'hello_action', 'client_client', { menu: true });
@@ -1227,7 +1183,6 @@ describe('a link change to an action in Live', () => {
   });
 
   it('link of a preview-only action does not carry the Live warning', async () => {
-    // new_action is only in your preview: the change reaches only the users of a version with it.
     const dry = harness();
 
     await link(dry, 'new_action', 'deal_pipeline');
@@ -1238,7 +1193,6 @@ describe('a link change to an action in Live', () => {
     await link(applied, 'new_action', 'deal_pipeline', { yes: true });
     expect(applied.json()).toMatchObject({ status: 'created', warnings: [] });
 
-    // Already linked (NEW_LINK, which the list can't show): nothing changed, only that warning.
     const already = harness();
 
     await link(already, 'new_action', 'client_client', { yes: true });
@@ -1251,8 +1205,6 @@ describe('a link change to an action in Live', () => {
 
 describe('a preview-only link that fails', () => {
   it('carries the publish-first hint on every attempt, not just the first', async () => {
-    // The server resolves Live for the caller (an environment without KZN-19521's fix), so linking
-    // the preview-only new_action fails each time; nothing in between changes what the CLI sees.
     const h = harness({ active: { [USER]: null } });
     const results: Record<string, unknown>[] = [];
 
@@ -1271,7 +1223,6 @@ describe('a preview-only link that fails', () => {
       });
     }
 
-    // Both attempts reached the server, which refused both.
     expect(h.server.writes()).toStrictEqual([
       `createAssociation:new_action:${DEALS.id}`,
       `createAssociation:new_action:${DEALS.id}`,
@@ -1283,10 +1234,6 @@ describe('a preview-only link that fails', () => {
 describe('the commands each JS action carries', () => {
   const SWITCHED = { businessId: 'biz-other', userId: 'user-other' };
 
-  /**
-   * Two saved accounts on staging, BIZ/USER current until `pointer.current` changes (a login
-   * elsewhere); `connect` signs in as the account named, else the current one.
-   */
   const accountHarness = (): { h: Harness; pointer: { current: typeof SWITCHED } } => {
     const pointer = { current: { businessId: BIZ, userId: USER } };
     const saved = [
@@ -1320,7 +1267,6 @@ describe('the commands each JS action carries', () => {
     return { h, pointer };
   };
 
-  /** Runs a printed `appbuilder app actions link|unlink …` argv against `h`, as the CLI parses it. */
   const runActionsArgv = async (argv: readonly string[], h: Harness): Promise<void> => {
     const [program, group, sub, command, ...rest] = argv;
     const options: Record<string, string | boolean> = {};
@@ -1369,7 +1315,6 @@ describe('the commands each JS action carries', () => {
     links: { objectId: string; unlinkArgv: string[] }[];
   }
 
-  /** The actions of a result: `jsActions.actions` (push, publish, versions) or `actions` (list). */
   const actionsOf = (result: Record<string, unknown>): ActionJson[] =>
     ((result.jsActions as { actions?: unknown } | undefined)?.actions ??
       result.actions) as ActionJson[];
@@ -1393,7 +1338,6 @@ describe('the commands each JS action carries', () => {
       ['versions', (h, extra) => versions(h, extra)],
       ['actions list', (h, extra) => listActions(h, extra)],
     ];
-    // A session run that named its account with --business, and an API-key --profile run.
     const runs: [string, Extra, string[]][] = [
       [
         'session --business',
@@ -1457,7 +1401,6 @@ describe('the commands each JS action carries', () => {
       }
     }
 
-    // Without --json, the text prints no command templates.
     const text = harness();
 
     await runAppActionsListHeadless({ ...API_KEY }, text.deps);
@@ -1493,7 +1436,6 @@ describe('the commands each JS action carries', () => {
   it('a link template with its object filled in, and an unlinkArgv, act as the original account after a switch', async () => {
     const { h, pointer } = accountHarness();
 
-    // The current account (BIZ) at the time: no account flags given.
     await versions(h, { credentials: undefined, profile: undefined });
 
     const actions = actionsOf(h.json());
@@ -1502,7 +1444,6 @@ describe('the commands each JS action carries', () => {
 
     expect(linkMenuArgv).toContain('<object>');
 
-    // Another account becomes current before the agent runs them.
     pointer.current = SWITCHED;
 
     const connect = vi.mocked(h.deps.oauth.connect);
@@ -1544,7 +1485,6 @@ describe('the commands each JS action carries', () => {
   });
 
   it('linkNoMenuArgv on an existing menu-on link patches it off', async () => {
-    // hello_action is linked to Contacts with the menu on (HELLO_LINK).
     const { h } = accountHarness();
 
     await versions(h);
@@ -1553,7 +1493,6 @@ describe('the commands each JS action carries', () => {
     const fill = (argv: string[]): string[] =>
       argv.map((arg) => (arg === '<object>' ? 'client_client' : arg));
 
-    // linkArgv keeps an existing link as it is: nothing to change.
     h.reset();
     await runActionsArgv(fill(hello.linkArgv), h);
     expect(h.json()).toMatchObject({ ok: true, status: 'up_to_date', includePerformAction: true });

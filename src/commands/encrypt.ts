@@ -68,9 +68,6 @@ export function encryptCommand(program: Command): void {
       };
 
       // ink's interactive UI needs a TTY for raw-mode input AND a TTY stdout to
-      // render into. If either is redirected/piped (`> out.json`, `| jq`), or an
-      // agent or CI runs the command, fall back to the headless flow so stdout
-      // gets clean compact JSON instead of ANSI frames.
       if (!isProcessInteractive({ noInteractive })) {
         try {
           await runHeadless(ctx, options, defaults, stageWasDefaulted, {

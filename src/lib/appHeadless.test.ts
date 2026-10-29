@@ -86,10 +86,6 @@ import {
 
 type Extra = Record<string, unknown>;
 
-/**
- * Tests that run real git, real merges or real zips on disk slow down when the whole suite runs
- * in parallel on a loaded machine. A generous per-test ceiling keeps them from timing out on load.
- */
 const REAL_IO_TIMEOUT = 30_000;
 
 const zipEntryNames = (bytes: Uint8Array): string[] => Object.keys(unzipSync(bytes));
@@ -114,7 +110,6 @@ const versions = (h: Harness, extra: Extra = {}): Promise<void> =>
 
 describe('app publish: conflict check', () => {
   it("publish refuses when Live moved past the preview's base", async () => {
-    // The preview's source says it's based on v3 (`yourPreview()`'s lineage).
     const server = makeServer({ live: '4', previews: { [USER]: yourPreview() } });
     const h = makeHarness({ server, state: [stateEntry()] });
 
@@ -295,7 +290,6 @@ describe('app publish: conflict check', () => {
 
       expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '3' });
 
-      // Others publish v4 and v5; this folder merges them but doesn't push.
       server.release();
       server.release();
       h.mocks.planMerge.mockResolvedValue(readyPlan());
@@ -306,7 +300,6 @@ describe('app publish: conflict check', () => {
       expect(h.json()).toMatchObject({ ok: true, applied: true });
       expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '5' });
 
-      // The preview on the server is still the push based on v3.
       h.reset();
       await publish(h, { yes: true });
 
@@ -323,7 +316,6 @@ describe('app publish: conflict check', () => {
     const h = makeHarness({ server, state: [stateEntry()] });
     const original = server.api.listApps.getMockImplementation();
 
-    // Someone publishes v4 between this run's first read and its promote.
     server.api.listApps.mockImplementationOnce(async (search) => {
       const rows = await (original as BusinessAppsApi['listApps'])(search);
 
@@ -347,8 +339,6 @@ describe('app publish: conflict check', () => {
       stateEntry({ userId: OTHER }),
     ];
 
-    // Only near misses: the publish goes through, and nothing here is recorded as pushed from
-    // this folder, so no base is recorded for this account.
     const miss = makeHarness({
       server: makeServer({ live: '3', previews: { [USER]: yourPreview() } }),
       state: others,
@@ -360,7 +350,6 @@ describe('app publish: conflict check', () => {
     expect(miss.entry()).toBeUndefined();
     expect(miss.store.doc.entries).toStrictEqual(others);
 
-    // This account's entry pushed the preview: its base moves to the new Live version, alone.
     const hit = makeHarness({
       server: makeServer({ live: '3', previews: { [USER]: yourPreview() } }),
       state: [...others, stateEntry()],
@@ -404,7 +393,6 @@ describe('app publish: preview checks and effects', () => {
     const getPreview = h.server.api.getPreview.getMockImplementation();
     let reads = 0;
 
-    // The plan reads the reviewed preview; by the pre-promote read it was pushed again elsewhere.
     h.server.api.getPreview.mockImplementation((apiName, owner) => {
       reads += 1;
 
@@ -448,7 +436,6 @@ describe('app publish: preview checks and effects', () => {
     expect(h.entry()).toStrictEqual({
       ...KEY,
       folderBaseLiveVersion: '4',
-      // The release's source package: the preview's, which it was promoted from.
       folderBaseSourcePackageId: 'src-preview',
       lastPushedSourceHash: 'h',
       note: 'kept',
@@ -456,7 +443,6 @@ describe('app publish: preview checks and effects', () => {
   });
 
   it('publish dry run promises no specific release number', async () => {
-    // v4 and v5 were published and deleted: the server numbers the next release 6.
     const server = makeServer({
       live: '3',
       deleted: ['4', '5'],
@@ -590,7 +576,6 @@ describe('app publish: preview checks and effects', () => {
 });
 
 describe('the folder base and the app it was recorded for', () => {
-  /** This folder's record from an app that has since been deleted from the business. */
   const staleEntry = (): ReturnType<typeof stateEntry> =>
     stateEntry({
       folderBaseLiveVersion: '1',
@@ -602,7 +587,6 @@ describe('the folder base and the app it was recorded for', () => {
     const absent = (): Harness =>
       makeHarness({ server: makeServer({ exists: false, live: null }), state: [staleEntry()] });
 
-    // versions: no base is reported for an app that isn't here.
     const looked = absent();
 
     await versions(looked);
@@ -614,7 +598,6 @@ describe('the folder base and the app it was recorded for', () => {
       },
     });
 
-    // The dry run: the base is the new app's (none), and it says why the recorded one is ignored.
     const dry = absent();
 
     await push(dry);
@@ -626,8 +609,6 @@ describe('the folder base and the app it was recorded for', () => {
       ],
     });
 
-    // Applied: the stale "1" is replaced by the new app's base (null: no Live version yet), as a
-    // first push of a new app records it.
     const h = absent();
 
     await push(h, { yes: true });
@@ -638,8 +619,6 @@ describe('the folder base and the app it was recorded for', () => {
     });
     expect(h.entry()?.lastPushedSourceHash).not.toBe('hash-gone');
 
-    // So when someone else then publishes their own v1, this folder's publish stops on the
-    // conflict instead of replacing it.
     h.server.release('Someone');
     h.reset();
     await publish(h, { yes: true });
@@ -721,14 +700,12 @@ describe('app push', () => {
       expect(choices).toHaveLength(2);
 
       for (const choice of choices) {
-        // args stays "flags to append to the command that was run": none for another command.
         expect(choice.args).toStrictEqual([]);
         expect(choice.argv.slice(0, 3)).toStrictEqual(['appbuilder', 'app', 'merge']);
         expect(choice.argv.slice(-flags.length)).toStrictEqual(flags);
       }
     };
 
-    // A saved sign-in account, picked with --env / --business / --user.
     const session = makeHarness({
       server: makeServer({ live: '3' }),
       deps: {
@@ -762,7 +739,6 @@ describe('app push', () => {
 
     expectArgv(session.json(), ['--env', 'staging', '--business', BIZ, '--user', USER, '--json']);
 
-    // An API-key file, with -c.
     const keyFile = makeHarness({ server: makeServer({ live: '3' }) });
 
     await runAppPushHeadless(
@@ -772,7 +748,6 @@ describe('app push', () => {
 
     expectArgv(keyFile.json(), ['-c', '/home/me/creds.json', '--json']);
 
-    // A stored profile, with --profile.
     const profile = makeHarness({ server: makeServer({ live: '3' }) });
 
     await push(profile, { yes: true });
@@ -810,7 +785,6 @@ describe('app push', () => {
       ],
     });
     expect(h.stderr.join('')).toContain('its files match v4 exactly');
-    // Live first, then newest first; it stops at the match.
     expect(server.calls.filter((call) => call.startsWith('getVersion'))).toStrictEqual([
       'getVersion:5',
       'getVersion:4',
@@ -856,7 +830,6 @@ describe('app push', () => {
 
     expect(h.entry()?.folderBaseLiveVersion).toBe('1');
 
-    // Someone else publishes v2; this folder still holds v1-based source.
     server.release();
     h.local.files = { 'kizen.json': 'v1 plus my edits' };
     h.reset();
@@ -894,7 +867,6 @@ describe('app push', () => {
     expect(body.api_name).toBe(BASE);
     expect(body.source_filesystem_package).toBe('file-1');
     expect(body.thumbnail).toBe('file-2');
-    // The folder's files as zipped, plus the lineage of the preview's base (v3, recorded).
     const uploaded = server.state.files.get('file-1') ?? new Uint8Array();
 
     expect(zipFileHashes(uploaded)).toStrictEqual(zipFileHashes(zipOf(h.local.files)));
@@ -906,7 +878,6 @@ describe('app push', () => {
       isPublic: true,
     });
     expect(server.api.promotePreview).not.toHaveBeenCalled();
-    // The caller's own preview was written.
     expect(server.state.previews.has(USER)).toBe(true);
     expect(h.json()).toMatchObject({ ok: true, applied: true, previewVersion: '0' });
   });
@@ -954,14 +925,12 @@ describe('app push', () => {
         'These files still have merge conflict markers: src/a.js. Resolve them. Only if the user explicitly wants to push them anyway: pass --force.',
     });
 
-    // --force pushes, and keeps checking the file.
     h.reset();
     await push(h, { yes: true, force: true });
 
     expect(h.json()).toMatchObject({ ok: true, applied: true, conflictMarkers: ['src/a.js'] });
     expect(h.entry()?.conflictedPaths).toStrictEqual(['src/a.js']);
 
-    // Resolved: the push goes through and the list is cleared.
     h.local.files = { 'kizen.json': '{}', 'src/a.js': 'x\nmine\n' };
     h.reset();
     await push(h, { yes: true });
@@ -970,7 +939,6 @@ describe('app push', () => {
     expect(h.entry()).not.toHaveProperty('conflictedPaths');
   });
 
-  /** A push whose `.gitignore` gets the CLI's entries at apply time, after `edit` runs. */
   const pushWithIgnoreEdit = async (edit: (files: Files) => void): Promise<Harness> => {
     const h = makeHarness({
       server: makeServer({ live: '3' }),
@@ -1018,7 +986,6 @@ describe('app push', () => {
     expect(result).toMatchObject({ ok: true, applied: true });
     expect(uploaded).toBeDefined();
     expect(zipEntryNames(uploaded ?? new Uint8Array())).toContain('.gitignore');
-    // `source` is the folder's re-zip; the upload is that zip's files plus the lineage.
     expect(zipFileHashes(uploaded ?? new Uint8Array())).toStrictEqual(
       zipFileHashes(zipOf(h.local.files)),
     );
@@ -1042,7 +1009,6 @@ describe('app push', () => {
         await mkdir(join(pluginDir, 'src'), { recursive: true });
         await writeFile(join(pluginDir, 'kizen.json'), '{"api_name":"acme"}\n');
         await writeFile(join(pluginDir, 'src', 'a.js'), 'a\n');
-        // The user's own .gitignore, without the CLI's entries.
         await writeFile(join(pluginDir, '.gitignore'), 'node_modules/\n');
 
         if (mode === 'git') {
@@ -1074,7 +1040,6 @@ describe('app push', () => {
 
         expect(h.json()).toMatchObject({ ok: true, applied: false, warnings: [] });
 
-        // What was pushed is the folder as it is now, .gitignore included.
         const uploaded = h.server.state.files.get(
           publishedBody(h.server).source_filesystem_package,
         );
@@ -1210,8 +1175,6 @@ describe('every command', () => {
   it.each(commands)(
     "an environment without the Business Apps list says Business Apps aren't available there (%s)",
     async (_name, run) => {
-      // The real API over a client whose every request 404s, as on an environment without the
-      // Business Apps backend.
       const requestJson = vi.fn((method: string, path: string) =>
         Promise.reject(
           new KizenApiError('not_found', `${method} ${path} failed with 404: Not found.`, {
@@ -1306,7 +1269,6 @@ describe('app commands warn when managed agent skills are out of date', () => {
   const CODEX_STALE =
     'Codex files managed by appbuilder are out of date; run appbuilder setup-codex';
 
-  /** A harness every command succeeds in: Live v5, your preview based on it, merge from v3. */
   const ready = (name: string, staleAgentFileWarnings: () => Promise<string[]>): Harness => {
     const base = name === 'merge' ? '3' : '5';
     const h = makeHarness({
@@ -1417,7 +1379,6 @@ describe('app rollback', () => {
     const body = publishedBody(server);
 
     expect(body.release).toBe(false);
-    // Version 2's files uploaded again, carrying the restored preview's lineage: based on Live v5.
     expect(body.source_filesystem_package).toBe('file-1');
 
     const restored = server.state.files.get('file-1') ?? new Uint8Array();
@@ -1437,7 +1398,6 @@ describe('app rollback', () => {
       lastPushedSourceHash: null,
       previewRestoredFrom: '2',
     });
-    // The old source was unpacked outside the plugin folder, then removed.
     expect(h.mocks.unzip).toHaveBeenCalledWith(
       server.state.files.get('src-v2'),
       '/tmp/appbuilder-version-x/source',
@@ -1479,7 +1439,6 @@ describe('app rollback', () => {
           makeTempDir: () => mkdtemp(join(tmp, 'v-')),
           removeDir: realDeps.removeDir,
           unzipToDir,
-          // Packages what was extracted: the services come from version 2's kizen.json.
           packageLocalPlugin: async (dir) => {
             const manifest = JSON.parse(await readFile(join(dir, 'kizen.json'), 'utf8')) as {
               services: unknown[];
@@ -1495,7 +1454,6 @@ describe('app rollback', () => {
       expect(h.json()).toMatchObject({ ok: true, applied: true });
       expect(publishedBody(server).services).toStrictEqual(fullServices);
       expect(server.state.definitions.get('2')?.services).toStrictEqual(STRIPPED_SERVICES);
-      // The temp folder is gone.
       expect(await readdir(tmp)).toStrictEqual([]);
     } finally {
       await rm(tmp, { recursive: true, force: true });
@@ -1541,7 +1499,6 @@ describe('app rollback', () => {
     expect(result.warnings).toContainEqual(
       expect.stringContaining('restored with `appbuilder app rollback`'),
     );
-    // The restored preview's own upload (version 2's files with its lineage).
     expect(server.state.definitions.get('6')?.source_filesystem_package).toBe('file-1');
     expect(result.conflictCheck).toMatchObject({ baseLiveVersion: '5' });
     expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '3' });
@@ -1559,8 +1516,6 @@ describe('app rollback', () => {
       ...KEY,
       folderBaseLiveVersion: '3',
       folderBaseSourcePackageId: 'src-v3',
-      // The rollback uploaded file-1 and file-2 (its source and thumbnail); this push's source
-      // zip is file-3.
       previewSourcePackageId: 'file-3',
       lastPushedSourceHash: await sha(h.local.files),
     });
@@ -1622,7 +1577,6 @@ describe('app merge', () => {
 
         const server = makeServer({ live: '5' });
 
-        // Releases pushed before the exclusion carry older copies of the managed skills.
         server.state.files.set(
           'src-v3',
           zipOf({ 'kizen.json': local['kizen.json'], 'src/a.js': 'a3\n', [skill]: 'skill v1\n' }),
@@ -1669,8 +1623,6 @@ describe('app merge', () => {
     REAL_IO_TIMEOUT,
   );
 
-  // The preview the state records is on the server (a recorded preview you no longer have is
-  // dropped from the state).
   const mergeHarness = (state: AppStateEntry[] = [stateEntry()], files?: Files): Harness =>
     makeHarness({
       server: makeServer({ live: '5', previews: { [USER]: yourPreview() } }),
@@ -1731,11 +1683,9 @@ describe('app merge', () => {
     await merge(ok, { yes: true });
 
     expect(order).toStrictEqual(['applyMerge', 'writeAppState']);
-    // Only the folder's base moves; the preview's stays what was pushed.
     expect(ok.entry()).toStrictEqual(
       stateEntry({
         folderBaseLiveVersion: '5',
-        // Live's source package, as the merge read it, recorded with the base.
         folderBaseSourcePackageId: 'src-v5',
         lastPushedSourceHash: 'h',
       }),
@@ -1756,7 +1706,6 @@ describe('app merge', () => {
     expect(text).toContain(
       'the side marked <<<<<<< HEAD is your file and the side marked >>>>>>> live is Live v5',
     );
-    // src/gone.js was kept as is (deleted on Live), so it has no markers to track.
     expect(h.entry()?.conflictedPaths).toStrictEqual(['src/a.js']);
   });
 
@@ -1944,7 +1893,6 @@ describe('app merge', () => {
 
     await merge(h, { yes: true });
 
-    // A recorded version that 404s is no base: merged as if none were recorded.
     expect(h.json()).toMatchObject({
       status: 'fallback',
       baseSource: 'none',
@@ -2107,7 +2055,6 @@ describe('app pull', () => {
       expect((await readdir(dir)).sort()).toStrictEqual(['.kizenapp', 'kizen.json', 'src']);
       expect(server.writes()).toStrictEqual([]);
 
-      // The pulled folder records version 2 as its base, for the same account and app.
       const found = findAppStateEntry((await readAppState(dir)).doc, KEY);
 
       expect(found).toStrictEqual({
@@ -2134,7 +2081,6 @@ describe('app pull', () => {
 
     expect(pulledState).toBeDefined();
 
-    // Work in the pulled folder: same account, its own state.
     const pulled = makeHarness({
       server,
       files: versionFiles('2'),
@@ -2185,7 +2131,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
 
     expect(folderX.entry()).toMatchObject({ previewSourcePackageId: 'file-1' });
 
-    // Same user, another folder based on v2: its push replaces the one preview the user has.
     const folderY = makeHarness({
       server,
       files: { 'kizen.json': 'folder Y' },
@@ -2202,7 +2147,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
     folderX.reset();
     await publish(folderX, { yes: true });
 
-    // The preview is folder Y's, based on v2: Live moved past it.
     expect(server.api.promotePreview).not.toHaveBeenCalled();
     expect(server.state.live).toBe('3');
     expect(folderX.json()).toMatchObject({
@@ -2216,7 +2160,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
       next: [{ step: 'merge', argv: ['appbuilder', 'app', 'merge', ...JSON_ARGS] }],
     });
 
-    // Pushing from X again makes it X's preview, and the publish goes through.
     folderX.reset();
     await push(folderX, { yes: true });
     folderX.reset();
@@ -2246,7 +2189,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
     folderX.reset();
     await publish(folderX, { yes: true });
 
-    // Folder Y's preview is based on Live v5, so publishing it overwrites nothing.
     expect(server.api.promotePreview).toHaveBeenCalledOnce();
 
     const result = folderX.json();
@@ -2256,9 +2198,7 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
       liveVersion: '6',
       conflictCheck: { conflict: false, previewSourceMatches: false },
     });
-    // Not the rollback's "restored version n" warning: the preview isn't that one any more.
     expect(result.warnings).toStrictEqual([REPLACED_PREVIEW_WARNING]);
-    // It wasn't this folder's source, so this folder's base stays.
     expect(folderX.entry()).toMatchObject({ folderBaseLiveVersion: '3' });
   });
 
@@ -2267,7 +2207,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
     const h = makeHarness({ server, state: [stateEntry()] });
     const original = server.api.getPreview.getMockImplementation();
 
-    // Another folder replaces the preview between this run's check and its promote.
     server.api.getPreview.mockImplementationOnce(async (apiName, owner) => {
       const current = await (original as BusinessAppsApi['getPreview'])(apiName, owner);
 
@@ -2323,11 +2262,9 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
     const result = h.json();
 
     expect(result).toMatchObject({ ok: true, status: 'merged' });
-    // The merge warns about the leftover markers instead of refusing.
     expect(result.warnings).toStrictEqual([
       'These files still have conflict markers from an earlier merge: src/a.js. Resolve them before pushing.',
     ]);
-    // src/a.js still has markers, so it stays tracked; src/b.js was resolved and is dropped.
     expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '5', conflictedPaths: ['src/a.js'] });
 
     h.reset();
@@ -2366,7 +2303,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
         previews: { [USER]: yourPreview({ lineage }) },
       });
 
-    // Based on v3 while v4 is the latest release: a conflict, not "nothing Live".
     const behind = makeHarness({ server: removedLive(), state: [stateEntry()] });
 
     await publish(behind, { yes: true });
@@ -2379,14 +2315,12 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
       conflict: { reason: 'live_moved', liveVersion: null, comparedVersion: '4' },
     });
 
-    // Based on the latest release: fine.
     const current = makeHarness({ server: removedLive(lineageOf('4')), state: [stateEntry()] });
 
     await publish(current, { yes: true });
 
     expect(current.json()).toMatchObject({ ok: true, liveVersion: '5' });
 
-    // No readable base: a conflict, not assumed.
     const unknown = makeHarness({ server: removedLive(null) });
 
     await publish(unknown, { yes: true });
@@ -2396,7 +2330,6 @@ describe('round 3: preview identity, marker tracking, removed Live', () => {
       conflict: { reason: 'base_unknown' },
     });
 
-    // --force still publishes.
     const forced = makeHarness({ server: removedLive(), state: [stateEntry()] });
 
     await publish(forced, { yes: true, force: true });
@@ -2443,7 +2376,6 @@ describe('round 4: renamed conflict markers, unreadable ignore files', () => {
 
       const pluginDir = join(tmp, 'acme');
 
-      // This folder edited src/old.js; Live renamed it to src/new.js and edited the same line.
       await mkdir(join(pluginDir, 'src'), { recursive: true });
       await writeFile(join(pluginDir, 'kizen.json'), MANIFEST);
       await writeFile(join(pluginDir, 'src', 'old.js'), lines([4, 'local 5']));
@@ -2468,7 +2400,6 @@ describe('round 4: renamed conflict markers, unreadable ignore files', () => {
         },
       });
 
-      // A real three-way merge through git.
       await merge(h, { yes: true });
 
       expect(h.json()).toMatchObject({ ok: true, status: 'conflicts' });
@@ -2501,7 +2432,6 @@ describe('round 4: renamed conflict markers, unreadable ignore files', () => {
     });
 
     h.mocks.planMerge.mockResolvedValue(readyPlan({ baseVersion: '4', conflicted: [] }));
-    // Live renamed src/old.js to src/new.js; the clean merge carries this folder's markers along.
     h.mocks.applyMerge.mockImplementation(() => {
       h.local.files = { 'kizen.json': '{}', 'src/new.js': markers };
 
@@ -2564,7 +2494,6 @@ describe('agent contract', () => {
   const MERGE = ['appbuilder', 'app', 'merge', ...JSON_ARGS];
   const MARKERS = { local: 'HEAD', incoming: 'live' };
 
-  /** Every argv anywhere in `value`, choices, `next` steps and `applyArgv` alike. */
   const argvsIn = (value: unknown): string[][] => {
     if (Array.isArray(value)) {
       return value.every((item) => typeof item === 'string')
@@ -2587,7 +2516,6 @@ describe('agent contract', () => {
     const dir = await mkdtemp(join(tmpdir(), 'appbuilder-app-oauth-'));
 
     try {
-      // A real, empty store: no session anywhere, and none for --env staging either.
       const oauth = createOAuthCommandDeps(createOAuthStore(dir));
       const none = makeHarness({ deps: { oauth } });
 
@@ -2629,8 +2557,6 @@ describe('agent contract', () => {
   });
 
   it("every choice carries a runnable argv with the run's account flags and --json", async () => {
-    // Environment choices: a re-run of the same command with --env, the account flags and --json.
-    // APPBUILDER_BUSINESS names a saved account in staging and go, so the run asks which.
     const saved = {
       account: { businessId: BIZ, userId: USER },
       session: { businessName: 'Acme Co' } as OAuthSession,
@@ -2690,10 +2616,8 @@ describe('agent contract', () => {
         },
       ]),
     );
-    // A decision: exit 2. The re-run is a dry run (no --yes) in the environment it names.
     expect(several.exitCodes).toStrictEqual([2]);
 
-    // In text, each choice prints its argv shell-quoted.
     several.reset();
     await runAppRollbackHeadless('2', { yes: true }, several.deps);
 
@@ -2701,12 +2625,10 @@ describe('agent contract', () => {
       "staging  →  appbuilder app rollback 2 --env staging --business 'Acme Co'",
     );
 
-    // Base choices: other commands, with the run's credential flags and --json.
     const base = makeHarness({ server: makeServer({ live: '3' }) });
 
     await push(base, { yes: true });
 
-    // Pinned to the Live version the message names (v3): a publish meanwhile can't change it.
     expect(argvsIn(base.json().choices)).toStrictEqual([
       ['appbuilder', 'app', 'merge', '--release', '3', ...JSON_ARGS],
       ['appbuilder', 'app', 'merge', '--release', '3', '--accept-live-base', '--yes', ...JSON_ARGS],
@@ -2741,14 +2663,12 @@ describe('agent contract', () => {
     await merge(h, { yes: true });
 
     expect(h.json()).toMatchObject({ ok: true, status: 'conflicts' });
-    // src/gone.js was kept (deleted on Live), so it has no markers to resolve.
     expect(h.json().next).toStrictEqual([
       { step: 'resolve', files: ['src/a.js'], markers: MARKERS },
       { step: 'push', argv: PUSH },
       { step: 'publish', argv: PUBLISH },
     ]);
 
-    // A clean merge goes straight to push and publish, dry runs first.
     const clean = makeHarness({ server: makeServer({ live: '5' }), state: [stateEntry()] });
 
     clean.mocks.planMerge.mockResolvedValue(readyPlan({ conflicted: [] }));
@@ -2799,11 +2719,9 @@ describe('agent contract', () => {
     const result = h.json();
 
     expect(result).toMatchObject({ ok: false, code: 'publish_conflict' });
-    // A dry run of the merge: no --yes, and nothing runnable carries --force.
     expect(result.next).toStrictEqual([{ step: 'merge', argv: MERGE }]);
     expect(result).not.toHaveProperty('choices');
     expect(argvsIn(result).flat()).not.toContain('--force');
-    // --force is only documented, in the hint.
     expect(result.hint).toContain('--force');
 
     const text = await run(false);
@@ -2840,7 +2758,6 @@ describe('agent contract', () => {
     expect(published.json()).toMatchObject({
       dryRun: true,
       reason: 'flag',
-      // Pinned to the preview the dry run reviewed.
       applyArgv: [
         'appbuilder',
         'app',
@@ -2901,7 +2818,6 @@ describe('agent contract', () => {
       requiresProductionConsent: true,
     });
 
-    // A merge writes only local files: never --allow-production, even on go.
     const merged = makeHarness({
       server: makeServer({ live: '5' }),
       credentials: { environment: 'go' },
@@ -2936,7 +2852,6 @@ describe('agent contract', () => {
   });
 
   it('a lone ======= line in a tracked file counts as an unresolved marker', async () => {
-    // The HEAD / live lines were deleted, but git's separator was left behind.
     const h = makeHarness({
       files: { 'kizen.json': '{}', 'src/a.js': 'mine\n=======\ntheirs\n' },
       state: [stateEntry({ conflictedPaths: ['src/a.js'] })],
@@ -2950,7 +2865,6 @@ describe('agent contract', () => {
   it('a lone ======= line outside the tracked files is ordinary text', async () => {
     const heading = 'Title\n=======\n';
 
-    // Not tracked: push doesn't scan it.
     const untracked = makeHarness({
       server: makeServer({ live: '5' }),
       files: { 'kizen.json': '{}', 'README.md': heading },
@@ -2961,7 +2875,6 @@ describe('agent contract', () => {
 
     expect(untracked.json()).toMatchObject({ ok: true, applied: true });
 
-    // Written by a clean merge: not tracked as conflicted, so push isn't blocked by it.
     const merged = makeHarness({
       server: makeServer({ live: '5' }),
       files: { 'kizen.json': '{}', 'README.md': heading },
@@ -3039,7 +2952,6 @@ describe('agent contract: printed commands do what the run showed', () => {
     '--accept-live-base': 'acceptLiveBase',
   };
 
-  /** Runs a printed `appbuilder app …` argv against `h`, as the CLI would parse it. */
   const runArgv = async (argv: unknown, h: Harness): Promise<void> => {
     const [program, group, command, ...rest] = argv as string[];
     const options: Record<string, string | boolean> = {};
@@ -3079,7 +2991,6 @@ describe('agent contract: printed commands do what the run showed', () => {
   };
 
   it("a merge's applyArgv records or merges the version its dry run showed, after Live moves", async () => {
-    // --accept-live-base: the dry run says "Record v4"; v5 is published before the apply.
     const server = makeServer({ live: '4' });
     const accept = makeHarness({ server, state: [stateEntry()] });
 
@@ -3105,7 +3016,6 @@ describe('agent contract: printed commands do what the run showed', () => {
     expect(accept.json()).toMatchObject({ ok: true, status: 'accepted', targetVersion: '4' });
     expect(accept.entry()?.folderBaseLiveVersion).toBe('4');
 
-    // A plain merge: the apply merges v4, the file lists the dry run showed, not v5's.
     const moving = makeServer({ live: '4' });
     const plain = makeHarness({ server: moving, state: [stateEntry()] });
 
@@ -3200,7 +3110,6 @@ describe('agent contract: printed commands do what the run showed', () => {
       '--json',
     ]);
 
-    // Another account becomes current (a login elsewhere) before the agent runs the apply.
     pointer.current = OTHER;
     h.reset();
     await runArgv(applyArgv, h);
@@ -3218,7 +3127,6 @@ describe('agent contract: printed commands do what the run showed', () => {
 
     const { applyArgv } = dry.json();
 
-    // Pushed again from another folder after the dry run (same user, so its base is unknown).
     server.state.previews.set(
       USER,
       yourPreview({ def: { ...yourPreview().def, source_filesystem_package: 'src-elsewhere' } }),
@@ -3238,7 +3146,6 @@ describe('agent contract: printed commands do what the run showed', () => {
       expect(h.server.api.promotePreview).not.toHaveBeenCalled();
     }
 
-    // A first release too: there's nothing for the conflict check to compare with.
     const first = makeServer({ live: null, previews: { [USER]: yourPreview() } });
     const firstDry = makeHarness({ server: first });
 
@@ -3269,10 +3176,6 @@ describe('agent contract: printed commands do what the run showed', () => {
     expect(h.entry()?.folderBaseLiveVersion).toBe('4');
   });
 
-  /**
-   * Live is v4 and this folder's preview is based on v3, so only --force publishes it. Between the
-   * plan's read of the preview and the pre-promote one, another folder pushes.
-   */
   const replacedBeforePromote = (): Harness => {
     const server = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
 
@@ -3313,7 +3216,6 @@ describe('agent contract: printed commands do what the run showed', () => {
         h.deps,
       );
 
-      // --force overrides a conflict, never which preview is published.
       expect(h.json()).toMatchObject({
         ok: false,
         code: 'publish_conflict',
@@ -3325,7 +3227,6 @@ describe('agent contract: printed commands do what the run showed', () => {
     }
   });
 
-  /** A server whose promote publishes another folder's push, which landed after the re-read. */
   const replacedDuringPromote = (): Harness => {
     const h = makeHarness({
       server: makeServer({ live: '3', previews: { [USER]: yourPreview() } }),
@@ -3352,7 +3253,6 @@ describe('agent contract: printed commands do what the run showed', () => {
   };
 
   it("a preview replaced during the promote request doesn't advance the folder base", async () => {
-    // Control: the same publish, promoting the reviewed preview, advances the base.
     const control = makeHarness({
       server: makeServer({ live: '3', previews: { [USER]: yourPreview() } }),
       state: [stateEntry()],
@@ -3369,7 +3269,6 @@ describe('agent contract: printed commands do what the run showed', () => {
 
     const result = h.json() as { warnings: string[] };
 
-    // The publish happened; only this folder's base stays.
     expect(result).toMatchObject({ ok: true, applied: true, liveVersion: '4' });
     expect(result.warnings).toContain(UNREVIEWED_RELEASE_WARNING);
     expect(h.server.calls).toContain('getVersion:4');
@@ -3401,7 +3300,6 @@ describe('agent contract: printed commands do what the run showed', () => {
   });
 
   it('every app result has next: versions points on, pull and dry runs leave it empty', async () => {
-    // Live moved past this folder's base: merge first.
     const moved = makeHarness({ server: makeServer({ live: '5' }), state: [stateEntry()] });
 
     await versions(moved);
@@ -3434,13 +3332,10 @@ describe('agent contract: printed commands do what the run showed', () => {
 });
 
 describe("lineage: the preview's base, read from its source on the server", () => {
-  /** This folder's files in every harness (`makeHarness`' default). */
   const LOCAL: Files = { 'kizen.json': '{"api_name":"acme","local":true}' };
 
-  /** Files that differ from `LOCAL`: a folder that diverged from what was pushed. */
   const DIVERGED: Files = { 'kizen.json': '{"api_name":"acme","local":true}', 'src/new.js': 'x' };
 
-  /** The caller's preview's source zip as the server has it now. */
   const previewZip = (server: FakeServer): Uint8Array => {
     const id = server.state.previews.get(USER)?.def.source_filesystem_package;
     const zip = id === null || id === undefined ? undefined : server.state.files.get(id);
@@ -3455,10 +3350,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   const downloads = (server: FakeServer): string[] =>
     server.calls.filter((call) => call.startsWith('download:'));
 
-  /**
-   * The uploaded preview's lineage is `base` (the preview's base the write decided), with that
-   * version's source package on the server now (none for a null base).
-   */
   const expectLineage = (h: Harness, base: string | null): void => {
     const expected =
       base === null
@@ -3473,7 +3364,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
 
   it("publish from a machine with no state uses the preview's server lineage and succeeds when Live hasn't moved", async () => {
     const server = makeServer({ live: '3' });
-    // Pushed on another machine, based on v3.
     const pushed = server.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
     const h = makeHarness({ server });
 
@@ -3499,7 +3389,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
         ...JSON_ARGS,
       ],
     });
-    // One download per plan: the preview's own source.
     expect(downloads(server)).toStrictEqual([`download:${pushed}`]);
 
     h.reset();
@@ -3513,7 +3402,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       liveVersion: '4',
       conflictCheck: { conflict: false, baseLiveVersion: '3' },
     });
-    // The apply's re-check reuses the plan's lineage: still one download.
     expect(downloads(server)).toStrictEqual([`download:${pushed}`]);
     expect(server.state.live).toBe('4');
   });
@@ -3549,7 +3437,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
 
   it('a preview pushed from another machine is judged by its own lineage', async () => {
     const server = makeServer({ live: '3', previews: { [USER]: yourPreview() } });
-    // This folder recorded pushing src-preview; another machine has pushed since, based on v3.
     const h = makeHarness({ server, state: [stateEntry()] });
 
     server.pushPreviewFrom(USER, DIVERGED, lineageOf('3'));
@@ -3568,13 +3455,11 @@ describe("lineage: the preview's base, read from its source on the server", () =
       },
     });
     expect(result.warnings).toContain(REPLACED_PREVIEW_WARNING);
-    // What was published wasn't this folder's push, so its base stays.
     expect(h.entry()).toMatchObject({
       folderBaseLiveVersion: '3',
       folderBaseSourcePackageId: 'src-v3',
     });
 
-    // A lineage plan's apply still refuses a preview pushed again between its check and promote.
     const raced = makeServer({ live: '3' });
     const reviewed = raced.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
     const racedHarness = makeHarness({ server: raced });
@@ -3604,8 +3489,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   it('recreated app: lineage base package differs from the current same-numbered version, so publish conflicts (base_replaced)', async () => {
     const server = makeServer({ live: '3' });
 
-    // The app is deleted and created again; its new v3 has another source package. The preview's
-    // lineage names the old app's v3 (src-v3).
     server.recreate('3');
     server.pushPreviewFrom(USER, LOCAL, lineageOf('3', 'src-v3'));
 
@@ -3635,8 +3518,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       "Live is v3, and your preview is based on v3, but v3 on this business isn't the version your preview was based on (the app or that version was deleted and created again). Publishing could overwrite changes your preview doesn't have.",
     );
 
-    // The same lineage against the app it was written for, and the recreated app's own v3: no
-    // conflict. Only the package tells them apart.
     for (const [recreate, sourceId] of [
       [false, 'src-v3'],
       [true, 'src-r2-v3'],
@@ -3660,8 +3541,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   });
 
   it('a preview whose source has no lineage is a conflict whose way on is pushing this folder', async () => {
-    // Recorded state or not, a missing lineage is never trusted: what the preview is based on is
-    // unknown.
     for (const state of [[stateEntry()], []]) {
       const server = makeServer({
         live: '3',
@@ -3681,12 +3560,10 @@ describe("lineage: the preview's base, read from its source on the server", () =
         code: 'publish_conflict',
         conflict: { conflict: true, reason: 'base_unknown', baseLiveVersion: null },
         hint: BASE_UNKNOWN_HINT,
-        // A dry run of the push that gives it a lineage.
         next: [{ step: 'push', argv: ['appbuilder', 'app', 'push', ...JSON_ARGS] }],
       });
     }
 
-    // The way on: push this folder, then publish.
     const server = makeServer({ live: '3', previews: { [USER]: yourPreview({ lineage: null }) } });
     const h = makeHarness({ server, state: [stateEntry()] });
 
@@ -3695,7 +3572,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     await publish(h, { yes: true });
     expect(h.json()).toMatchObject({ ok: true, liveVersion: '4' });
 
-    // --force publishes it as it is, saying what it overrode.
     const forcedServer = makeServer({
       live: '3',
       previews: { [USER]: yourPreview({ lineage: null }) },
@@ -3709,7 +3585,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     expect(result).toMatchObject({ ok: true, forced: true, liveVersion: '4' });
     expect(result.warnings).toContainEqual(expect.stringContaining('because of --force'));
 
-    // No release at all: nothing to overwrite, so no conflict.
     const first = makeHarness({
       server: makeServer({ live: null, previews: { [USER]: yourPreview({ lineage: null }) } }),
     });
@@ -3722,7 +3597,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     const tmp = await mkdtemp(join(tmpdir(), 'appbuilder-lineage-'));
 
     try {
-      // Every release's source carries a lineage, as one pushed by this CLI does.
       const lineaged = (): FakeServer => {
         const made = makeServer({ live: '5' });
 
@@ -3738,7 +3612,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
 
       const server = lineaged();
 
-      // pull: the folder gets the files, not the record, and doesn't list it as left out.
       const pulled = makeHarness({ server, deps: { unzipToDir } });
       const pullDir = join(tmp, 'pulled');
 
@@ -3750,7 +3623,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       });
       expect((await readdir(pullDir)).sort()).toStrictEqual(['kizen.json', 'src']);
 
-      // merge fallback: the extracted copy has no .kizenapp either.
       const pluginDir = join(tmp, 'plugin');
 
       await mkdir(pluginDir);
@@ -3768,7 +3640,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       });
       expect((await readdir(fallbackDir)).sort()).toStrictEqual(['kizen.json', 'src']);
 
-      // rollback: the version is unpacked to be packaged without the record.
       const extractedSeen: string[][] = [];
       const rolled = makeHarness({
         server,
@@ -3789,7 +3660,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       expect(rolled.json()).toMatchObject({ ok: true, applied: true });
       expect(extractedSeen).toStrictEqual([['kizen.json', 'src']]);
 
-      // Content detection: v2's files match a folder with v2's files, whatever v2's lineage.
       const detected = makeHarness({ server: lineaged(), files: versionFiles('2') });
 
       await push(detected);
@@ -3807,7 +3677,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   });
 
   it("every uploading path writes the preview's base as its lineage", async () => {
-    // push, base recorded for this folder (v3).
     const recorded = makeHarness({ server: makeServer({ live: '3' }), state: [stateEntry()] });
 
     await push(recorded, { yes: true });
@@ -3815,7 +3684,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     expectLineage(recorded, '3');
     expect(recorded.entry()?.folderBaseLiveVersion).toBe('3');
 
-    // push, no Live version (a null base).
     const first = makeHarness({ server: makeServer({ live: null }) });
 
     await push(first, { yes: true });
@@ -3823,14 +3691,12 @@ describe("lineage: the preview's base, read from its source on the server", () =
     expectLineage(first, null);
     expect(first.entry()?.folderBaseLiveVersion).toBeNull();
 
-    // push, base detected (the folder has v2's files).
     const detected = makeHarness({ server: makeServer({ live: '3' }), files: versionFiles('2') });
 
     await push(detected, { yes: true });
     expect(detected.json()).toMatchObject({ ok: true, base: { version: '2', source: 'detected' } });
     expectLineage(detected, '2');
 
-    // push, base from your preview (the folder equals it), and with --base-from-preview.
     const viaPreview = makeServer({ live: '4' });
 
     viaPreview.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
@@ -3855,7 +3721,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     });
     expectLineage(continued, '3');
 
-    // merge, then push: the merged version's base.
     const mergedThenPushed = makeHarness({
       server: makeServer({ live: '5' }),
       state: [stateEntry()],
@@ -3867,11 +3732,9 @@ describe("lineage: the preview's base, read from its source on the server", () =
     expect(mergedThenPushed.entry()?.folderBaseLiveVersion).toBe('5');
     expectLineage(mergedThenPushed, '5');
 
-    // rollback: the preview's base is Live (v5), and with no Live version, null.
     const rolledBack = makeHarness({ server: makeServer({ live: '5' }), state: [stateEntry()] });
 
     await rollback(rolledBack, '2', { yes: true });
-    // Live, as rollback bases the restored preview on it; the folder's base stays.
     expectLineage(rolledBack, '5');
     expect(rolledBack.entry()?.folderBaseLiveVersion).toBe('3');
 
@@ -3888,7 +3751,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   it("push on a machine with no state whose folder equals the caller's preview takes the preview's lineage base", async () => {
     const server = makeServer({ live: '4' });
 
-    // Pushed on another machine from these same files, based on v3; Live has moved to v4 since.
     server.pushPreviewFrom(USER, LOCAL, lineageOf('3'));
 
     const h = makeHarness({ server });
@@ -3901,7 +3763,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       base: { version: '3', source: 'preview', liveMoved: true },
       notices: [PREVIEW_BASE_NOTICE('3')],
     });
-    // Only the preview's source was downloaded: no release was tried.
     expect(downloads(server)).toHaveLength(1);
     expect(server.writes()).toStrictEqual([]);
 
@@ -3915,7 +3776,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     });
     expectLineage(h, '3');
 
-    // Publishing it is checked against v3, as on the machine that pushed it.
     h.reset();
     await publish(h, { yes: true });
     expect(h.json()).toMatchObject({
@@ -3931,7 +3791,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
 
     await push(h, { yes: true });
 
-    // Exit 2 and nothing written: the choice is the user's.
     expect(h.exitCodes).toStrictEqual([2]);
     expect(server.writes()).toStrictEqual([]);
     expect(h.store.writes).toBe(0);
@@ -3956,7 +3815,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     expect(result.choices).toHaveLength(3);
     expect(downloads(server)).toContain(`download:${previewId}`);
 
-    // The choice is a dry run, whose applyArgv keeps the pin.
     const choice = (result.choices as { value: string; argv: string[] }[]).find(
       (candidate) => candidate.value === 'preview',
     );
@@ -3980,7 +3838,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     });
     expect(server.writes()).toStrictEqual([]);
 
-    // Pushed again from elsewhere since: the pin no longer holds, so the base isn't taken from it.
     server.pushPreviewFrom(USER, { 'kizen.json': 'elsewhere' }, lineageOf('2'));
     h.reset();
     await push(h, { yes: true, baseFromPreview: previewId });
@@ -3991,7 +3848,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       message: expect.stringContaining(PREVIEW_CHANGED_BASE_NOTICE) as unknown,
     });
 
-    // Without the flag, a push that resolves no base never takes the preview's.
     const again = makeHarness({ server, files: DIVERGED });
 
     await push(again, { yes: true });
@@ -4000,7 +3856,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   });
 
   it('new user with no preview: first push behaviour unchanged (release match, and base_required)', async () => {
-    // Another developer's preview exists, but not the caller's.
     const server = makeServer({ live: '3', previews: { [OTHER]: yourPreview() } });
     const matched = makeHarness({ server, files: versionFiles('2') });
 
@@ -4038,7 +3893,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
     ];
 
     for (const lineage of malformed) {
-      // Publish: base_unknown, as for a source with no lineage, whatever this folder recorded.
       const server = makeServer({ live: '3', previews: { [USER]: yourPreview({ lineage }) } });
       const recorded = makeHarness({ server, state: [stateEntry()] });
 
@@ -4049,7 +3903,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
         conflict: { reason: 'base_unknown' },
       });
 
-      // Push never takes a base from it: the folder equals the preview, yet no base is known.
       const pushed = makeHarness({
         server: makeServer({
           live: '3',
@@ -4064,7 +3917,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
   });
 
   it('a recorded base whose version now has another source package is ignored by push and merge', async () => {
-    // Recorded with the old app's v3; the app was deleted and created again since.
     const stale = stateEntry({ folderBaseSourcePackageId: 'src-v3' });
     const server = makeServer({ live: '3' });
 
@@ -4094,7 +3946,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
       notices: [REPLACED_BASE_NOTICE('3')],
     });
 
-    // Recorded with the package v3 has now: used as before.
     const fine = makeHarness({
       server,
       state: [stateEntry({ folderBaseSourcePackageId: 'src-r2-v3' })],
@@ -4107,10 +3958,6 @@ describe("lineage: the preview's base, read from its source on the server", () =
 });
 
 describe('a preview pushed from here and published outside the CLI', () => {
-  /**
-   * This folder pushed its preview (based on v1) and someone published that preview outside
-   * `app publish` (the Kizen UI): Live is v2, whose source package is the push's.
-   */
   const promotedElsewhere = async (): Promise<Harness> => {
     const server = makeServer({ live: '1' });
     const h = makeHarness({
@@ -4123,7 +3970,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
 
     const pushed = h.entry()?.previewSourcePackageId;
 
-    // The UI's promote: no CLI run, so nothing here records it.
     await server.api.promotePreview(APP_API, USER);
     expect(server.state.live).toBe('2');
     expect(server.state.definitions.get('2')?.source_filesystem_package).toBe(pushed);
@@ -4154,7 +4000,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
     expect(JSON.stringify(report.warnings)).not.toContain('appbuilder app merge');
     expect(h.stderr.join('')).toContain(PROMOTED_PREVIEW_NOTICE('2'));
 
-    // The push dry run: based on v2, recorded, Live didn't move.
     h.reset();
     h.server.calls.length = 0;
     await push(h);
@@ -4167,10 +4012,8 @@ describe('a preview pushed from here and published outside the CLI', () => {
       base: { version: '2', source: 'recorded', liveMoved: false },
     });
     expect(JSON.stringify(planned.warnings)).not.toContain('appbuilder app merge');
-    // One read of Live's definition for it (no second one for the lineage's package).
     expect(h.server.calls.filter((call) => call === 'getVersion:2')).toHaveLength(1);
 
-    // Merge: the folder already includes Live.
     h.reset();
     await merge(h);
     expect(h.json()).toMatchObject({
@@ -4181,7 +4024,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
       baseSource: 'recorded',
     });
 
-    // And edits made after the push don't change that: they descend from the pushed source.
     const edited = await promotedElsewhere();
 
     edited.local.files = { ...edited.local.files, 'src/later.js': 'later' };
@@ -4201,7 +4043,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
 
     await push(h, { yes: true });
     h.reset();
-    // After the push, the folder records v2 as its base: it holds v2's changes on top of the push.
     await merge(h, { yes: true, acceptLiveBase: true });
     expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '2' });
 
@@ -4210,7 +4051,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
     h.reset();
     await versions(h);
 
-    // As before: v2 recorded, Live v3 moved past it.
     expect(h.json()).toMatchObject({
       base: { folder: { recorded: true, version: '2' }, liveMoved: true },
       warnings: [expect.stringContaining('appbuilder app merge') as unknown],
@@ -4227,8 +4067,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
       throw new Error('no entry');
     }
 
-    // The folder's base already moved to v2 (accepted after the promote); the preview's record
-    // stayed, though the server has no preview of yours.
     h.store.doc = {
       ...h.store.doc,
       entries: [
@@ -4247,7 +4085,6 @@ describe('a preview pushed from here and published outside the CLI', () => {
       yourPreview: null,
     });
 
-    // A write drops it (here an accept, which records only the folder's base).
     h.reset();
     await merge(h, { yes: true, acceptLiveBase: true });
     expect(h.json()).toMatchObject({ ok: true, status: 'accepted' });
@@ -4260,12 +4097,10 @@ describe('a preview pushed from here and published outside the CLI', () => {
     const pushed = h.entry()?.previewSourcePackageId;
     const writesBefore = h.store.writes;
 
-    // A read-only command writes nothing.
     await versions(h);
     expect(h.store.writes).toBe(writesBefore);
     expect(h.entry()).toMatchObject({ folderBaseLiveVersion: '1' });
 
-    // A write that keeps the folder's base (rollback moves only the preview's) records it.
     h.reset();
     await rollback(h, '1', { yes: true });
     expect(h.json()).toMatchObject({ ok: true, applied: true });
@@ -4284,7 +4119,6 @@ describe('recorded bases that no longer name a version', () => {
   it('a recorded base whose version no longer exists is ignored by push: base_required, nothing uploaded, recorded package kept', async () => {
     const recorded = stateEntry({ folderBaseSourcePackageId: 'src-v3' });
 
-    // Deleted (Live back to v2), and still listed but 404 on read: the read decides.
     const unlisted = makeServer({ live: '2', deleted: ['3'] });
     const unreadable = makeServer({ live: '3' });
 
@@ -4311,8 +4145,6 @@ describe('recorded bases that no longer name a version', () => {
   });
 
   it('folder adopted a promoted version that was then deleted: versions/push/merge/publish give one working path (accept, then push and publish succeed)', async () => {
-    // The folder adopted v2 (promoted outside the CLI, with its package); v2 was then deleted,
-    // and Live is v1 again.
     const server = makeServer({ live: '1', deleted: ['2'] });
     const h = makeHarness({
       server,
@@ -4345,7 +4177,6 @@ describe('recorded bases that no longer name a version', () => {
 
     expect(required).toMatchObject({ code: 'base_required' });
 
-    // Merge treats it as no base: its plan falls back, offering the accept.
     h.reset();
     h.mocks.planMerge.mockResolvedValue({ status: 'no_base' });
     await merge(h);
@@ -4356,12 +4187,10 @@ describe('recorded bases that no longer name a version', () => {
       notices: [GONE_BASE_NOTICE('2')],
     });
 
-    // Publish has nothing to publish yet.
     h.reset();
     await publish(h, { yes: true });
     expect(h.json()).toMatchObject({ code: 'no_preview' });
 
-    // The way on: the accept base_required offered, then push and publish.
     const accept = (required.choices as { value: string; argv: string[] }[]).find(
       (choice) => choice.value === 'accept',
     );
@@ -4394,7 +4223,6 @@ describe('recorded bases that no longer name a version', () => {
 
     await rollback(h, '1', { yes: true });
     expect(h.entry()).toMatchObject({ previewRestoredFrom: '1' });
-    // Published in the Kizen UI: Live v4 is the restored v1, not this folder's source.
     await server.api.promotePreview(APP_API, USER);
     expect(server.state.live).toBe('4');
 
@@ -4411,7 +4239,6 @@ describe('recorded bases that no longer name a version', () => {
     const server = makeServer({ live: '3' });
 
     server.recreate('3');
-    // The folder equals your preview, but its lineage names the old app's v3.
     server.pushPreviewFrom(USER, LOCAL, lineageOf('3', 'src-v3'));
 
     const h = makeHarness({ server });
@@ -4423,7 +4250,6 @@ describe('recorded bases that no longer name a version', () => {
     const result = h.json();
 
     expect(result).toMatchObject({ code: 'base_required' });
-    // Not taken, and not offered either.
     expect(result.choices).toHaveLength(2);
   });
 

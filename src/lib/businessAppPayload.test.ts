@@ -11,7 +11,6 @@ import { rejectionOf } from '../test/oauth.js';
 
 const OPTS = { release: false, sourcePackageId: 'src-zip-id', thumbnailId: 'thumb-id' };
 
-/** Every key the body may carry; the server's serializer reads exactly these. */
 const ALLOWED_KEYS = [
   'name',
   'api_name',
@@ -63,7 +62,6 @@ describe('toPublishBody on real packager output', () => {
       artifacts: ['jsAction', 'block'],
     });
 
-    // A setup assistant that runs the scaffolded action, and a route script.
     const manifestPath = join(pluginDir, 'kizen.json');
     const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as Record<string, unknown>;
 
@@ -107,8 +105,6 @@ describe('toPublishBody on real packager output', () => {
   it('the fixture exercises the packager shapes the mapper exists for', () => {
     const assistant = deployable.base_config?.setup_assistant as { actions: unknown[] };
 
-    // Precondition: the packager expands actions to objects (not api_name strings) and emits
-    // route_scripts. Which other fields an action carries is the packager's business.
     expect(assistant.actions[0]).toMatchObject({ api_name: 'hello_action' });
     expect(deployable.artifacts.route_scripts).toHaveLength(1);
     expect(deployable.thumbnail).toBeInstanceOf(Uint8Array);
@@ -136,7 +132,6 @@ describe('toPublishBody on real packager output', () => {
       deployable.base_config?.user_setup_assistant,
     );
     expect(body.base_config).toStrictEqual(deployable.base_config);
-    // Whatever shape the packager gives an action passes through untouched, not api_name strings.
     const sentActions = (body.base_config.setup_assistant as { actions: unknown[] }).actions;
     const packagedActions = (deployable.base_config?.setup_assistant as { actions: unknown[] })
       .actions;
@@ -179,7 +174,6 @@ describe('toPublishBody on real packager output', () => {
     }
 
     expect(body.thumbnail).toBe('thumb-id');
-    // It all serializes: no Uint8Array survives anywhere in the body.
     expect(JSON.stringify(body)).not.toContain('"0":');
   });
 
@@ -232,7 +226,6 @@ describe('toPublishBody on real packager output', () => {
 
     expect(deployable).toStrictEqual(before);
 
-    // The body shares no objects with the input.
     const [field] = (body.base_config.setup_assistant as { fields: { label: string }[] }).fields;
 
     expect(field).toBeDefined();
@@ -254,7 +247,6 @@ describe('toPublishBody on real packager output', () => {
     );
 
     expect(error.code).toBe('thumbnail_required');
-    // A preview may go without one.
     expect(toPublishBody(deployable, { ...OPTS, thumbnailId: null }).thumbnail).toBeNull();
   });
 });

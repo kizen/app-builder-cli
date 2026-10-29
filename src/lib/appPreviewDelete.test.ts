@@ -39,11 +39,6 @@ import {
   type ServerOptions,
 } from '../test/appHarness.js';
 
-/**
- * `appbuilder app preview delete`: the dry run and its pinned applyArgv, what the apply deletes
- * and forgets, the re-check right before the DELETE, and the guards every app write has.
- */
-
 type Extra = Record<string, unknown>;
 
 const THIRD = 'user-3';
@@ -51,10 +46,6 @@ const THIRD = 'user-3';
 const remove = (h: Harness, extra: Extra = {}): Promise<void> =>
   runAppPreviewDeleteHeadless({ json: true, ...API_KEY, ...extra }, h.deps);
 
-/**
- * Runs a printed `appbuilder app preview delete …` argv as its own invocation: parsed by the real
- * program (so every flag it carries must exist), then run headless against `h`.
- */
 async function runArgv(h: Harness, argv: unknown): Promise<void> {
   if (!Array.isArray(argv) || argv[0] !== 'appbuilder') {
     throw new Error(`not an appbuilder argv: ${JSON.stringify(argv)}`);
@@ -84,7 +75,6 @@ async function runArgv(h: Harness, argv: unknown): Promise<void> {
   await runAppPreviewDeleteHeadless(takeInteractiveFlag(parsed).options, h.deps);
 }
 
-/** Another developer's preview, Bo's. */
 const bosPreview = (): ReturnType<typeof yourPreview> =>
   yourPreview({ ownerName: 'Bo B', updated: '2026-10-21T00:00:00.000Z' });
 
@@ -95,7 +85,6 @@ const harness = (server: ServerOptions = {}, options: HarnessOptions = {}): Harn
     ...options,
   });
 
-/** A sign-in session for the current account (no account named), so printed commands pin it. */
 const sessionDeps = (environment: Environment = 'staging'): Partial<AppDeps> => ({
   oauth: {
     listSessions: vi.fn(() => Promise.resolve([environment])),
@@ -168,7 +157,6 @@ describe('app preview delete', () => {
         userId: USER,
         app: { baseApiName: 'acme', apiName: 'acme_abc123', name: 'Acme', liveVersion: '3' },
         owner: { id: USER, fullName: 'Ada L', yours: true },
-        // By default each preview's owner uses it: you, so no one else.
         preview: {
           updated: '2026-10-20T00:00:00.000Z',
           activeUsersCount: 1,
@@ -178,8 +166,6 @@ describe('app preview delete', () => {
         deletesApp: false,
         notices: [],
         warnings: [],
-        // Your own preview is still named by id, so the apply can't delete another one.
-        // Pinned to the preview it reviewed (no --delete-app: the app stays).
         applyArgv: [
           'appbuilder',
           'app',
@@ -233,15 +219,12 @@ describe('app preview delete', () => {
       appDeleted: false,
       remembered: true,
       warnings: [],
-      // A new preview comes from pushing this folder: a dry run of that, and nothing else.
       next: [{ step: 'push', argv: ['appbuilder', 'app', 'push', ...JSON_ARGS] }],
     });
     expect(h.server.writes()).toStrictEqual([`deletePreview:${USER}`]);
     expect([...h.server.state.previews.keys()]).toStrictEqual([OTHER]);
     expect(h.server.state.exists).toBe(true);
 
-    // The preview's record is gone; the folder's base, its push record, its marked files and
-    // unknown keys stay.
     const entry = h.entry();
 
     expect(entry).toStrictEqual({
@@ -252,7 +235,6 @@ describe('app preview delete', () => {
       conflictedPaths: ['src/a.js'],
       extra: 'kept',
     });
-    // Another user's entry in this folder is untouched.
     expect(h.entry(otherFolderKey)).toStrictEqual(
       stateEntry({ userId: OTHER, previewSourcePackageId: 'src-bo' }),
     );
@@ -260,13 +242,11 @@ describe('app preview delete', () => {
   });
 
   it("preview delete of another developer's preview needs --owner and warns, and leaves state alone", async () => {
-    // Bo's preview is in use by Bo and a third user; you have none.
     const server: ServerOptions = {
       previews: { [OTHER]: bosPreview() },
       active: { [OTHER]: OTHER, [THIRD]: OTHER },
     };
 
-    // Without --owner it's yours, and you have none: not_found, naming the previews there are.
     const yours = harness(server);
 
     await remove(yours, { yes: true });
@@ -320,14 +300,11 @@ describe('app preview delete', () => {
       status: 'deleted',
       appDeleted: false,
       remembered: true,
-      // Bo's to push again, not this folder's.
       next: [],
     });
     expect(h.server.writes()).toStrictEqual([`deletePreview:${OTHER}`]);
     expect(h.server.state.previews.size).toBe(0);
-    // Its users went back to Live.
     expect(h.server.state.active.get(THIRD)).toBeNull();
-    // This folder's record of your preview isn't theirs to clear.
     expect(h.store.writes).toBe(0);
     expect(h.store.doc).toStrictEqual(before);
     expect(h.entry()).toStrictEqual(stateEntry());
@@ -370,7 +347,6 @@ describe('app preview delete', () => {
     ]);
     expect(h.text()).toContain('Acme had no other version, so it was deleted from this business.');
 
-    // No release, but another developer's preview: the app stays, and nothing says otherwise.
     const shared = harness({
       live: null,
       previews: { [USER]: yourPreview(), [OTHER]: bosPreview() },
@@ -383,7 +359,6 @@ describe('app preview delete', () => {
     expect(kept).toMatchObject({ deletesApp: false, appDeleted: false, warnings: [] });
     expect(shared.server.state.exists).toBe(true);
 
-    // A failed re-read says so instead of guessing.
     const unread = harness(only);
     const listApps = unread.server.api.listApps.getMockImplementation();
 
@@ -391,7 +366,6 @@ describe('app preview delete', () => {
       throw new Error('no listApps');
     }
 
-    // The third read is the one after the delete (the first loads the app, the second re-checks).
     unread.server.api.listApps.mockImplementation((search) =>
       unread.server.api.listApps.mock.calls.length === 3
         ? Promise.reject(new Error('socket hang up'))
@@ -420,7 +394,6 @@ describe('app preview delete', () => {
         conflictedPaths: ['src/a.js'],
         extra: 'kept',
       });
-    // Every base named a version of the app that's gone; the folder's marked files stay.
     const forgotten = {
       ...KEY,
       lastPushedSourceHash: null,
@@ -428,7 +401,6 @@ describe('app preview delete', () => {
       extra: 'kept',
     };
 
-    // Your preview, the app's only version.
     const h = harness({ live: null }, { state: [recorded()] });
 
     await remove(h, { yes: true, deleteApp: true });
@@ -437,7 +409,6 @@ describe('app preview delete', () => {
     expect(h.server.state.exists).toBe(false);
     expect(h.entry()).toStrictEqual(forgotten);
 
-    // Someone else's preview, the app's only version: the app is gone all the same.
     const theirs = harness(
       { live: null, previews: { [OTHER]: bosPreview() } },
       {
@@ -450,8 +421,6 @@ describe('app preview delete', () => {
     expect(theirs.json()).toMatchObject({ ok: true, appDeleted: true, remembered: true });
     expect(theirs.entry()).toStrictEqual(forgotten);
 
-    // An unchecked re-read changes nothing it can't vouch for: the next push ignores the base if
-    // the app is gone.
     const unread = harness({ live: null }, { state: [recorded()] });
     const listApps = unread.server.api.listApps.getMockImplementation();
 
@@ -483,7 +452,6 @@ describe('app preview delete', () => {
       });
     const otherAppEntry = (): ReturnType<typeof stateEntry> =>
       stateEntry({ baseApiName: 'other_app', lastPushedSourceHash: 'hash-other-app' });
-    /** The entry for `key` exactly as the state file holds it. */
     const stored = (h: Harness, key: typeof KEY): string | undefined =>
       JSON.stringify(
         h.store.doc.entries.find(
@@ -506,8 +474,6 @@ describe('app preview delete', () => {
       await remove(h, { yes: true, deleteApp: true });
 
       expect(h.json(), name).toMatchObject({ ok: true, appDeleted: true, remembered: true });
-      // Bo's entry for the deleted app: no base, nothing pushed; its marked files and unknown
-      // keys stay.
       expect(h.entry(OTHER_KEY), name).toStrictEqual({
         ...OTHER_KEY,
         lastPushedSourceHash: null,
@@ -517,14 +483,12 @@ describe('app preview delete', () => {
       expect(h.entry(), name).toStrictEqual(
         name === 'the caller has an entry' ? { ...KEY, lastPushedSourceHash: null } : undefined,
       );
-      // Another app's entry is exactly as it was.
       expect(stored(h, OTHER_APP_KEY), name).toBe(otherAppBefore);
       expect(h.store.writes, name).toBe(1);
     }
   });
 
   it('preview delete that leaves the app keeps the folder base', async () => {
-    // No release, but another developer's preview: the app stays, and so does this folder's base.
     const h = harness(
       { live: null, previews: { [USER]: yourPreview(), [OTHER]: bosPreview() } },
       {
@@ -547,7 +511,6 @@ describe('app preview delete', () => {
 
     expect(h.json()).toMatchObject({ ok: true, appDeleted: false });
     expect(h.server.state.exists).toBe(true);
-    // Your preview's record goes; the base (null: started before a Live version) stays.
     expect(h.entry()).toStrictEqual({
       ...KEY,
       folderBaseLiveVersion: null,
@@ -556,7 +519,6 @@ describe('app preview delete', () => {
   });
 
   it('preview delete re-checks right before deleting', async () => {
-    // Gone since the plan.
     const gone = harness();
     const goneRun = await planOf(gone);
 
@@ -569,7 +531,6 @@ describe('app preview delete', () => {
     });
     expect(gone.server.api.deletePreview).not.toHaveBeenCalled();
 
-    // Pushed again since the plan.
     const pushed = harness();
     const pushedRun = await planOf(pushed);
     const preview = pushed.server.state.previews.get(USER);
@@ -586,7 +547,6 @@ describe('app preview delete', () => {
     });
     expect(pushed.server.api.deletePreview).not.toHaveBeenCalled();
 
-    // The app's other version went since the plan, which said the app stays.
     const last = harness({
       live: null,
       previews: { [USER]: yourPreview(), [OTHER]: bosPreview() },
@@ -604,7 +564,6 @@ describe('app preview delete', () => {
     expect(last.server.api.deletePreview).not.toHaveBeenCalled();
     expect(last.server.state.exists).toBe(true);
 
-    // Unchanged, the same plan deletes.
     const control = harness();
     const controlRun = await planOf(control);
 
@@ -613,7 +572,6 @@ describe('app preview delete', () => {
     ).toMatchObject({ ok: true });
     expect(control.server.writes()).toStrictEqual([`deletePreview:${USER}`]);
 
-    // Headless, a preview pushed while the apply loads stops it, with a new dry run in `next`.
     const headless = harness();
     const listApps = headless.server.api.listApps.getMockImplementation();
 
@@ -698,7 +656,6 @@ describe('app preview delete', () => {
         NO_PREVIEW_TO_DELETE_MESSAGE('acme', OTHER, false),
       ],
       [
-        // An owner is a user id; a name is no one.
         'a name instead of an id',
         harness({ previews: { [USER]: yourPreview(), [OTHER]: bosPreview() } }),
         { owner: 'Bo B' },
@@ -733,7 +690,6 @@ describe('app preview delete', () => {
   });
 
   it('Ctrl+C before the delete starts no request', async () => {
-    // Cancelled before the apply begins: not even the re-read.
     const before = harness();
     const beforeRun = await planOf(before);
     const planned = [...before.server.calls];
@@ -745,7 +701,6 @@ describe('app preview delete', () => {
     ).toMatchObject({ ok: false, code: 'local_error', message: 'Cancelled.' });
     expect(before.server.calls).toStrictEqual(planned);
 
-    // Cancelled while the re-read was out: no delete.
     const during = harness();
     const duringRun = await planOf(during);
     const reads = during.server.api.listApps.mock.calls.length;
@@ -766,7 +721,6 @@ describe('app preview delete', () => {
 
     const { applyArgv } = h.json();
 
-    // Bo pushes again between the dry run and its applyArgv.
     const bo = h.server.state.previews.get(OTHER);
 
     if (bo === undefined) {
@@ -789,7 +743,6 @@ describe('app preview delete', () => {
         },
       ],
     });
-    // The re-run it names is Bo's preview, never yours.
     expect(PREVIEW_PUSHED_MESSAGE(owner)).toBe(
       `Bo B's preview was pushed again after this delete was reviewed, so nothing was deleted. Run \`appbuilder app preview delete --owner ${OTHER}\` to review it as it is now.`,
     );
@@ -797,7 +750,6 @@ describe('app preview delete', () => {
     expect(h.server.writes()).toStrictEqual([]);
     expect(h.server.state.previews.has(OTHER)).toBe(true);
 
-    // Unchanged in between, the same applyArgv deletes.
     const control = harness({ previews: { [USER]: yourPreview(), [OTHER]: bosPreview() } });
 
     await remove(control, { owner: OTHER });
@@ -815,7 +767,6 @@ describe('app preview delete', () => {
 
     expect(plan).toMatchObject({ deletesApp: false, warnings: [] });
 
-    // Bo deletes his preview in between: yours is now the app's only version.
     h.server.state.previews.delete(OTHER);
     await runArgv(h, plan.applyArgv);
 
@@ -858,7 +809,6 @@ describe('app preview delete', () => {
       expect(staying.json().applyArgv).not.toContain('--delete-app');
     }
 
-    // A --yes that would delete the app without --delete-app refuses, and points at the dry run.
     const unasked = harness(only);
 
     await remove(unasked, { yes: true });
@@ -875,8 +825,6 @@ describe('app preview delete', () => {
     expect(unasked.server.writes()).toStrictEqual([]);
     expect(unasked.server.state.exists).toBe(true);
 
-    // Planned with --delete-app, but Bo pushed a preview in between: the app stays, and the
-    // result says so, without the warning that it goes.
     const survived = harness(only);
 
     await remove(survived);
@@ -912,14 +860,12 @@ describe('app preview delete', () => {
       notices: [UNPINNED_PREVIEW_NOTICE],
       next: [],
     });
-    // Nothing to run: an unpinned applyArgv could delete a preview pushed since.
     expect(result).not.toHaveProperty('applyArgv');
     expect(result).not.toHaveProperty('requiresProductionConsent');
     expect(h.stderr.join('')).toContain(UNPINNED_PREVIEW_NOTICE);
     expect(h.exitCodes).toStrictEqual([]);
     expect(h.server.writes()).toStrictEqual([]);
 
-    // With a last update, the same dry run is pinned to it.
     const pinned = harness();
 
     await remove(pinned);

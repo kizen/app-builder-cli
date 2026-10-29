@@ -169,7 +169,6 @@ describe('createKizenClient requests', () => {
     await client.listCustomObjects({ customOnly: true });
 
     expect(call(0).url).toBe(`${BASE}/custom-objects?page_size=200&custom_only=false`);
-    // Existing callers are unchanged: the server's default (custom objects only).
     expect(call(1).url).toBe(`${BASE}/custom-objects?page_size=200`);
     expect(call(2).url).toBe(`${BASE}/custom-objects?page_size=200`);
   });
@@ -647,7 +646,6 @@ describe('bearer auth', () => {
 });
 
 describe('generic primitives', () => {
-  /** Hands out tok-1, then tok-2 after a refresh. */
   const tokens = (): BearerTokenProvider & { refreshes: string[] } => {
     let current = 1;
     const refreshes: string[] = [];
@@ -665,7 +663,6 @@ describe('generic primitives', () => {
     };
   };
 
-  // Not valid UTF-8, so a text/JSON round trip would corrupt it.
   const BINARY = new Uint8Array([0x00, 0xff, 0xfe, 0x80, 0xc3, 0x28, 0x0a, 0x7b]);
 
   it('requestJson sends method, path and JSON body with auth, and resolves 204 to undefined', async () => {
@@ -778,7 +775,6 @@ describe('generic primitives', () => {
     await expect(json.client.requestJson('DELETE', '/x')).resolves.toBeUndefined();
     expect(jsonTokens.refreshes).toStrictEqual(['tok-1']);
 
-    // A second 401 surfaces auth_failed, once.
     const deniedTokens = tokens();
     const denied = setup(
       { bearer: deniedTokens },
@@ -828,7 +824,6 @@ describe('redirects', () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
-  /** A real HTTP server on 127.0.0.1 that records every request; `respond` answers each. */
   const startServer = async (
     respond: (req: Recorded, res: ServerResponse) => void,
   ): Promise<TestServer> => {
@@ -934,7 +929,6 @@ describe('redirects', () => {
     const [first, second] = kizen.requests;
 
     expect(second?.url).toBe('/api/new');
-    // 307 keeps the method and body.
     expect(second?.method).toBe('POST');
     expect(second?.body).toBe('{"a":1}');
 
@@ -1016,7 +1010,6 @@ describe('redirects', () => {
     await expect(rejection(client.requestJson('GET', '/loop'))).resolves.toMatchObject({
       kind: 'api_error',
     });
-    // The first request plus five followed redirects.
     expect(kizen.requests.filter((r) => r.url === '/api/loop')).toHaveLength(6);
   });
 });

@@ -33,112 +33,47 @@ import {
   type SourceZipMode,
 } from './sourceZip.js';
 
-/**
- * Merges a newer Live version of a Business App into the developer's plugin folder with real
- * git, in a throwaway repository that never touches the developer's own.
- *
- * `planMerge` builds the repository in the OS temp dir from bytes: the base version's source on
- * `base`, Live's on `live` and the plugin folder's source file set (what `collectSourceFiles`
- * picks) on `local`, both branched from `base`. It checks out `local`, runs
- * `git merge --no-ff --no-edit live`, reads the result back and deletes the repository. Nothing
- * in the plugin folder is written. `applyMerge` then writes only the paths whose content differs
- * between the local file set and the merge result, after checking the folder hasn't changed.
- *
- * Conflicts:
- * - Text conflicts get git's standard two-way markers (`<<<<<<< HEAD` is the local file,
- *   `>>>>>>> live` is Live's), written into the file and listed in `conflicted`.
- * - Edited locally, deleted on Live: the local file is kept as is (`conflicted`, `deletedOnLive`).
- * - Deleted locally, changed on Live: Live's copy is written back (`conflicted`, `deletedLocally`).
- * - Binary files changed on both sides: git keeps the local file. Nothing is written for them,
- *   no marker file and no `.live` copy beside it (a sibling file would be picked up by the next
- *   push); they're listed in `binaryConflicts` and the caller can offer Live's copy separately.
- *
- * Paths Live has that the local file set excludes (ignored by .gitignore / git excludes /
- * .kizenignore, occupied by a file that isn't a source file, or reached through a symlink) are
- * never written; they're listed in `ignoredIncoming`. When such a path takes the place of a local
- * file the merge would delete (a case-only rename, a file turned into a folder or back), the
- * deletion is dropped too and both are reported in `conflicted`, so nothing local is lost.
- *
- * Paths are compared in NFC: zip names and the folder's names are normalized before merging, and
- * written back under the name the folder already uses.
- */
-
 export interface MergeSource {
   version: string;
   zip: Uint8Array;
 }
 
 export interface MergeInput {
-  /** The developer's plugin folder; its source file set is the local side. */
   pluginDir: string;
-  /** The Live version the developer's preview was based on; null when unknown or deleted. */
   base: MergeSource | null;
   live: MergeSource;
 }
 
 export interface MergeDeps {
-  /** Lists the plugin folder's files (`collectSourceFiles`' runner); defaults to `runGit`. */
   git?: GitRunner;
-  /** git's absolute path for the throwaway repository, or undefined when there's none on PATH. */
   findGit?: () => string | undefined;
-  /** The environment the throwaway repository's git environment is derived from. */
   env?: NodeJS.ProcessEnv;
-  /** Where the throwaway repository is created; defaults to the OS temp dir. */
   tmpDir?: string;
 }
 
 export interface ApplyMergeDeps {
-  /** Lists the plugin folder's files (`collectSourceFiles`' runner); defaults to `runGit`. */
   git?: GitRunner;
-  /**
-   * Whether the run was cancelled (Ctrl+C at a terminal). Checked once every merged file is
-   * staged, right before the first move: a cancel by then returns `{ status: 'cancelled' }` and
-   * leaves the plugin folder as it was. Once moves start, they finish.
-   */
   isAborted?: () => boolean;
-  /**
-   * Moves a file or directory; defaults to `fs.rename`.
-   * @internal Injected for tests.
-   */
   rename?: (from: string, to: string) => Promise<void>;
-  /**
-   * `stat` (follow) or `lstat` with bigint fields; used for `.kizenapp`.
-   * @internal Injected for tests.
-   */
   stat?: (path: string, follow: boolean) => Promise<BigIntStats>;
 }
 
-/** Relative paths (zip-style, `/`-separated), each list sorted. */
 export interface MergeChanges {
-  /** Modified or added by the merge; conflicted text files are written with markers. */
   written: string[];
-  /** Deleted by the merge (deleted on Live, untouched locally). */
   deleted: string[];
-  /**
-   * Every conflict except binary ones; includes `deletedOnLive` and `deletedLocally`, and both
-   * sides of a replacement left undone because the folder holds non-source files in its way
-   * (neither side is changed).
-   */
   conflicted: string[];
-  /** Edited locally and deleted on Live; the local file is kept. */
   deletedOnLive: string[];
-  /** Deleted locally and changed on Live; Live's copy is written. */
   deletedLocally: string[];
-  /** Binary files changed on both sides; the local file is kept and nothing is written. */
   binaryConflicts: string[];
-  /** Paths Live has that the local file set excludes; never written. */
   ignoredIncoming: string[];
 }
 
 export interface ReadyMergePlan extends MergeChanges {
   status: 'ready';
-  /** Absolute path of the plugin folder. */
   pluginDir: string;
   baseVersion: string;
   liveVersion: string;
-  /** The merged content of every path in `written`. */
   contents: ReadonlyMap<string, Uint8Array>;
-  /** SHA-256 of every local source file when the plan was made. */
   localHashes: ReadonlyMap<string, string>;
 }
 
@@ -154,10 +89,8 @@ export type MergeOutcome =
   | { status: 'up_to_date'; ignoredIncoming: string[] }
   | { status: 'merged'; written: string[]; deleted: string[]; ignoredIncoming: string[] }
   | ({ status: 'conflicts' } & MergeChanges)
-  /** `isAborted` said so before anything moved; the plugin folder is unchanged. */
   | { status: 'cancelled' };
 
-/** A git step in the throwaway repository failed; nothing was written to the plugin folder. */
 export class MergeGitError extends Error {
   readonly step: string;
 
@@ -168,12 +101,9 @@ export class MergeGitError extends Error {
   }
 }
 
-/** How many paths an error message names before summarizing the rest. */
 const MAX_PATHS_IN_MESSAGE = 10;
 
-/** The plugin folder changed after `planMerge`; nothing was written. */
 export class MergeStaleError extends Error {
-  /** Every path that changed or is now in the way. */
   readonly paths: string[];
 
   constructor(paths: string[]) {
@@ -188,11 +118,6 @@ export class MergeStaleError extends Error {
   }
 }
 
-/**
- * `applyMerge` failed after it started moving files. The plugin folder may be partly merged;
- * `recoveryDir` (`<pluginDir>/.kizenapp/merge-<uuid>`) holds `removed/<path>` for every file the
- * merge removed and `merged/<path>` for every merged file it hadn't put in place yet.
- */
 export class MergeApplyError extends Error {
   readonly recoveryDir: string;
 
@@ -206,7 +131,6 @@ export class MergeApplyError extends Error {
   }
 }
 
-/** The plugin folder's `.kizenapp` can't hold the merge's staging files; nothing was written. */
 export class MergeStagingError extends Error {
   readonly path: string;
 
@@ -217,7 +141,6 @@ export class MergeStagingError extends Error {
   }
 }
 
-/** A plan names a path `applyMerge` must never write or delete; nothing was written. */
 export class UnsafeMergePathError extends Error {
   readonly path: string;
 
@@ -237,17 +160,8 @@ const GIT_MISSING_REASON = "git isn't installed or isn't on PATH.";
 
 const WORKSPACE_GIT_TIMEOUT_MS = 60_000;
 
-/** A cap, not an allocation: `cat-file` can return a few conflicted blobs of up to 50 MB each. */
 const WORKSPACE_GIT_MAX_BUFFER = 1024 * 1024 * 1024;
 
-/**
- * Config for every git call in the throwaway repository. Global and system config are off (see
- * `workspaceEnv`), so these are the only settings besides the repository's own `git init` ones:
- * an identity so commits work anywhere, no signing, no line-ending conversion, no fsmonitor, no
- * hooks, no global attributes or excludes (their XDG defaults apply even without a global config),
- * two-way conflict markers (the style most editors' conflict tools expect, and git's default), no
- * rerere, and no automatic gc or maintenance, which could outlive the call in the background.
- */
 const WORKSPACE_GIT_CONFIG: readonly string[] = (
   [
     ['user.name', 'appbuilder'],
@@ -261,7 +175,6 @@ const WORKSPACE_GIT_CONFIG: readonly string[] = (
     ['core.excludesFile', devNull],
     ['merge.conflictStyle', 'merge'],
     ['merge.renormalize', 'false'],
-    // Every name here is already NFC; git compares them as bytes rather than re-normalizing.
     ['core.precomposeUnicode', 'false'],
     ['init.defaultBranch', 'main'],
     ['rerere.enabled', 'false'],
@@ -271,12 +184,7 @@ const WORKSPACE_GIT_CONFIG: readonly string[] = (
   ] as const
 ).flatMap(([key, value]) => ['-c', `${key}=${value}`]);
 
-/**
- * `$GIT_DIR/info/attributes` outranks every `.gitattributes` in the merged sources. Those could
- * name filters or merge drivers (inert: the config defining them doesn't exist here) or ask for
- * line-ending or encoding conversion (which needs no config); this turns all of it off and pins
- * the built-in text merge, so files go in and come out byte for byte.
- */
+/** `$GIT_DIR/info/attributes` outranks every `.gitattributes` in the merged sources. */
 const WORKSPACE_ATTRIBUTES =
   '* -text -eol -filter -ident -working-tree-encoding merge conflict-marker-size=7\n';
 
@@ -299,12 +207,7 @@ function findGitOnPath(): string | undefined {
   }
 }
 
-/**
- * The parent environment minus git's own variables (`gitChildEnv`), with global and system config
- * turned off. The kept `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` are overridden. git before 2.32
- * ignores `GIT_CONFIG_GLOBAL` and reads `$HOME/.gitconfig` and `$XDG_CONFIG_HOME/git/config`, so
- * both point at `home`, an empty directory inside the throwaway workspace.
- */
+/** git before 2.32 ignores `GIT_CONFIG_GLOBAL` and reads `$HOME` and `$XDG_CONFIG_HOME` config. */
 function workspaceEnv(parent: NodeJS.ProcessEnv, home: string): NodeJS.ProcessEnv {
   return {
     ...gitChildEnv(parent),
@@ -323,7 +226,6 @@ interface GitOutput {
   stderr: string;
 }
 
-/** Runs git without a shell; resolves with the exit code, rejects when it can't run or times out. */
 function execGit(
   gitPath: string,
   args: readonly string[],
@@ -367,7 +269,6 @@ function execGit(
   });
 }
 
-/** A reason git can't be used, or undefined when it's new enough. */
 async function gitVersionProblem(
   gitPath: string,
   env: NodeJS.ProcessEnv,
@@ -397,7 +298,6 @@ async function gitVersionProblem(
   return undefined;
 }
 
-/** A path in fast-import's C-style quoting, so any byte (spaces, quotes, newlines) round-trips. */
 function quotePath(path: string): string {
   let quoted = '"';
 
@@ -418,10 +318,6 @@ function quotePath(path: string): string {
 
 type Tree = ReadonlyMap<string, Uint8Array>;
 
-/**
- * A `git fast-import` stream committing `base`, then `live` and `local` as children of it, each
- * with exactly its tree. Blobs come from memory, so no file on disk, filter or hook is involved.
- */
 function fastImportStream(base: Tree, live: Tree, local: Tree): Uint8Array[] {
   const chunks: Uint8Array[] = [];
   const text = (value: string): void => {
@@ -462,7 +358,6 @@ const splitNul = (output: Buffer): string[] =>
     .split('\0')
     .filter((part) => part !== '');
 
-/** `ls-files -u -z`: path → stage number → blob id. */
 function parseUnmerged(output: Buffer): Map<string, Map<number, string>> {
   const unmerged = new Map<string, Map<number, string>>();
 
@@ -479,7 +374,6 @@ function parseUnmerged(output: Buffer): Map<string, Map<number, string>> {
   return unmerged;
 }
 
-/** `cat-file --batch` output: blob id → content. */
 function parseBatch(output: Buffer): Map<string, Uint8Array> {
   const blobs = new Map<string, Uint8Array>();
   let offset = 0;
@@ -503,16 +397,12 @@ function parseBatch(output: Buffer): Map<string, Uint8Array> {
 }
 
 interface WorkspaceResult {
-  /** `git diff-tree --name-status` between the local commit and the merge result. */
   changes: { status: string; path: string }[];
-  /** Merged content of every added or modified path. */
   contents: Map<string, Uint8Array>;
   unmerged: Map<string, Map<number, string>>;
-  /** Unmerged paths both sides changed where git's binary check refused a text merge. */
   binary: Set<string>;
 }
 
-/** Runs the merge in a new repository at `workspace`; the caller deletes it. */
 async function mergeInWorkspace(
   gitPath: string,
   env: NodeJS.ProcessEnv,
@@ -541,7 +431,6 @@ async function mergeInWorkspace(
     return output;
   };
 
-  // No templates: nothing but what git itself needs goes into .git.
   await run('init', ['init', '-q', '--template=', '.']);
   await mkdir(join(workspace, '.git', 'info'), { recursive: true });
   await writeFile(join(workspace, '.git', 'info', 'attributes'), WORKSPACE_ATTRIBUTES);
@@ -550,7 +439,6 @@ async function mergeInWorkspace(
     ['fast-import', '--quiet', '--done'],
     fastImportStream(trees.base, trees.live, trees.local),
   );
-  // The merge moves the `local` branch, so the local tree is pinned first.
   const localTree = (await run('rev-parse', ['rev-parse', '--verify', 'local^{tree}'])).stdout
     .toString('utf8')
     .trim();
@@ -589,7 +477,6 @@ async function mergeInWorkspace(
       .map(([path]) => path),
   );
 
-  // Stage whatever the merge left (markers, the kept side of a delete conflict) as one tree.
   await run('add', ['add', '-A', '-f']);
 
   const tree = (await run('write-tree', ['write-tree'])).stdout.toString('utf8').trim();
@@ -630,21 +517,14 @@ async function mergeInWorkspace(
 }
 
 interface LocalTree {
-  /** Content by merge path: NFC, unless two local names share an NFC form. */
   files: Map<string, Uint8Array>;
   hashes: Map<string, string>;
-  /** Merge path → the name on disk, which can be in another Unicode normalization form. */
   diskPaths: Map<string, string>;
   mode: SourceZipMode;
 }
 
-/** `O_NOFOLLOW` where the platform has it (not on Windows). */
 const O_NOFOLLOW = (fsConstants as Partial<typeof fsConstants>).O_NOFOLLOW ?? 0;
 
-/**
- * Reads a file without following a symlink at the last segment; `collectSourceFiles` already
- * checked every directory above it.
- */
 async function readNoFollow(path: string): Promise<Uint8Array> {
   const handle = await open(path, fsConstants.O_RDONLY | O_NOFOLLOW);
 
@@ -655,12 +535,6 @@ async function readNoFollow(path: string): Promise<Uint8Array> {
   }
 }
 
-/**
- * The plugin folder's source files, named in NFC so they line up with the zips' names whatever
- * form the filesystem stored (macOS keeps names as created, so a decomposed `café.js` is common
- * enough). Names stay as stored when two of them share an NFC form, which only a filesystem that
- * keeps both forms apart allows.
- */
 async function readLocalTree(dir: string, git: GitRunner | undefined): Promise<LocalTree> {
   const listing = await collectSourceFiles(dir, git === undefined ? {} : { git });
   const contents = await Promise.all(
@@ -684,16 +558,9 @@ async function readLocalTree(dir: string, git: GitRunner | undefined): Promise<L
   return { files, hashes, diskPaths, mode: listing.mode };
 }
 
-/** A zip's files with NFC names; `readZipEntries` already refused names that fold together. */
 const nfcTree = (files: ReadonlyMap<string, Uint8Array>): Tree =>
   new Map([...files].map(([path, data]) => [path.normalize('NFC'), data]));
 
-/**
- * What's on disk at `path` under `root`: 'absent' when it (or an ancestor) doesn't exist and every
- * existing ancestor is a real directory, 'file' for a regular file reached through real
- * directories, 'blocked' for anything else (a symlink anywhere, a file where a directory is
- * needed, a directory or special file at the path).
- */
 async function pathShape(root: string, path: string): Promise<'absent' | 'file' | 'blocked'> {
   const segments = segmentsOf(path);
 
@@ -716,14 +583,9 @@ async function pathShape(root: string, path: string): Promise<'absent' | 'file' 
   return 'blocked';
 }
 
-/**
- * A regular file's identity on disk. Undefined when it has other hard links: removing one name
- * wouldn't free the others.
- */
 const fileIdentity = (stats: BigIntStats): string | undefined =>
   stats.isFile() && stats.nlink === 1n ? `${String(stats.dev)}:${String(stats.ino)}` : undefined;
 
-/** The identities of the files at `paths` (relative to `root`) that the merge removes. */
 async function removedIdentities(root: string, paths: readonly string[]): Promise<Set<string>> {
   const identities = new Set<string>();
 
@@ -739,10 +601,6 @@ async function removedIdentities(root: string, paths: readonly string[]): Promis
   return identities;
 }
 
-/**
- * Whether `dir` holds only removed files and directories that removal empties too. A directory
- * with nothing removed from it, even an empty one, isn't pruned, so it still stands in the way.
- */
 async function emptiedBy(dir: string, removed: ReadonlySet<string>): Promise<boolean> {
   const names = await readdir(dir);
 
@@ -765,13 +623,6 @@ async function emptiedBy(dir: string, removed: ReadonlySet<string>): Promise<boo
   return true;
 }
 
-/**
- * Whether a path the merge adds can be written once the merge's removals are done. 'absent' when
- * nothing is in the way, or only what the merge removes: a removed file at the path (on a
- * case-insensitive filesystem, the same file under another case) or at an ancestor, or a directory
- * holding only removed files. 'blocked' for anything else: a symlink anywhere, a file or directory
- * that stays, a special file.
- */
 async function incomingShape(
   root: string,
   path: string,
@@ -803,10 +654,6 @@ async function incomingShape(
   return 'blocked';
 }
 
-/**
- * Which of `paths` the plugin folder's ignore rules exclude from its source file set. Only paths
- * with nothing in the way on disk are passed, so git never sees one through a symlink.
- */
 async function ignoredLocally(
   dir: string,
   paths: readonly string[],
@@ -831,11 +678,7 @@ async function ignoredLocally(
   }
 
   if (mode === 'git') {
-    // `check-ignore -z` needs --stdin, which a GitRunner can't feed. Without it git quotes a path
-    // holding a quote, backslash or control character, so those are asked about one at a time
-    // (exit 0: ignored) and the rest in batches, matched against the output lines.
-    // check-ignore refuses --literal-pathspecs; the `./` prefix stops a leading `:` from being
-    // read as pathspec magic, and git echoes each path as given.
+    // Without --stdin, check-ignore quotes odd paths and refuses --literal-pathspecs.
     const quoted = (path: string): boolean => /["\\\p{Cc}]/u.test(path);
     const checkIgnore = async (batch: readonly string[]): Promise<Set<string>> => {
       try {
@@ -881,14 +724,12 @@ async function ignoredLocally(
 
 const sorted = (paths: Iterable<string>): string[] => [...paths].sort();
 
-/** Whether two paths are the same place, or one is inside the other, on a folding filesystem. */
 function overlaps(a: string, b: string): boolean {
   const [x, y] = [foldPath(a), foldPath(b)];
 
   return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
 }
 
-/** Sorts the merge result into what applying it writes, deletes and reports. */
 async function classify(
   pluginDir: string,
   local: LocalTree,
@@ -952,10 +793,6 @@ async function classify(
     }
   }
 
-  // A redundant safeguard: a local path is never removed while the Live path that takes its place
-  // (the same place on a case-insensitive filesystem, or a path inside it or around it) goes
-  // unwritten. Such a deletion is dropped and both sides are reported as a conflict, along with
-  // any new path that needed the deletion.
   const kept = [...deleted].filter((path) =>
     [...ignoredIncoming].some((incoming) => overlaps(incoming, path)),
   );
@@ -991,12 +828,6 @@ async function classify(
   };
 }
 
-/**
- * Merges Live into the plugin folder's source in a throwaway repository and returns what applying
- * it would change. Writes nothing in `pluginDir`. Throws `UnsafeZipEntryError` / `ZipLimitError`
- * for a zip that fails `readZipEntries`, `collectSourceFiles`' errors for the folder, and
- * `MergeGitError` when a git step fails.
- */
 export async function planMerge(input: MergeInput, deps: MergeDeps = {}): Promise<MergePlan> {
   if (input.base === null) {
     return { status: 'no_base' };
@@ -1061,7 +892,6 @@ export async function planMerge(input: MergeInput, deps: MergeDeps = {}): Promis
   }
 }
 
-/** Throws `UnsafeMergePathError` unless `path` is a canonical, non-safety-listed path under `root`. */
 function assertApplicablePath(root: string, path: string): void {
   const target = resolve(root, ...segmentsOf(path));
 
@@ -1070,7 +900,6 @@ function assertApplicablePath(root: string, path: string): void {
   }
 }
 
-/** Creates the missing directories above `path`, one level at a time. */
 async function createParents(root: string, path: string): Promise<void> {
   const segments = segmentsOf(path);
 
@@ -1090,10 +919,6 @@ async function createParents(root: string, path: string): Promise<void> {
   }
 }
 
-/**
- * Removes the directories above `paths` that are now empty, deepest first. Never `root` itself,
- * and never through a symlink (`rmdir` doesn't follow one).
- */
 async function pruneEmptied(root: string, paths: readonly string[]): Promise<void> {
   const directories = new Set<string>();
 
@@ -1108,23 +933,15 @@ async function pruneEmptied(root: string, paths: readonly string[]): Promise<voi
   const deepestFirst = [...directories].sort((a, b) => segmentsOf(b).length - segmentsOf(a).length);
 
   for (const directory of deepestFirst) {
-    // A directory that still holds something stays.
     await rmdir(join(root, ...segmentsOf(directory))).catch(() => undefined);
   }
 }
 
-/** The CLI's own folder in a plugin folder: safety-listed, gitignored, unwatched. */
 const STATE_DIR = '.kizenapp';
 
 const statDefault = (path: string, follow: boolean): Promise<BigIntStats> =>
   follow ? stat(path, { bigint: true }) : lstat(path, { bigint: true });
 
-/**
- * Creates `<root>/.kizenapp/merge-<uuid>`, creating `.kizenapp` too when it's missing. Refuses
- * (`MergeStagingError`, nothing left behind) unless `.kizenapp` is a real directory, not a
- * symlink, on the same device as `root`: a symlink would put the staged files outside the plugin
- * folder, and another device would make the moves fail after they've begun.
- */
 async function createStaging(
   root: string,
   statPath: (path: string, follow: boolean) => Promise<BigIntStats>,
@@ -1173,29 +990,6 @@ async function createStaging(
   };
 }
 
-/**
- * Writes a `ready` plan into its plugin folder; any other plan comes back as the outcome as is.
- *
- * Only the plan's `written` and `deleted` paths are touched, and only after every check passes,
- * so a refused apply writes nothing:
- * - each path is canonical, inside the folder and off the safety list (`UnsafeMergePathError`);
- *   a deleted path, or a written one that isn't new, must be one of the planned local files;
- * - the folder's source file set and every file's content match the plan (`MergeStaleError`);
- * - every path is reached through real directories only, existing paths are regular files, and
- *   new ones have nothing in their way but what the plan removes (`MergeStaleError`).
- *
- * Then, in order: every merged file is written into a staging folder,
- * `.kizenapp/merge-<uuid>/merged/<path>`; removed files are moved to `…/removed/<path>`; directories
- * that emptied are pruned; merged files are renamed into place; the staging folder is deleted.
- * `.kizenapp` is on the source zip's safety list (and skipped by the dev server's reader and
- * watcher), so staged files are never part of the app's source, even after a crash. It must be a
- * real directory on the plugin folder's device, or the apply is refused before anything is written
- * (`MergeStagingError`). Moving removals out first lets a path change into a directory (or back)
- * and lets a case-only rename land on a case-insensitive filesystem. A failure before anything
- * moves removes the staging folder and changes nothing, and so does a cancel (`isAborted`) seen
- * once the files are staged; a failure after that throws `MergeApplyError` and leaves the staging
- * folder in place for recovery by hand.
- */
 export async function applyMerge(
   plan: MergePlan,
   deps: ApplyMergeDeps = {},
@@ -1264,7 +1058,6 @@ export async function applyMerge(
       await mkdir(dirname(source), { recursive: true });
       await writeFile(source, plan.contents.get(path) ?? new Uint8Array(), { flag: 'wx' });
 
-      // Keep an existing file's permissions (an executable script stays executable).
       if (plan.localHashes.has(path)) {
         await chmod(source, (await lstat(target)).mode & 0o7777);
       }
@@ -1277,7 +1070,6 @@ export async function applyMerge(
     throw err;
   }
 
-  // The last point where nothing in the plugin folder has changed.
   if (deps.isAborted?.() === true) {
     await cleanUp();
 

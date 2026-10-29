@@ -17,9 +17,7 @@ export interface SelectListProps {
   onSelect: (item: SelectItem, index: number) => void;
   onCancel?: () => void;
   hint?: string;
-  /** The item the cursor starts on, when it's enabled. */
   initialKey?: string;
-  /** Typing filters the items by label and description (so j and k type rather than move). */
   searchable?: boolean;
 }
 
@@ -69,7 +67,6 @@ export const SelectList: FC<SelectListProps> = ({
       setCursorState(moveCursor(cursor, shownItems.length, delta, { disabled }));
     };
 
-    // A new query starts the cursor on its first match.
     const search = (next: string): void => {
       setQuery(next);
       setCursorState(initialCursor(searchItems(items, next).map(({ item }) => item)));

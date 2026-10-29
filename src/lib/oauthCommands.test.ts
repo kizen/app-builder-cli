@@ -285,7 +285,6 @@ describe('whoami', () => {
       expect(h.exitCodes).toStrictEqual([]);
       expectNoSecrets(h.all());
 
-      // What the identity doesn't say is null.
       const bare = harness(() =>
         jsonResponse({ team: { id: 't1', user: USER_9 }, business: { id: BIZ_9 } }),
       );
@@ -302,7 +301,6 @@ describe('whoami', () => {
         email: null,
       });
 
-      // Without --json, the text as before, on stdout.
       const text = harness(() => jsonResponse(BOOTSTRAP));
 
       await runWhoamiCommand({}, text.deps);
@@ -323,7 +321,6 @@ describe('whoami', () => {
       expect(h.exitCodes).toStrictEqual([1]);
       expect(h.fetchMock).not.toHaveBeenCalled();
 
-      // Kizen refusing the session is auth_failed, as the app commands report it.
       await signIn(store, session('staging'));
 
       const rejected = harness(() => jsonResponse({ detail: 'Invalid token.' }, 401));

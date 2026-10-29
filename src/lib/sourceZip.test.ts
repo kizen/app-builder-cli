@@ -90,14 +90,9 @@ const buildTree = async (root: string): Promise<void> => {
   }
 };
 
-/** git missing: every walk-mode test passes this so the host's git can't change the mode. */
 const NO_GIT: GitRunner = () =>
   Promise.reject(Object.assign(new Error('spawn git ENOENT'), { code: 'ENOENT' }));
 
-/**
- * Real git, isolated from the host's global/system config and excludes, so a developer's own
- * global gitignore can't change what these tests see.
- */
 const isolatedGit: GitRunner = async (args, cwd) =>
   (
     await promisify(execFile)('git', ['-c', 'core.excludesFile=', ...args], {
@@ -123,7 +118,6 @@ const gitInit = async (dir: string): Promise<void> => {
 const zippedPaths = async (dir: string, git: GitRunner = NO_GIT): Promise<string[]> => {
   const zip = await zipSourceDir(dir, { git });
 
-  // The listing and the bytes agree.
   expect([...readZipEntries(zip.bytes).files.keys()]).toStrictEqual(zip.files);
 
   return zip.files;
@@ -208,7 +202,6 @@ describe('zipSourceDir', () => {
 
     expect(await zippedPaths(root)).toStrictEqual(['kizen.json']);
 
-    // Git lists a tracked symlink; it's still left out.
     await gitInit(root);
     await isolatedGit(['add', '-A'], root);
     expect(await zippedPaths(root, isolatedGit)).toStrictEqual(['kizen.json']);
@@ -218,7 +211,6 @@ describe('zipSourceDir', () => {
     const first = join(workDir, 'first');
     const second = join(workDir, 'second');
 
-    // Same tree, written in a different order with different mtimes.
     for (const path of KEPT) {
       await write(first, path, `content of ${path}`);
     }
@@ -236,13 +228,11 @@ describe('zipSourceDir', () => {
       Buffer.from((await zipSourceDir(first, { git: NO_GIT })).bytes).equals(Buffer.from(a)),
     ).toBe(true);
 
-    // The same files picked by git give the same bytes too.
     await gitInit(first);
     expect(
       Buffer.from((await zipSourceDir(first, { git: isolatedGit })).bytes).equals(Buffer.from(a)),
     ).toBe(true);
 
-    // A content change changes the bytes, so the checks above aren't vacuous.
     await write(second, 'kizen.json', 'changed');
     expect(
       Buffer.from((await zipSourceDir(second, { git: NO_GIT })).bytes).equals(Buffer.from(a)),
@@ -289,7 +279,6 @@ describe('ignore files', () => {
       'src/b.tmp',
       'src/generated/x.js',
       'local-only.txt',
-      // An untracked file nothing ignores is included without being added.
       'src/untracked.js',
     ]) {
       await write(root, path, path);
@@ -352,7 +341,6 @@ describe('ignore files', () => {
     expect(await zippedPaths(root)).toStrictEqual(expected);
 
     await gitInit(root);
-    // Tracked files are still dropped by .kizenignore.
     await isolatedGit(['add', '-A'], root);
 
     const zip = await zipSourceDir(root, { git: isolatedGit });
@@ -384,7 +372,6 @@ describe('ignore files', () => {
 
     expect(await zippedPaths(root)).toStrictEqual(expected);
 
-    // Even force-tracked, so git itself lists them.
     await gitInit(root);
     await isolatedGit(['add', '-f', '-A'], root);
     await isolatedGit(
@@ -439,10 +426,8 @@ describe('ignore files', () => {
     expect(unavailable).toHaveBeenCalled();
     expect(zip.mode).toBe('walk');
     expect(zip.notice).toContain("git isn't installed");
-    // .git/ is pruned by the safety list even though the repo is there.
     expect(zip.files).toStrictEqual(['.gitignore', 'kizen.json']);
 
-    // A git failure other than "missing" falls back too, saying why.
     const broken: GitRunner = () =>
       Promise.reject(Object.assign(new Error('timed out'), { code: null }));
     const fallback = await zipSourceDir(root, { git: broken });
@@ -452,7 +437,6 @@ describe('ignore files', () => {
       "Couldn't list files with git (timed out), so the source zip honors only the root .gitignore and .kizenignore.",
     );
 
-    // Real git outside a work tree.
     const plain = join(workDir, 'plain');
 
     await write(plain, 'kizen.json', '{}');
@@ -503,7 +487,6 @@ describe('unzipToDir', () => {
 
     expect(error.entry).toBe(name);
     expect(error.message).toContain('nothing was extracted');
-    // Nothing was written, not even the destination.
     await expect(readdir(dest)).rejects.toThrow();
     await expect(readFile(join(workDir, 'escape.txt'))).rejects.toThrow();
   });
@@ -530,7 +513,6 @@ describe('unzipToDir', () => {
     await expect(unzipToDir(bytes, dest)).rejects.toBeInstanceOf(ZipDestinationExistsError);
     expect(await readdir(dest)).toStrictEqual([]);
 
-    // An existing symlink at the destination is refused too, not written through.
     const outside = join(workDir, 'outside');
     const linked = join(workDir, 'linked');
 
@@ -584,24 +566,20 @@ describe('git listing safety', () => {
     await write(root, 'kizen.json', '{}');
     await write(root, 'src/a.js', 'a');
     await isolatedGit(['add', '-A'], root);
-    // Hostile repo-local config: an fsmonitor command and a hook that would leave a marker.
     await isolatedGit(
       ['config', 'core.fsmonitor', `sh -c 'echo ran >> "${marker}"; exit 1'`],
       root,
     );
     await write(hooks, 'post-index-change', `#!/bin/sh\necho hook >> "${marker}"\n`);
     await isolatedGit(['config', 'core.hooksPath', hooks], root);
-    // Make the index stale so git has a reason to consult the monitor.
     await write(root, 'src/a.js', 'changed');
 
-    // The production runner, not the test one.
     const zip = await zipSourceDir(root);
 
     expect(zip.mode).toBe('git');
     expect(zip.files).toContain('src/a.js');
     expect(await exists(marker)).toBe(false);
 
-    // The hostile config does run when git is called plainly, so the check above isn't vacuous.
     await isolatedGit(['ls-files', '--cached', '--others', '--exclude-standard'], root);
     expect(await exists(marker)).toBe(true);
   });
@@ -657,7 +635,6 @@ describe('git listing safety', () => {
     await write(root, 'lib/deep/real/b.js', 'inside');
     await isolatedGit(['add', '-A'], root);
 
-    // Swap tracked folders for symlinks out of the project, at the top and deeper down.
     await write(outside, 'a.js', 'OUTSIDE-SECRET');
     await write(outside, 'real/b.js', 'OUTSIDE-SECRET');
     await rm(join(root, 'src'), { recursive: true });
@@ -665,7 +642,6 @@ describe('git listing safety', () => {
     await rm(join(root, 'lib', 'deep'), { recursive: true });
     await symlink(outside, join(root, 'lib', 'deep'));
 
-    // git still lists the indexed paths.
     const listed = await isolatedGit(['ls-files', '--cached'], root);
 
     expect(listed).toContain('src/a.js');
@@ -682,7 +658,6 @@ describe('git listing safety', () => {
     const plugin = join(repo, 'plugins', 'app');
 
     await gitInit(repo);
-    // The repo's own rules: a walk of the plugin folder would never see these.
     await write(repo, '.gitignore', 'plugins/\n*.pem\nsecrets.yaml\n');
     await write(repo, 'README.md', 'root');
     await isolatedGit(['add', '-A'], repo);
@@ -691,7 +666,6 @@ describe('git listing safety', () => {
     await write(plugin, 'secrets.yaml', 'token: SECRET');
     await write(plugin, 'service.pem', 'PRIVATE KEY');
 
-    // git agrees it's a work tree but lists nothing here.
     expect((await isolatedGit(['rev-parse', '--is-inside-work-tree'], plugin)).trim()).toBe('true');
     expect(
       await isolatedGit(['ls-files', '--cached', '--others', '--exclude-standard'], plugin),
@@ -715,7 +689,6 @@ describe('git listing safety', () => {
       SourceZipMissingManifestError,
     );
 
-    // Present on disk but excluded by .kizenignore.
     await write(plain, 'kizen.json', '{}');
     await write(plain, '.kizenignore', 'kizen.json\n');
 
@@ -726,7 +699,6 @@ describe('git listing safety', () => {
       "kizen.json isn't among the files picked for the source zip. Check that .gitignore or .kizenignore doesn't exclude it.",
     );
 
-    // Excluded by .gitignore in git mode while other files are listed.
     const repo = join(workDir, 'repo');
 
     await gitInit(repo);
@@ -744,8 +716,7 @@ describe('git listing safety', () => {
 
   it('the safety list matches case-insensitively and as folder names', async () => {
     const root = join(workDir, 'app');
-    // Windows strips trailing dots and spaces, so these open the real names. Walk mode only:
-    // git refuses to add `.git.`-style paths itself.
+    // Windows strips trailing dots and spaces; git refuses to index these, so walk mode only.
     const trailing = [
       '.env.',
       '.Env ',
@@ -892,7 +863,6 @@ describe('unzip safety list', () => {
   });
 });
 
-/** Overwrites the uncompressed size the central directory records for entry `index`. */
 function setDeclaredSize(bytes: Uint8Array, index: number, size: number): Uint8Array {
   const out = new Uint8Array(bytes);
   const view = new DataView(out.buffer);
@@ -919,8 +889,6 @@ function setDeclaredSize(bytes: Uint8Array, index: number, size: number): Uint8A
 
 describe('zip limits', () => {
   it('readZipEntries refuses entries over the uncompressed cap before decompressing', () => {
-    // Tiny on disk, but declared just over the per-entry cap: refused from the header alone,
-    // before fflate would allocate a buffer of that size.
     const oneEntry = setDeclaredSize(
       zipSync({ 'kizen.json': strToU8('{}'), 'big.bin': strToU8('x') }),
       1,
@@ -939,7 +907,6 @@ describe('zip limits', () => {
     expect(entryError).toBeInstanceOf(ZipLimitError);
     expect((entryError as ZipLimitError).entry).toBe('big.bin');
 
-    // Each entry under the cap, together over the total.
     const perEntry = Math.floor(MAX_ZIP_TOTAL_BYTES / 5) + 1;
 
     expect(perEntry).toBeLessThan(MAX_ZIP_ENTRY_BYTES);
@@ -960,7 +927,6 @@ describe('zip limits', () => {
       `The source zip expands to more than ${String(MAX_ZIP_TOTAL_BYTES)} bytes; nothing was extracted.`,
     );
 
-    // A safety-listed entry is skipped, not decompressed, so its size doesn't count.
     const skippedBig = setDeclaredSize(
       zipSync({ '.git/objects/pack': strToU8('x'), 'kizen.json': strToU8('{}') }),
       0,
@@ -973,17 +939,14 @@ describe('zip limits', () => {
   it('readZipEntries refuses an entry whose data does not match its recorded size', () => {
     const content = strToU8('a'.repeat(1000));
 
-    // Declared shorter than the data: fflate truncates into the declared buffer; the CRC catches it.
     const shorter = setDeclaredSize(zipSync({ 'a.txt': content }), 0, 10);
 
     expect(() => readZipEntries(shorter)).toThrow(UnsafeZipEntryError);
 
-    // Declared longer than the data.
     const longer = setDeclaredSize(zipSync({ 'a.txt': content }), 0, 2000);
 
     expect(() => readZipEntries(longer)).toThrow(UnsafeZipEntryError);
 
-    // Untouched, it reads back intact.
     expect([
       ...(readZipEntries(zipSync({ 'a.txt': content })).files.get('a.txt') ?? []),
     ]).toStrictEqual([...content]);
@@ -1012,7 +975,6 @@ describe('resolveExecutable', () => {
     const isExecutable = (path: string): boolean =>
       present.has(path.toLowerCase()) || !/^([A-Za-z]:\\|\/)/.test(path);
 
-    // isExecutable says yes to every relative path, as if a planted git sat in the cwd.
     expect(
       resolveExecutable('git', {
         env: { PATH: ':.:bin:/usr/local/bin' },
@@ -1029,7 +991,6 @@ describe('resolveExecutable', () => {
       }),
     ).toBe('C:\\Program Files\\Git\\cmd\\git.EXE');
 
-    // Only relative or empty entries: not found, which reads as "git isn't installed".
     expect(
       resolveExecutable('git', { env: { PATH: '.:bin::' }, platform: 'linux', isExecutable }),
     ).toBeUndefined();
@@ -1061,7 +1022,6 @@ describe('source lineage', () => {
     expect(readSourceLineage(zipped)).toStrictEqual(lineage);
     expect(readSourceLineage(plain())).toBeNull();
     expect(readZipEntries(zipped)).toStrictEqual(readZipEntries(plain()));
-    // Deterministic, and a second write replaces the first record.
     expect(withSourceLineage(plain(), lineage)).toStrictEqual(zipped);
     expect(
       readSourceLineage(

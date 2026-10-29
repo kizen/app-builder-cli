@@ -5,7 +5,6 @@ import { AppHeader } from './AppHeader.js';
 import { interrupt, type Session } from './commandSession.js';
 import { Lines } from './Lines.js';
 
-/** The header every interactive command that signs in shows above its current step. */
 export const SessionFrame: FC<{ session: Session; children: ReactNode }> = ({
   session,
   children,
@@ -28,10 +27,6 @@ export const SessionFrame: FC<{ session: Session; children: ReactNode }> = ({
   </Box>
 );
 
-/**
- * Exits ink once the command reaches a final phase (`finished`). Ctrl+C before then aborts the
- * flow (`abort`: no further write starts) and exits 130. Render with `exitOnCtrlC: false`.
- */
 export function useCommandExit(
   finished: boolean,
   setExitCode: (code: number) => void,
@@ -39,7 +34,6 @@ export function useCommandExit(
 ): void {
   const app = useApp();
 
-  // ink's app is outside React: leaving it is synchronizing with it once the flow finishes.
   useEffect(() => {
     if (finished) {
       app.exit();
