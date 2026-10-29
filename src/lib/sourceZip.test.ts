@@ -785,7 +785,12 @@ describe('git listing safety', () => {
     }
 
     await gitInit(root);
-    await isolatedGit(['add', '-f', '-A'], root);
+    // Git refuses to index any `.git` look-alike, and with core.ignorecase it skips `.Git` dirs.
+    await isolatedGit(['config', 'core.ignorecase', 'false'], root);
+    await isolatedGit(['add', '-f', '-A', '--', '.', ':(exclude)src/.Git'], root);
+    expect(
+      (await isolatedGit(['ls-files', '--others', '--exclude-standard', '-z'], root)).split('\0'),
+    ).toContain('src/.Git/config');
     expect(await zippedPaths(root, isolatedGit)).toStrictEqual(['kizen.json']);
   });
 });
