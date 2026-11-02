@@ -13,7 +13,8 @@ description: Publish, preview, merge, roll back or pull this plugin as a Kizen B
 - If `appbuilder app` is an unknown command, the CLI is too old. Ask the user to upgrade `@kizenapps/cli` to 1.18.0 or later, then continue.
 - If a result's `warnings` contains `{{STALE_WARNING}}`, run `{{SETUP_COMMAND}}`, re-read `{{SKILLS_DIR}}/kizen-business-apps/SKILL.md`, and follow the new copy.
 - Never edit, delete or commit anything in `.kizenapp/`. `.kizenapp/apps.json` records what this folder is based on; push and merge depend on it. Your preview's base isn't in it: it lives only in the preview's source on the server (see "Another machine or folder"), so publishing works from any machine.
-- The server numbers releases. `kizen.json` `version` isn't sent, so don't bump it for an app release.
+- The server numbers releases with whole numbers (1, 2, 3…) when you publish. They aren't semver, and they can skip numbers, so never predict one: the publish dry run's `nextReleaseAtLeast` is only a lower bound.
+- Business App releases don't publish release notes and don't use `kizen.json` `version` (it isn't sent), so for an app release don't bump `version` or create or edit files in `release_notes_directory`.
 
 ## The contract
 
