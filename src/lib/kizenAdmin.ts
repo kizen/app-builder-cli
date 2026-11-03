@@ -141,8 +141,11 @@ export const kizenAuthHelper = (
     .map(quoteArg)
     .join(' ');
 
-/** Set by the caller's shell, but they'd steer kizen or `auth-header` away from this session. */
-const STRIPPED_ENV = ['KIZEN_PROFILE', 'CLAUDE_CODE_MCP_SERVER_URL'] as const;
+/**
+ * Set by the caller's shell, but they'd steer kizen or `auth-header` away from this session.
+ * `KICODE_API_KEY` is kicode's key mode; kizen refuses to run with it next to `KIZEN_AUTH_HELPER`.
+ */
+const STRIPPED_ENV = ['KIZEN_PROFILE', 'CLAUDE_CODE_MCP_SERVER_URL', 'KICODE_API_KEY'] as const;
 
 export interface KizenSessionEnv {
   KIZEN_AUTH_HELPER: string;
@@ -151,7 +154,7 @@ export interface KizenSessionEnv {
   KIZEN_USER_ID: string;
 }
 
-/** `base` minus `KIZEN_PROFILE` and `CLAUDE_CODE_MCP_SERVER_URL`, plus kizen's session variables. */
+/** `base` minus `KIZEN_PROFILE`, `CLAUDE_CODE_MCP_SERVER_URL` and `KICODE_API_KEY`, plus kizen's session variables. */
 export function kizenChildEnv(
   base: Readonly<Record<string, string | undefined>>,
   session: KizenSessionEnv,

@@ -295,6 +295,19 @@ describe('kizenChildEnv', () => {
       KIZEN_USER_ID: USER_ID,
     });
   });
+
+  it('drops an inherited KICODE_API_KEY, which kizen refuses alongside KIZEN_AUTH_HELPER', () => {
+    const session = {
+      KIZEN_AUTH_HELPER: 'helper',
+      KIZEN_BASE_URL: 'https://staging.kizen.com',
+      KIZEN_BUSINESS_ID: BUSINESS_ID,
+      KIZEN_USER_ID: USER_ID,
+    };
+
+    expect(
+      kizenChildEnv({ PATH: '/usr/bin', KICODE_API_KEY: 'kc-secret' }, session),
+    ).toStrictEqual({ PATH: '/usr/bin', ...session });
+  });
 });
 
 describe('runAdmin', () => {

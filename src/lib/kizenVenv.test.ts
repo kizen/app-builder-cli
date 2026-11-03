@@ -275,12 +275,12 @@ describe('ensureKizen', () => {
     expect(await entries()).toStrictEqual([VENV_NAME]);
   });
 
-  it('pins kizen 0.3.0 at its GitHub release asset', () => {
+  it('pins kizen 0.5.0 at its GitHub release asset', () => {
     expect(KIZEN_PIN).toStrictEqual({
-      version: '0.3.0',
+      version: '0.5.0',
       wheelUrl:
-        'https://github.com/kizen/kizen-admin-cli/releases/download/v0.3.0/kizen_builder-0.3.0-py3-none-any.whl',
-      sha256: '9f2017dd43bdc4554b655c87e25d1b5c754b04e0b8a32f1ed7516e30b9edf2d7',
+        'https://github.com/kizen/kizen-admin-cli/releases/download/v0.5.0/kizen_builder-0.5.0-py3-none-any.whl',
+      sha256: '903f8824f3d624d23cf904e49bf03434ea849588ecf74ba7cdf190279bfff7c7',
     });
   });
 

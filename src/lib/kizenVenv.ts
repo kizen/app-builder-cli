@@ -48,9 +48,9 @@ export const kizenWheelUrl = (version: string): string =>
 
 // To bump: new tag, then the wheel's sha256 from the GitHub release digest, confirmed by shasum.
 export const KIZEN_PIN: KizenPin = {
-  version: '0.3.0',
-  wheelUrl: kizenWheelUrl('0.3.0'),
-  sha256: '9f2017dd43bdc4554b655c87e25d1b5c754b04e0b8a32f1ed7516e30b9edf2d7',
+  version: '0.5.0',
+  wheelUrl: kizenWheelUrl('0.5.0'),
+  sha256: '903f8824f3d624d23cf904e49bf03434ea849588ecf74ba7cdf190279bfff7c7',
 };
 
 /** Dev override: a local wheel to install instead of the pinned release. */
