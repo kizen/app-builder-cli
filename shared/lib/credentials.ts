@@ -1,4 +1,13 @@
-export const ENVIRONMENTS = ['go', 'fmo', 'staging', 'integration', 'test1'] as const;
+export const ENVIRONMENTS = [
+  'go',
+  'fmo',
+  'staging',
+  'e2e-staging',
+  'integration',
+  'e2e-integration',
+  'test1',
+  'perf',
+] as const;
 export type Environment = (typeof ENVIRONMENTS)[number];
 
 export interface Credentials {

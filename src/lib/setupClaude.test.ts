@@ -1039,7 +1039,7 @@ describe('setup-claude --mcp', () => {
     await runSetupClaude(dir, { mcp: true, env: 'prod' }, deps);
 
     expect(errors).toStrictEqual([
-      'Error: Unknown --env "prod". Use one of: go, fmo, staging, integration, test1.',
+      'Error: Unknown --env "prod". Use one of: go, fmo, staging, e2e-staging, integration, e2e-integration, test1, perf.',
     ]);
     expect(exitCodes).toStrictEqual([1]);
     expect(claude.run).not.toHaveBeenCalled();

@@ -545,7 +545,9 @@ describe('resolveCredentials', () => {
       const message = step.ok ? '' : step.message;
 
       expect(message).toContain(DEFAULT_PATH);
-      expect(message).toContain('go, fmo, staging, integration, test1');
+      expect(message).toContain(
+        'go, fmo, staging, e2e-staging, integration, e2e-integration, test1, perf',
+      );
       expect(message).toContain("won't default to production");
     },
   );

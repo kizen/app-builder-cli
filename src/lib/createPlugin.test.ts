@@ -81,16 +81,22 @@ describe('buildManifest', () => {
     );
   });
 
-  it.each(['go', 'fmo', 'staging', 'integration', 'test1'] as const)(
-    'keys the business id by the %s environment',
-    (environment) => {
-      const manifest = buildManifest(
-        validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
-      );
+  it.each([
+    'go',
+    'fmo',
+    'staging',
+    'e2e-staging',
+    'integration',
+    'e2e-integration',
+    'test1',
+    'perf',
+  ] as const)('keys the business id by the %s environment', (environment) => {
+    const manifest = buildManifest(
+      validInput({ developerBusinessId: 'biz-1', developerEnvironment: environment }),
+    );
 
-      expect(manifest.developer_business_id).toEqual({ [environment]: 'biz-1' });
-    },
-  );
+    expect(manifest.developer_business_id).toEqual({ [environment]: 'biz-1' });
+  });
 
   it('never emits a bare-string developer_business_id', () => {
     const manifest = buildManifest(validInput());
