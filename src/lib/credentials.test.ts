@@ -69,7 +69,8 @@ describe('parseEnvironment', () => {
   it('returns a known environment, or the unknown --env message', () => {
     expect(mod.parseEnvironment('fmo')).toStrictEqual({ environment: 'fmo' });
     expect(mod.parseEnvironment('prod')).toStrictEqual({
-      message: 'Unknown --env "prod". Use one of: go, fmo, staging, integration, test1.',
+      message:
+        'Unknown --env "prod". Use one of: go, fmo, staging, e2e-staging, integration, e2e-integration, test1, perf.',
     });
   });
 });

@@ -304,9 +304,9 @@ describe('kizenChildEnv', () => {
       KIZEN_USER_ID: USER_ID,
     };
 
-    expect(
-      kizenChildEnv({ PATH: '/usr/bin', KICODE_API_KEY: 'kc-secret' }, session),
-    ).toStrictEqual({ PATH: '/usr/bin', ...session });
+    expect(kizenChildEnv({ PATH: '/usr/bin', KICODE_API_KEY: 'kc-secret' }, session)).toStrictEqual(
+      { PATH: '/usr/bin', ...session },
+    );
   });
 });
 
@@ -371,7 +371,7 @@ describe('runAdmin', () => {
       'an unknown --env',
       {},
       ['--env', 'nope', 'status'],
-      'appbuilder admin: Unknown --env "nope". Use one of: go, fmo, staging, integration, test1.\n',
+      'appbuilder admin: Unknown --env "nope". Use one of: go, fmo, staging, e2e-staging, integration, e2e-integration, test1, perf.\n',
     ],
     [
       'no session for the chosen --env',

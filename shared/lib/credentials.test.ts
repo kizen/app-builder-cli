@@ -4,7 +4,16 @@ import type { Credentials } from './credentials.js';
 
 describe('ENVIRONMENTS', () => {
   it('lists every Kizen environment the CLI can talk to', () => {
-    expect(ENVIRONMENTS).toEqual(['go', 'fmo', 'staging', 'integration', 'test1']);
+    expect(ENVIRONMENTS).toEqual([
+      'go',
+      'fmo',
+      'staging',
+      'e2e-staging',
+      'integration',
+      'e2e-integration',
+      'test1',
+      'perf',
+    ]);
   });
 
   // src/lib/credentials.ts falls back to 'go' for an unknown environment, so the
@@ -19,7 +28,7 @@ describe('ENVIRONMENTS', () => {
 
   it('uses lowercase, url-safe names', () => {
     for (const environment of ENVIRONMENTS) {
-      expect(environment).toMatch(/^[a-z0-9]+$/);
+      expect(environment).toMatch(/^[a-z0-9]+(-[a-z0-9]+)*$/);
     }
   });
 });
