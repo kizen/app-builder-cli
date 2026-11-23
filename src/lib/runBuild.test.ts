@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PluginValidationError, validatePluginApp } from '@kizenapps/packager';
@@ -336,6 +336,45 @@ describe('runBuild', () => {
       for (const [collection, items] of Object.entries(entry?.artifacts ?? {})) {
         expect(items, `artifacts.${collection}`).toEqual([]);
       }
+    });
+  });
+
+  // These pin the outcome of the temp-file + rename write: a complete file and
+  // no leftovers. They can't reproduce a reader racing the writer; that
+  // guarantee comes from same-directory rename being atomic on POSIX.
+  describe('bundle.json write', () => {
+    const tempFiles = async (): Promise<string[]> =>
+      (await readdir(outputDir)).filter((name) => name.endsWith('.tmp'));
+
+    it('replaces an existing bundle.json with a complete file and leaves no temp files', async () => {
+      await bootstrapPlugin();
+      await mkdir(outputDir, { recursive: true });
+      const bundlePath = join(outputDir, 'bundle.json');
+
+      await writeFile(bundlePath, '[{"api_name": "stale', 'utf-8');
+      const seededInode = (await stat(bundlePath)).ino;
+
+      await runBuild(pluginDir, outputDir);
+
+      const bundle = await readBundle();
+
+      expect(bundle.map((entry) => entry.api_name)).toEqual([PLUGIN_API_NAME]);
+      expect(await tempFiles()).toEqual([]);
+      // An in-place write keeps the inode; renaming a new file onto the path
+      // replaces it, so a changed inode pins the replace-by-rename mechanism.
+      expect((await stat(bundlePath)).ino).not.toBe(seededInode);
+    });
+
+    it('removes its temp file and rethrows when bundle.json cannot be replaced', async () => {
+      await bootstrapPlugin();
+      // A non-empty directory at bundle.json makes the rename fail after the
+      // temp file has been written.
+      await mkdir(join(outputDir, 'bundle.json', 'occupied'), { recursive: true });
+
+      await expect(runBuild(pluginDir, outputDir)).rejects.toThrow();
+
+      expect(await tempFiles()).toEqual([]);
+      expect((await stat(join(outputDir, 'bundle.json'))).isDirectory()).toBe(true);
     });
   });
 

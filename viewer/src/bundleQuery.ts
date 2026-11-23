@@ -9,6 +9,10 @@ export const bundleQueryOptions = {
       throw new Error('Failed to fetch bundle.json');
     }
 
-    return res.json() as Promise<BundlePlugin[]>;
+    const json = (await res.json()) as unknown;
+
+    // /api/bundle serves `{}` when no bundle has been built; normalize here so
+    // every consumer can treat the data as an array.
+    return Array.isArray(json) ? (json as BundlePlugin[]) : [];
   },
 };

@@ -213,7 +213,6 @@ export const App: FC = () => {
     data: bundle,
     isLoading: isLoadingBundle,
     isError: isErrorBundle,
-    isSuccess: isBundleLoaded,
   } = useQuery(bundleQueryOptions);
 
   const {
@@ -307,13 +306,12 @@ export const App: FC = () => {
   const currentApiName = apiNameFromPath(location.pathname);
   const currentSubPage = /^\/[^/]+\/([^/]+)/.exec(location.pathname)?.[1];
 
-  // /api/bundle serves `{}` when no bundle has been built, so the query data
-  // isn't guaranteed to be an array at runtime.
-  const apps = Array.isArray(bundle) ? bundle : [];
   const apiNames = bundleApiNames(bundle);
   const isKnownAppPath = isAppPath(location.pathname, apiNames);
-  // Unknown-route states wait for a successful bundle load so a valid route
-  // never flashes "not found" while the bundle is loading or refetching.
+  // Unknown-route states need bundle data, so a valid route never flashes
+  // "not found" before the first load. Keyed on data rather than fetch status:
+  // a failed refetch keeps the last bundle, and the gates keep applying to it.
+  const isBundleLoaded = bundle !== undefined;
   const unknownApiName =
     IS_TOP_LEVEL && isBundleLoaded && !isKnownAppPath ? currentApiName : undefined;
   const showEmbeddedHint = !IS_TOP_LEVEL && isBundleLoaded && !isKnownAppPath;
@@ -331,7 +329,9 @@ export const App: FC = () => {
     });
   }, [location.pathname, shouldSavePath]);
 
-  const currentApp = currentApiName ? apps.find((a) => a.api_name === currentApiName) : undefined;
+  const currentApp = currentApiName
+    ? bundle?.find((a) => a.api_name === currentApiName)
+    : undefined;
   const hasCodeSteps = (currentApp?.artifacts.automation_action_configs.length ?? 0) > 0;
 
   const currentPluginInBundle = currentApp !== undefined;
