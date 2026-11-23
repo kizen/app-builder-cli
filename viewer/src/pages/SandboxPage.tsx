@@ -85,15 +85,10 @@ const SandboxPageInner: FC<{
 
   const app = bundle?.find((a) => a.api_name === apiName);
 
+  // App renders <AppNotFound /> in place of this page when the api name isn't
+  // in the loaded bundle, so this only narrows `app`.
   if (!app) {
-    return (
-      <Card>
-        <p className="m-0 text-[13px] text-neutral-500">
-          No app found with api_name{' '}
-          <code className="rounded bg-neutral-100 px-1 py-0.5">{apiName}</code>.
-        </p>
-      </Card>
-    );
+    return null;
   }
 
   const floatingFrames = app.artifacts.floating_frames.map(
@@ -307,6 +302,9 @@ const SandboxPageInner: FC<{
       </div>
 
       {floatingFrames.length > 0 && (
+        // Deliberately no z-index: the gutter spans the full viewport height, and
+        // lifting it would paint its translucent blur over the sticky header and
+        // NavTabs. Circle triggers portal into the anchors below and stay here.
         <div className="pointer-events-none fixed inset-0">
           {/* Right-side gutter for circle triggers */}
           <div
@@ -338,6 +336,18 @@ const SandboxPageInner: FC<{
               </span>
             </label>
           </div>
+        </div>
+      )}
+
+      {floatingFrames.length > 0 && (
+        // A fixed element creates its own stacking context, so each Frame's
+        // BASE_Z z-index only orders frames against each other in here. z-[15]
+        // lifts the frame bodies above page content (z-10 sticky header, sandbox
+        // panels; z-[9] NavTabs) and keeps them below PluginToast (z-20), Tooltip
+        // (z-50), Dialog (z-[99999]) and DropdownPortal (999999). Order relative
+        // to the gutter doesn't matter: triggers portal into the gutter's anchors
+        // by id, and z-[15] paints this layer above the gutter regardless.
+        <div className="pointer-events-none fixed inset-0 z-[15]">
           {floatingFrames.map((frame) => (
             <Frame
               key={frame.api_name}

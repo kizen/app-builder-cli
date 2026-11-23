@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   PluginValidationError,
@@ -114,7 +115,21 @@ export async function runBuild(
     key === 'allReleaseNotes' ? undefined : value;
   const bundleSize = Buffer.byteLength(JSON.stringify(bundle, stripReleaseNotes, 2), 'utf-8');
 
-  await writeFile(join(outputDir, 'bundle.json'), jsonStr, 'utf-8');
+  // Write to a temp file in the same directory, then rename it over
+  // bundle.json. A same-directory rename is atomic on POSIX, so the dev server
+  // and viewer reading bundle.json mid-build see the previous complete file or
+  // the new one, never a partial write that parses as "no apps".
+  const bundlePath = join(outputDir, 'bundle.json');
+  const tmpPath = `${bundlePath}.${String(process.pid)}.${randomBytes(6).toString('hex')}.tmp`;
+
+  try {
+    await writeFile(tmpPath, jsonStr, 'utf-8');
+    await rename(tmpPath, bundlePath);
+  } catch (error) {
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+
+    throw error;
+  }
 
   return { bundleSize };
 }
