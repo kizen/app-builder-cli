@@ -12,6 +12,7 @@ import {
 import type { Credentials } from '../lib/credentials.js';
 import { loadConfig, saveConfig } from '../lib/config.js';
 import { ensureGitignore } from '../lib/gitignore.js';
+import { resolveRestorableLastPath } from '../lib/lastPath.js';
 
 async function runSetupUI(initialMode?: CredentialMode): Promise<CredentialSetupResult> {
   return new Promise((resolve) => {
@@ -65,7 +66,9 @@ export function devCommand(program: Command): void {
         let credentials: Credentials | null = null;
         let credentialMode: CredentialMode | undefined;
         let activeCredentialProfile: string | undefined;
-        const { lastPath } = await loadConfig(outputDir);
+        // Drops (and removes from config.json) a saved path whose app is no longer
+        // in bundle.json, so the viewer opens at / instead of "No app found".
+        const lastPath = await resolveRestorableLastPath(outputDir);
 
         if (options.credentials) {
           credentials = await loadCredentialsFromFile(options.credentials);

@@ -20,6 +20,7 @@ import { launchChromeViewer, type ChromeViewerHandle } from '../chrome/launcher.
 import { runBuild } from '../lib/runBuild.js';
 import type { Credentials } from '../lib/credentials.js';
 import { saveConfig } from '../lib/config.js';
+import { restorablePath } from '../lib/lastPath.js';
 import { LOG_LIMIT, LOG_DISPLAY, FILE_WATCH_DEBOUNCE_MS } from '../lib/constants.js';
 import { formatBytes } from '../../shared/lib/formatBytes.js';
 import { useLogHistory } from '../hooks/useLogHistory.js';
@@ -130,19 +131,32 @@ export const DevUI: FC<DevUIProps> = ({
 
     chromeHandleRef.current = null;
 
-    void launchChromeViewer({
-      port,
-      userDataDir: join(outputDir, '.chrome'),
-      broadcast,
-      onWarn: (msg) => {
-        appendServerLog(`⚠ ${msg}`);
-      },
-      ...(lastPathRef.current !== undefined && { path: lastPathRef.current }),
-      ...(debug && { debugLog: appendCdpLog }),
-      ...(verbose && { verbose: true }),
-    }).then((handle) => {
-      chromeHandleRef.current = handle;
-    });
+    const savedPath = lastPathRef.current;
+
+    // Re-check against the current bundle.json: a rebuild this session may have
+    // renamed or removed the app the saved path points at (KZN-19663).
+    void restorablePath(outputDir, savedPath)
+      .then((path) => {
+        // Only clear the ref if the server hasn't stored a newer path meanwhile.
+        if (path === undefined && lastPathRef.current === savedPath) {
+          lastPathRef.current = undefined;
+        }
+
+        return launchChromeViewer({
+          port,
+          userDataDir: join(outputDir, '.chrome'),
+          broadcast,
+          onWarn: (msg) => {
+            appendServerLog(`⚠ ${msg}`);
+          },
+          ...(path !== undefined && { path }),
+          ...(debug && { debugLog: appendCdpLog }),
+          ...(verbose && { verbose: true }),
+        });
+      })
+      .then((handle) => {
+        chromeHandleRef.current = handle;
+      });
   }, [port, outputDir, broadcast, debug, verbose, appendCdpLog, appendServerLog]);
 
   useEffect(() => {

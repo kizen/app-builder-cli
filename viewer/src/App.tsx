@@ -21,6 +21,8 @@ import { AppSelector } from './components/AppSelector.js';
 import { NavTabs } from './components/NavTabs.js';
 import { Dialog, DialogHeader } from './components/Dialog.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
+import { AppNotFound } from './components/AppNotFound.js';
+import { EmbeddedRouteHint } from './components/EmbeddedRouteHint.js';
 
 const DevSidebar = lazy(() =>
   import('./components/DevSidebar.js').then((m) => ({ default: m.DevSidebar })),
@@ -28,6 +30,7 @@ const DevSidebar = lazy(() =>
 
 import { CredentialsContext, type Credentials } from './CredentialsContext.js';
 import { normalizeCredentialIds } from '@shared/lib/credentials.js';
+import { apiNameFromPath, bundleApiNames, isAppPath } from '@shared/lib/lastPath.js';
 import { BootstrapContext } from './BootstrapContext.js';
 import type { BootstrapData } from './BootstrapContext.js';
 import { STORAGE_KEYS, setCredentialPrefix } from './lib/storageKeys.js';
@@ -35,6 +38,12 @@ import { pushConsole, type ConsoleEntry } from './consoleCapture.js';
 
 // Capture before SandboxPage can override window.open for plugin intercepts
 const nativeOpen = window.open.bind(window);
+
+// False when this viewer copy is loaded inside an iframe, e.g. a plugin frame
+// that iframes `${this.location.origin}/embed/...`: in the dev viewer that
+// origin is the viewer itself. Framed copies render no viewer chrome and never
+// persist their path (KZN-19663). Fixed for the life of the document.
+const IS_TOP_LEVEL = window.self === window.top;
 
 const DEFAULT_SIDEBAR_WIDTH = 416;
 const MIN_SIDEBAR_WIDTH = 280;
@@ -204,6 +213,7 @@ export const App: FC = () => {
     data: bundle,
     isLoading: isLoadingBundle,
     isError: isErrorBundle,
+    isSuccess: isBundleLoaded,
   } = useQuery(bundleQueryOptions);
 
   const {
@@ -294,26 +304,37 @@ export const App: FC = () => {
   });
 
   const { location } = useRouterState();
-  const currentApiName = /^\/([^/]+)\/.+/.exec(location.pathname)?.[1];
+  const currentApiName = apiNameFromPath(location.pathname);
   const currentSubPage = /^\/[^/]+\/([^/]+)/.exec(location.pathname)?.[1];
 
-  useEffect(() => {
-    if (location.pathname !== '/') {
-      void fetch('/api/last-path', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: location.pathname }),
-      });
-    }
-  }, [location.pathname]);
+  // /api/bundle serves `{}` when no bundle has been built, so the query data
+  // isn't guaranteed to be an array at runtime.
+  const apps = Array.isArray(bundle) ? bundle : [];
+  const apiNames = bundleApiNames(bundle);
+  const isKnownAppPath = isAppPath(location.pathname, apiNames);
+  // Unknown-route states wait for a successful bundle load so a valid route
+  // never flashes "not found" while the bundle is loading or refetching.
+  const unknownApiName =
+    IS_TOP_LEVEL && isBundleLoaded && !isKnownAppPath ? currentApiName : undefined;
+  const showEmbeddedHint = !IS_TOP_LEVEL && isBundleLoaded && !isKnownAppPath;
+  const shouldSavePath = IS_TOP_LEVEL && isKnownAppPath;
 
-  const currentApp = currentApiName
-    ? bundle?.find((a) => a.api_name === currentApiName)
-    : undefined;
+  useEffect(() => {
+    if (!shouldSavePath) {
+      return;
+    }
+
+    void fetch('/api/last-path', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: location.pathname }),
+    });
+  }, [location.pathname, shouldSavePath]);
+
+  const currentApp = currentApiName ? apps.find((a) => a.api_name === currentApiName) : undefined;
   const hasCodeSteps = (currentApp?.artifacts.automation_action_configs.length ?? 0) > 0;
 
-  const currentPluginInBundle =
-    !!currentApiName && !!bundle?.some((app) => app.api_name === currentApiName);
+  const currentPluginInBundle = currentApp !== undefined;
   const existingPluginEntry = currentApiName
     ? businessPluginApps?.find((p) => p.plugin_app.api_name === currentApiName)
     : undefined;
@@ -359,6 +380,41 @@ export const App: FC = () => {
       : !bootstrapData
         ? 'bg-yellow-100 text-yellow-700'
         : 'bg-green-100 text-green-700';
+
+  const routedContent =
+    unknownApiName !== undefined ? (
+      <AppNotFound apiName={unknownApiName} />
+    ) : showEmbeddedHint ? (
+      <EmbeddedRouteHint path={location.pathname} />
+    ) : (
+      <ErrorBoundary
+        fallback={(err) => (
+          <div className="mx-auto max-w-md rounded border border-red-200 bg-red-50 p-4 text-[12px] text-red-800">
+            <p className="m-0 font-semibold">Failed to render this view.</p>
+            <p className="m-0 mt-1 text-red-700">{err.message}</p>
+            <p className="m-0 mt-2 text-red-600">Reload the page to recover.</p>
+          </div>
+        )}
+      >
+        <Suspense fallback={null}>
+          <Outlet />
+        </Suspense>
+      </ErrorBoundary>
+    );
+
+  // A framed copy renders only the routed content: no header, app selector,
+  // install badge, nav tabs, devtools sidebar, or dialogs.
+  if (!IS_TOP_LEVEL) {
+    return (
+      <CredentialsContext.Provider value={credentials}>
+        <SidebarContext.Provider value={0}>
+          <BootstrapContext.Provider value={bootstrapData}>
+            <div className="h-screen overflow-y-auto bg-white p-4 font-mono">{routedContent}</div>
+          </BootstrapContext.Provider>
+        </SidebarContext.Provider>
+      </CredentialsContext.Provider>
+    );
+  }
 
   return (
     <CredentialsContext.Provider value={credentials}>
@@ -448,7 +504,7 @@ export const App: FC = () => {
               </span>
             </div>
 
-            {currentApiName && (
+            {currentApiName && unknownApiName === undefined && (
               <NavTabs
                 currentApiName={currentApiName}
                 currentSubPage={currentSubPage}
@@ -467,19 +523,7 @@ export const App: FC = () => {
                   backgroundSize: '24px 24px',
                 }}
               >
-                <ErrorBoundary
-                  fallback={(err) => (
-                    <div className="mx-auto max-w-md rounded border border-red-200 bg-red-50 p-4 text-[12px] text-red-800">
-                      <p className="m-0 font-semibold">Failed to render this view.</p>
-                      <p className="m-0 mt-1 text-red-700">{err.message}</p>
-                      <p className="m-0 mt-2 text-red-600">Reload the page to recover.</p>
-                    </div>
-                  )}
-                >
-                  <Suspense fallback={null}>
-                    <Outlet />
-                  </Suspense>
-                </ErrorBoundary>
+                {routedContent}
               </div>
               {sidebarOpen && (
                 <ErrorBoundary

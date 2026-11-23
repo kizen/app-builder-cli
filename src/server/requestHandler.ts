@@ -18,11 +18,13 @@ import {
   loadGlobalCredentials,
 } from '../lib/credentials.js';
 import { loadConfig, saveConfig } from '../lib/config.js';
+import { readBundleApiNames } from '../lib/lastPath.js';
 import { resolveWizardBase } from '../lib/wizardUrl.js';
 import { executePythonStep } from './pythonExecutor.js';
 import { SKIP_DIRS } from '../lib/readFiles.js';
 import { TEXT_EXTENSIONS } from '../../shared/lib/fileExtensions.js';
 import { normalizeStepInputs } from '../../shared/lib/execution.js';
+import { isAppPath } from '../../shared/lib/lastPath.js';
 import {
   CRYPTO_ALG,
   CRYPTO_VERSION,
@@ -352,7 +354,13 @@ export function createRequestHandler(
             path?: string;
           };
 
-          if (typeof body.path === 'string') {
+          // Only persist routes of an app in the bundle. A viewer copy loaded in
+          // a plugin iframe at e.g. /embed/ai-chat would otherwise save a path
+          // the next dev start reopens as "No app found" (KZN-19663).
+          if (
+            typeof body.path === 'string' &&
+            isAppPath(body.path, await readBundleApiNames(outputDir))
+          ) {
             lastPathRef.current = body.path;
 
             const currentConfig = await loadConfig(outputDir);

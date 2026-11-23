@@ -442,15 +442,10 @@ const ConfigurationPageContent: FC = () => {
     );
   }
 
+  // App renders <AppNotFound /> in place of this page when the api name isn't
+  // in the loaded bundle, so this only narrows `app`.
   if (!app) {
-    return (
-      <Card>
-        <p className="m-0 text-[13px] text-neutral-500">
-          No app found with api_name{' '}
-          <code className="rounded bg-neutral-100 px-1 py-0.5">{apiName}</code>.
-        </p>
-      </Card>
-    );
+    return null;
   }
 
   const setupAssistant = baseConfig?.setup_assistant;

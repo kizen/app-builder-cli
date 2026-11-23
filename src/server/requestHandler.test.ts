@@ -210,37 +210,81 @@ describe('createRequestHandler routes', () => {
   });
 
   describe('POST /api/last-path', () => {
-    it('stores the path in the ref and merges it into the saved config', async () => {
+    async function writeBundle(apiNames: string[]): Promise<void> {
+      await writeFile(
+        join(outputDir, 'bundle.json'),
+        JSON.stringify(apiNames.map((api_name) => ({ api_name }))),
+      );
+    }
+
+    function postLastPath(path: unknown): Promise<HttpResponse> {
+      return requestLocal(port, '/api/last-path', {
+        method: 'POST',
+        headers: { origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+    }
+
+    it('stores a bundle app path in the ref and merges it into the saved config', async () => {
+      await writeBundle(['demo_app']);
       await writeFile(
         join(outputDir, 'config.json'),
         JSON.stringify({ encryptionTarget: 'dev', credentialMode: 'global' }),
       );
 
-      const response = await requestLocal(port, '/api/last-path', {
-        method: 'POST',
-        headers: { origin, 'content-type': 'application/json' },
-        body: JSON.stringify({ path: '/objects/leads' }),
-      });
+      const response = await postLastPath('/demo_app/sandbox');
 
       expect(response.status).toBe(200);
       expect(jsonBody(response)).toEqual({ ok: true });
-      expect(lastPathRef.current).toBe('/objects/leads');
+      expect(lastPathRef.current).toBe('/demo_app/sandbox');
       expect(await readSavedConfig()).toEqual({
         credentialMode: 'global',
         encryptionTarget: 'dev',
-        lastPath: '/objects/leads',
+        lastPath: '/demo_app/sandbox',
       });
     });
 
+    it.each(['/embed/sandbox', '/embed/ai-chat'])(
+      'ignores %o when embed is not a bundle app, keeping the saved path',
+      async (path) => {
+        await writeBundle(['demo_app']);
+        await writeFile(
+          join(outputDir, 'config.json'),
+          JSON.stringify({ credentialMode: 'global', lastPath: '/demo_app/summary' }),
+        );
+        lastPathRef.current = '/demo_app/summary';
+
+        const response = await postLastPath(path);
+
+        expect(response.status).toBe(200);
+        expect(jsonBody(response)).toEqual({ ok: true });
+        expect(lastPathRef.current).toBe('/demo_app/summary');
+        expect(await readSavedConfig()).toEqual({
+          credentialMode: 'global',
+          lastPath: '/demo_app/summary',
+        });
+      },
+    );
+
+    it('ignores every path when bundle.json is missing', async () => {
+      await writeFile(join(outputDir, 'config.json'), JSON.stringify({ credentialMode: 'local' }));
+
+      const response = await postLastPath('/demo_app/sandbox');
+
+      expect(response.status).toBe(200);
+      expect(jsonBody(response)).toEqual({ ok: true });
+      expect(lastPathRef.current).toBeUndefined();
+      expect(await readSavedConfig()).toEqual({ credentialMode: 'local' });
+    });
+
     it('ignores a non-string path without failing the request', async () => {
-      const response = await requestLocal(port, '/api/last-path', {
-        method: 'POST',
-        headers: { origin, 'content-type': 'application/json' },
-        body: JSON.stringify({ path: 42 }),
-      });
+      await writeBundle(['demo_app']);
+
+      const response = await postLastPath(42);
 
       expect(response.status).toBe(200);
       expect(lastPathRef.current).toBeUndefined();
+      await expect(readSavedConfig()).rejects.toThrow();
     });
   });
 
@@ -308,6 +352,10 @@ describe('createRequestHandler routes', () => {
 
   describe('write guard (local origin)', () => {
     it('rejects a POST with no Origin header', async () => {
+      // A bundle containing the app makes the path otherwise storable, so only
+      // the origin guard keeps the ref empty.
+      await writeFile(join(outputDir, 'bundle.json'), JSON.stringify([{ api_name: 'objects' }]));
+
       const response = await requestLocal(port, '/api/last-path', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
