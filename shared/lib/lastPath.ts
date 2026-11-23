@@ -27,8 +27,29 @@ export function bundleApiNames(bundle: unknown): string[] {
   });
 }
 
-/** True when `path` is a viewer app route whose `$apiName` is one of `apiNames`. */
+/**
+ * True when URL parsing leaves `path` unchanged. The viewer is opened at
+ * `${baseUrl}${path}`, so a path with dot segments (`..`, `%2e%2e`, `.`), a
+ * query, a hash, backslashes or a leading `//` would open a different page
+ * than the one checked. Input URL parsing rejects counts as not canonical.
+ */
+export function isCanonicalPathname(path: string): boolean {
+  try {
+    return new URL(path, 'http://localhost').pathname === path;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when `path` is a canonical viewer app route whose `$apiName` is one of
+ * `apiNames`: the path the browser opens is exactly the path checked.
+ */
 export function isAppPath(path: string, apiNames: readonly string[]): boolean {
+  if (!isCanonicalPathname(path)) {
+    return false;
+  }
+
   const apiName = apiNameFromPath(path);
 
   return apiName !== undefined && apiNames.includes(apiName);

@@ -106,6 +106,21 @@ describe('resolveRestorableLastPath', () => {
     });
   });
 
+  it('drops and heals a lastPath that normalizes onto an unknown app', async () => {
+    await writeBundle(['demo_app']);
+    await writeRawConfig({
+      credentialMode: 'global',
+      encryptionTarget: 'dev',
+      lastPath: '/demo_app/../embed/sandbox',
+    });
+
+    await expect(resolveRestorableLastPath(outputDir)).resolves.toBeUndefined();
+    expect(JSON.parse(await readRawConfig())).toEqual({
+      credentialMode: 'global',
+      encryptionTarget: 'dev',
+    });
+  });
+
   it('drops and heals a lastPath when bundle.json is missing', async () => {
     await writeRawConfig({ credentialMode: 'local', lastPath: '/demo_app/sandbox' });
 

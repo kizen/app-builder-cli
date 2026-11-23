@@ -74,4 +74,38 @@ describe('isAppPath', () => {
   it('rejects every path when the bundle has no apps', () => {
     expect(isAppPath('/app/sandbox', [])).toBe(false);
   });
+
+  // Chrome opens `${baseUrl}${path}`, and URL parsing normalizes the path. A
+  // path is only accepted when that normalization leaves it unchanged, so the
+  // page that opens is the page that was checked.
+  it.each([
+    '/demo_app/../embed/sandbox',
+    '/demo_app/%2e%2e/embed/sandbox',
+    '/demo_app/%2E%2E/embed/sandbox',
+    '/demo_app/./sandbox',
+    '/demo_app/sandbox?x=1',
+    '/demo_app/sandbox#h',
+    '//demo_app/sandbox',
+    '/demo_app\\..\\embed\\sandbox',
+  ])('rejects the noncanonical path %o even though its first segment is a bundle app', (path) => {
+    expect(isAppPath(path, apiNames)).toBe(false);
+  });
+
+  it('still accepts canonical app paths', () => {
+    expect(isAppPath('/demo_app/sandbox', apiNames)).toBe(true);
+    expect(isAppPath('/demo_app/code-steps/run_report', apiNames)).toBe(true);
+  });
+
+  it('accepts an already-encoded segment, which URL parsing leaves as is', () => {
+    expect(isAppPath('/demo_app/code-steps/a%20b', apiNames)).toBe(true);
+  });
+
+  it('rejects a segment URL parsing would percent-encode', () => {
+    expect(isAppPath('/demo_app/code-steps/a b', apiNames)).toBe(false);
+  });
+
+  it('rejects input URL parsing cannot handle instead of throwing', () => {
+    expect(() => isAppPath('//[', apiNames)).not.toThrow();
+    expect(isAppPath('//[', apiNames)).toBe(false);
+  });
 });

@@ -266,6 +266,25 @@ describe('createRequestHandler routes', () => {
       },
     );
 
+    it('ignores a dot-segment path that would open an unknown app', async () => {
+      await writeBundle(['demo_app']);
+      await writeFile(
+        join(outputDir, 'config.json'),
+        JSON.stringify({ credentialMode: 'global', lastPath: '/demo_app/summary' }),
+      );
+      lastPathRef.current = '/demo_app/summary';
+
+      const response = await postLastPath('/demo_app/../embed/sandbox');
+
+      expect(response.status).toBe(200);
+      expect(jsonBody(response)).toEqual({ ok: true });
+      expect(lastPathRef.current).toBe('/demo_app/summary');
+      expect(await readSavedConfig()).toEqual({
+        credentialMode: 'global',
+        lastPath: '/demo_app/summary',
+      });
+    });
+
     it('ignores every path when bundle.json is missing', async () => {
       await writeFile(join(outputDir, 'config.json'), JSON.stringify({ credentialMode: 'local' }));
 
